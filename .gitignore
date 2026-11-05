@@ -1,0 +1,42 @@
+# Environment Variables
+.env
+.env.local
+.env.*.local
+
+# Next.js Build Output
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+next-env.d.ts
+
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Database Backups & Temporary Dumps
+database/backup_*.sql
+*.dump
+*.backup
+
+# OS Generated Files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# IDE & Editor Settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local File Uploads Storage
+storage/uploads/*
+!storage/uploads/.gitkeep
+
+# Uploaded repair images
+/public/uploads/repairs/*
+!/public/uploads/repairs/.gitkeep

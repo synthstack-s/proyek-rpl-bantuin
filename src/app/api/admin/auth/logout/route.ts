@@ -1,0 +1,21 @@
+import { NextResponse } from 'next/server';
+import { ADMIN_COOKIE_NAME } from '@/lib/auth';
+
+export async function POST() {
+  const response = NextResponse.json(
+    { success: true, message: 'Sesi administrator berhasil diakhiri' },
+    { status: 200 }
+  );
+
+  // Hapus cookie sesi dengan menimpa nilai kosong dan maxAge: 0
+  response.cookies.set(ADMIN_COOKIE_NAME, '', {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    path: '/',
+    maxAge: 0,
+    expires: new Date(0),
+  });
+
+  return response;
+}

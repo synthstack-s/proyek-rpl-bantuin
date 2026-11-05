@@ -1,0 +1,1426 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --smoky-black: #11120d;
+    --smoky-black-elevated: #161712;
+    --smoky-black-card: #1c1d17;
+    --smoky-black-surface: #22241d;
+    --olive-drab: #565449;
+    --olive-drab-light: #706e61;
+    --olive-drab-muted: #3c3a32;
+    --bone: #d8cfbc;
+    --bone-muted: #aba291;
+    --bone-subtle: rgba(216, 207, 188, 0.12);
+    --floral-white: #fffbf4;
+    --floral-white-pure: #ffffff;
+  }
+
+  body {
+    color: #fffbf4;
+    background-color: #11120d;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+/* ==============================================================================
+ * LIQUID GLASS DESIGN SYSTEM (iOS-Inspired Glassmorphism)
+ * Translucent surfaces, subtle blur, soft highlights, and delicate bone borders.
+ * ============================================================================== */
+
+/* Glass Surface - Standard Card */
+.liquid-glass {
+  background-color: rgba(22, 23, 18, 0.72);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  border: 1px solid rgba(216, 207, 188, 0.12);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.4), inset 0 1px 0 0 rgba(255, 251, 244, 0.08);
+}
+
+/* Glass Surface - Elevated (Modals, Dropdowns, Floating Panels) */
+.liquid-glass-elevated {
+  background-color: rgba(28, 29, 23, 0.82);
+  backdrop-filter: blur(24px) saturate(190%);
+  -webkit-backdrop-filter: blur(24px) saturate(190%);
+  border: 1px solid rgba(216, 207, 188, 0.2);
+  box-shadow: 0 16px 48px 0 rgba(0, 0, 0, 0.55), inset 0 1px 0 0 rgba(255, 251, 244, 0.14);
+}
+
+/* Glass Surface - Subtle (Secondary cards, nested items) */
+.liquid-glass-subtle {
+  background-color: rgba(20, 21, 16, 0.5);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(86, 84, 73, 0.28);
+}
+
+/* Glass Navigation Bar / Topbar (Floating & Sticky) */
+.liquid-glass-nav {
+  background-color: rgba(17, 18, 13, 0.8);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-bottom: 1px solid rgba(216, 207, 188, 0.1);
+}
+
+/* Glass Floating Capsule Bar */
+.liquid-glass-capsule {
+  background-color: rgba(25, 26, 20, 0.75);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(216, 207, 188, 0.18);
+  box-shadow: 0 10px 30px -5px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 251, 244, 0.1);
+}
+
+/* Glass Badge / Pill */
+.liquid-glass-pill {
+  background-color: rgba(86, 84, 73, 0.24);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(216, 207, 188, 0.16);
+  color: #fffbf4;
+}
+
+/* Glass Input Field */
+.liquid-glass-input {
+  background-color: rgba(22, 23, 18, 0.6);
+  border: 1px solid rgba(86, 84, 73, 0.4);
+  color: #fffbf4;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.liquid-glass-input:focus {
+  background-color: rgba(28, 29, 23, 0.85);
+  border-color: rgba(216, 207, 188, 0.6);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(216, 207, 188, 0.15), inset 0 1px 0 rgba(255, 251, 244, 0.1);
+}
+
+.liquid-glass-input::placeholder {
+  color: rgba(171, 162, 145, 0.6);
+}
+
+/* Glass Interactive Buttons */
+.liquid-glass-btn-primary {
+  background-color: #fffbf4;
+  color: #11120d;
+  font-weight: 600;
+  border: 1px solid rgba(255, 251, 244, 0.4);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.liquid-glass-btn-primary:hover {
+  background-color: #eae3d5;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(216, 207, 188, 0.25);
+}
+
+.liquid-glass-btn-primary:active {
+  transform: translateY(0);
+}
+
+.liquid-glass-btn-secondary {
+  background-color: rgba(86, 84, 73, 0.28);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  color: #fffbf4;
+  border: 1px solid rgba(216, 207, 188, 0.18);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.liquid-glass-btn-secondary:hover {
+  background-color: rgba(86, 84, 73, 0.48);
+  border-color: rgba(216, 207, 188, 0.35);
+  transform: translateY(-1px);
+}
+
+/* Custom Scrollbar - Sleek iOS Style */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(86, 84, 73, 0.45);
+  border-radius: 9999px;
+  border: 1px solid rgba(216, 207, 188, 0.08);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(112, 110, 97, 0.65);
+}
+
+/* ==============================================================================
+ * BANTUIN OBSIDIAN DASHBOARD & ADMIN THEME SCOPE
+ * Deep smoky black surfaces with refined bone highlights and muted olive borders.
+ * Seamlessly matches and integrates with the untouched Admin Sidebar.
+ * ============================================================================== */
+.admin-theme-scope {
+  color-scheme: dark;
+}
+
+/* Cards & Background Containers in Admin */
+.admin-theme-scope .bg-white:not(.accent-white) {
+  background-color: #141510 !important;
+  color: #fffbf4 !important;
+  border-color: rgba(86, 84, 73, 0.3) !important;
+}
+
+.admin-theme-scope .bg-slate-50,
+.admin-theme-scope .bg-slate-50\/50,
+.admin-theme-scope .bg-slate-100 {
+  background-color: #181914 !important;
+  border-color: rgba(86, 84, 73, 0.3) !important;
+}
+
+.admin-theme-scope .border-slate-200,
+.admin-theme-scope .border-slate-200\/80,
+.admin-theme-scope .border-slate-300 {
+  border-color: rgba(86, 84, 73, 0.28) !important;
+}
+
+/* Typography & Contrast in Admin */
+.admin-theme-scope .text-slate-900 {
+  color: #fffbf4 !important;
+}
+
+.admin-theme-scope .text-slate-800 {
+  color: #f5eedf !important;
+}
+
+.admin-theme-scope .text-slate-700 {
+  color: #d8cfbc !important;
+}
+
+.admin-theme-scope .text-slate-600 {
+  color: #aba291 !important;
+}
+
+.admin-theme-scope .text-slate-500,
+.admin-theme-scope .text-slate-400 {
+  color: #8c8678 !important;
+}
+
+/* Form Inputs, Dropdowns & Textarea in Admin */
+.admin-theme-scope input:not([type="checkbox"]):not([type="radio"]),
+.admin-theme-scope select,
+.admin-theme-scope textarea {
+  background-color: rgba(22, 23, 18, 0.8) !important;
+  color: #fffbf4 !important;
+  border-color: rgba(86, 84, 73, 0.35) !important;
+}
+
+.admin-theme-scope input:focus,
+.admin-theme-scope select:focus,
+.admin-theme-scope textarea:focus {
+  border-color: rgba(216, 207, 188, 0.5) !important;
+  box-shadow: 0 0 0 2px rgba(216, 207, 188, 0.12) !important;
+}
+
+.admin-theme-scope input::placeholder,
+.admin-theme-scope textarea::placeholder {
+  color: rgba(138, 133, 120, 0.7) !important;
+}
+
+.admin-theme-scope select option {
+  background-color: #161712 !important;
+  color: #fffbf4 !important;
+}
+
+/* Tables in Admin */
+.admin-theme-scope table {
+  border-color: rgba(86, 84, 73, 0.25) !important;
+}
+
+.admin-theme-scope thead th {
+  background-color: rgba(24, 25, 20, 0.9) !important;
+  color: #aba291 !important;
+  border-color: rgba(86, 84, 73, 0.25) !important;
+}
+
+.admin-theme-scope tbody tr {
+  border-color: rgba(86, 84, 73, 0.2) !important;
+}
+
+.admin-theme-scope tbody tr:hover td {
+  background-color: rgba(86, 84, 73, 0.14) !important;
+}
+
+.admin-theme-scope tbody td {
+  border-color: rgba(86, 84, 73, 0.2) !important;
+}
+
+/* ==============================================================================
+ * AI PROVIDER MANAGEMENT - DUAL THEME ENGINE (LIGHT & DARK ADAPTIVE)
+ * ============================================================================== */
+
+/* ------------------------------------------------------------------------------
+ * 1. LIGHT MODE (TEMA TERANG: PURE WHITE #FFFFFF LUXURY SYSTEM)
+ * Tetap mempertahankan background putih bersih (#FFFFFF) untuk seluruh kartu & komponen
+ * ------------------------------------------------------------------------------ */
+html.light .ai-provider-white-container,
+html:not(.dark) .ai-provider-white-container {
+  background-color: #ffffff !important;
+  background-image: none !important;
+  color: #111827 !important;
+  border-color: #e5e7eb !important;
+}
+
+html.light .ai-provider-white-container .ai-white-card,
+html:not(.dark) .ai-provider-white-container .ai-white-card {
+  background-color: #ffffff !important;
+  color: #111827 !important;
+}
+
+html.light .ai-provider-white-container .ai-white-card:not([class*="ring-"]),
+html:not(.dark) .ai-provider-white-container .ai-white-card:not([class*="ring-"]) {
+  border-color: #e5e7eb !important;
+}
+
+html.light .ai-provider-white-container .ai-subcard,
+html:not(.dark) .ai-provider-white-container .ai-subcard {
+  background-color: #f9fafb !important;
+  color: #111827 !important;
+  border-color: #e5e7eb !important;
+}
+
+html.light .ai-provider-white-container input:not([type="checkbox"]):not([type="radio"]),
+html.light .ai-provider-white-container select,
+html.light .ai-provider-white-container textarea,
+html:not(.dark) .ai-provider-white-container input:not([type="checkbox"]):not([type="radio"]),
+html:not(.dark) .ai-provider-white-container select,
+html:not(.dark) .ai-provider-white-container textarea {
+  background-color: #ffffff !important;
+  color: #111827 !important;
+  border-color: #d1d5db !important;
+}
+
+html.light .ai-provider-white-container button.bg-white,
+html.light .ai-provider-white-container .ai-btn-white,
+html.light .ai-modal-box .ai-btn-white,
+html:not(.dark) .ai-provider-white-container button.bg-white,
+html:not(.dark) .ai-provider-white-container .ai-btn-white,
+html:not(.dark) .ai-modal-box .ai-btn-white {
+  background-color: #ffffff !important;
+  color: #374151 !important;
+  border-color: #d1d5db !important;
+}
+
+html.light .ai-provider-white-container button.bg-white:hover,
+html.light .ai-provider-white-container .ai-btn-white:hover,
+html.light .ai-modal-box .ai-btn-white:hover,
+html:not(.dark) .ai-provider-white-container button.bg-white:hover,
+html:not(.dark) .ai-provider-white-container .ai-btn-white:hover,
+html:not(.dark) .ai-modal-box .ai-btn-white:hover {
+  background-color: #f9fafb !important;
+  color: #111827 !important;
+}
+
+html.light .ai-provider-white-container select option,
+html:not(.dark) .ai-provider-white-container select option {
+  background-color: #ffffff !important;
+  color: #111827 !important;
+}
+
+html.light .ai-modal-box,
+html:not(.dark) .ai-modal-box {
+  background-color: #ffffff !important;
+  color: #111827 !important;
+  border-color: #e5e7eb !important;
+}
+
+html.light .ai-provider-white-container .text-gray-900,
+html:not(.dark) .ai-provider-white-container .text-gray-900 {
+  color: #111827 !important;
+}
+html.light .ai-provider-white-container .text-gray-800,
+html:not(.dark) .ai-provider-white-container .text-gray-800 {
+  color: #1f2937 !important;
+}
+html.light .ai-provider-white-container .text-gray-700,
+html:not(.dark) .ai-provider-white-container .text-gray-700 {
+  color: #374151 !important;
+}
+html.light .ai-provider-white-container .text-gray-600,
+html:not(.dark) .ai-provider-white-container .text-gray-600 {
+  color: #4b5563 !important;
+}
+html.light .ai-provider-white-container .text-gray-500,
+html:not(.dark) .ai-provider-white-container .text-gray-500 {
+  color: #6b7280 !important;
+}
+
+/* ------------------------------------------------------------------------------
+ * 2. DARK MODE (TEMA GELAP: SLEEK BANTUIN OBSIDIAN #141510 & #181913 SYSTEM)
+ * Mengubah container, kartu, dan komponen menjadi gelap berkelas tanpa mengubah tema terang
+ * ------------------------------------------------------------------------------ */
+html.dark .ai-provider-white-container,
+html[data-theme="dark"] .ai-provider-white-container {
+  background-color: #141510 !important;
+  background-image: none !important;
+  color: #fffbf4 !important;
+  border-color: rgba(216, 207, 188, 0.15) !important;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45) !important;
+}
+
+html.dark .ai-provider-white-container .ai-white-card,
+html[data-theme="dark"] .ai-provider-white-container .ai-white-card {
+  background-color: #181913 !important;
+  color: #fffbf4 !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3) !important;
+}
+
+html.dark .ai-provider-white-container .ai-white-card:not([class*="ring-"]),
+html[data-theme="dark"] .ai-provider-white-container .ai-white-card:not([class*="ring-"]) {
+  border-color: rgba(216, 207, 188, 0.12) !important;
+}
+
+html.dark .ai-provider-white-container .ai-white-card:not([class*="ring-"]):hover,
+html[data-theme="dark"] .ai-provider-white-container .ai-white-card:not([class*="ring-"]):hover {
+  border-color: rgba(216, 207, 188, 0.25) !important;
+}
+
+html.dark .ai-provider-white-container .ai-subcard,
+html[data-theme="dark"] .ai-provider-white-container .ai-subcard {
+  background-color: #11120d !important;
+  color: #fffbf4 !important;
+  border-color: rgba(216, 207, 188, 0.1) !important;
+}
+
+html.dark .ai-provider-white-container input:not([type="checkbox"]):not([type="radio"]),
+html.dark .ai-provider-white-container select,
+html.dark .ai-provider-white-container textarea,
+html.dark .ai-modal-box input:not([type="checkbox"]):not([type="radio"]),
+html.dark .ai-modal-box select,
+html.dark .ai-modal-box textarea,
+html[data-theme="dark"] .ai-provider-white-container input:not([type="checkbox"]):not([type="radio"]),
+html[data-theme="dark"] .ai-provider-white-container select,
+html[data-theme="dark"] .ai-provider-white-container textarea,
+html[data-theme="dark"] .ai-modal-box input:not([type="checkbox"]):not([type="radio"]),
+html[data-theme="dark"] .ai-modal-box select,
+html[data-theme="dark"] .ai-modal-box textarea {
+  background-color: #11120d !important;
+  color: #fffbf4 !important;
+  border-color: rgba(216, 207, 188, 0.2) !important;
+}
+
+html.dark .ai-provider-white-container input:focus,
+html.dark .ai-provider-white-container select:focus,
+html.dark .ai-provider-white-container textarea:focus,
+html.dark .ai-modal-box input:focus,
+html.dark .ai-modal-box select:focus,
+html.dark .ai-modal-box textarea:focus,
+html[data-theme="dark"] .ai-provider-white-container input:focus,
+html[data-theme="dark"] .ai-provider-white-container select:focus,
+html[data-theme="dark"] .ai-provider-white-container textarea:focus,
+html[data-theme="dark"] .ai-modal-box input:focus,
+html[data-theme="dark"] .ai-modal-box select:focus,
+html[data-theme="dark"] .ai-modal-box textarea:focus {
+  border-color: rgba(216, 207, 188, 0.5) !important;
+  box-shadow: 0 0 0 2px rgba(216, 207, 188, 0.12) !important;
+}
+
+html.dark .ai-provider-white-container input::placeholder,
+html.dark .ai-provider-white-container textarea::placeholder,
+html.dark .ai-modal-box input::placeholder,
+html.dark .ai-modal-box textarea::placeholder,
+html[data-theme="dark"] .ai-provider-white-container input::placeholder,
+html[data-theme="dark"] .ai-provider-white-container textarea::placeholder,
+html[data-theme="dark"] .ai-modal-box input::placeholder,
+html[data-theme="dark"] .ai-modal-box textarea::placeholder {
+  color: rgba(139, 136, 120, 0.7) !important;
+}
+
+html.dark .ai-provider-white-container select option,
+html.dark .ai-modal-box select option,
+html[data-theme="dark"] .ai-provider-white-container select option,
+html[data-theme="dark"] .ai-modal-box select option {
+  background-color: #161712 !important;
+  color: #fffbf4 !important;
+}
+
+html.dark .ai-provider-white-container button.bg-white,
+html.dark .ai-provider-white-container .ai-btn-white,
+html.dark .ai-modal-box .ai-btn-white,
+html[data-theme="dark"] .ai-provider-white-container button.bg-white,
+html[data-theme="dark"] .ai-provider-white-container .ai-btn-white,
+html[data-theme="dark"] .ai-modal-box .ai-btn-white {
+  background-color: #181913 !important;
+  color: #d8cfbc !important;
+  border-color: rgba(216, 207, 188, 0.2) !important;
+}
+
+html.dark .ai-provider-white-container button.bg-white:hover,
+html.dark .ai-provider-white-container .ai-btn-white:hover,
+html.dark .ai-modal-box .ai-btn-white:hover,
+html[data-theme="dark"] .ai-provider-white-container button.bg-white:hover,
+html[data-theme="dark"] .ai-provider-white-container .ai-btn-white:hover,
+html[data-theme="dark"] .ai-modal-box .ai-btn-white:hover {
+  background-color: #1c1d17 !important;
+  color: #fffbf4 !important;
+  border-color: rgba(216, 207, 188, 0.35) !important;
+}
+
+/* Modals in Dark Mode */
+html.dark .ai-modal-box,
+html.dark .fixed .ai-modal-box,
+html.dark .ai-provider-white-container .bg-white.shadow-2xl,
+html.dark .fixed .bg-white.shadow-2xl,
+html[data-theme="dark"] .ai-modal-box,
+html[data-theme="dark"] .fixed .ai-modal-box,
+html[data-theme="dark"] .ai-provider-white-container .bg-white.shadow-2xl,
+html[data-theme="dark"] .fixed .bg-white.shadow-2xl {
+  background-color: #181913 !important;
+  color: #fffbf4 !important;
+  border-color: rgba(216, 207, 188, 0.2) !important;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.7) !important;
+}
+
+/* Text Colors in Dark Mode */
+html.dark .ai-provider-white-container .text-gray-900,
+html.dark .ai-modal-box .text-gray-900,
+html[data-theme="dark"] .ai-provider-white-container .text-gray-900,
+html[data-theme="dark"] .ai-modal-box .text-gray-900 {
+  color: #fffbf4 !important;
+}
+html.dark .ai-provider-white-container .text-gray-800,
+html.dark .ai-modal-box .text-gray-800,
+html[data-theme="dark"] .ai-provider-white-container .text-gray-800,
+html[data-theme="dark"] .ai-modal-box .text-gray-800 {
+  color: #f5eedf !important;
+}
+html.dark .ai-provider-white-container .text-gray-700,
+html.dark .ai-modal-box .text-gray-700,
+html[data-theme="dark"] .ai-provider-white-container .text-gray-700,
+html[data-theme="dark"] .ai-modal-box .text-gray-700 {
+  color: #d8cfbc !important;
+}
+html.dark .ai-provider-white-container .text-gray-600,
+html.dark .ai-modal-box .text-gray-600,
+html[data-theme="dark"] .ai-provider-white-container .text-gray-600,
+html[data-theme="dark"] .ai-modal-box .text-gray-600 {
+  color: #aba291 !important;
+}
+html.dark .ai-provider-white-container .text-gray-500,
+html.dark .ai-modal-box .text-gray-500,
+html[data-theme="dark"] .ai-provider-white-container .text-gray-500,
+html[data-theme="dark"] .ai-modal-box .text-gray-500 {
+  color: #8b8878 !important;
+}
+
+/* Dark Mode Brand Icon Containers */
+html.dark .ai-provider-white-container .bg-blue-50,
+html.dark .ai-modal-box .bg-blue-50,
+html[data-theme="dark"] .ai-provider-white-container .bg-blue-50,
+html[data-theme="dark"] .ai-modal-box .bg-blue-50 {
+  background-color: rgba(37, 99, 235, 0.15) !important;
+  border-color: rgba(59, 130, 246, 0.3) !important;
+  color: #93c5fd !important;
+}
+
+html.dark .ai-provider-white-container .bg-orange-50,
+html.dark .ai-modal-box .bg-orange-50,
+html[data-theme="dark"] .ai-provider-white-container .bg-orange-50,
+html[data-theme="dark"] .ai-modal-box .bg-orange-50 {
+  background-color: rgba(234, 88, 12, 0.15) !important;
+  border-color: rgba(249, 115, 22, 0.3) !important;
+  color: #fdba74 !important;
+}
+
+html.dark .ai-provider-white-container .bg-sky-50,
+html.dark .ai-modal-box .bg-sky-50,
+html[data-theme="dark"] .ai-provider-white-container .bg-sky-50,
+html[data-theme="dark"] .ai-modal-box .bg-sky-50 {
+  background-color: rgba(2, 132, 199, 0.15) !important;
+  border-color: rgba(14, 165, 233, 0.3) !important;
+  color: #7dd3fc !important;
+}
+
+html.dark .ai-provider-white-container .bg-violet-50,
+html.dark .ai-modal-box .bg-violet-50,
+html[data-theme="dark"] .ai-provider-white-container .bg-violet-50,
+html[data-theme="dark"] .ai-modal-box .bg-violet-50 {
+  background-color: rgba(124, 58, 237, 0.15) !important;
+  border-color: rgba(139, 92, 246, 0.3) !important;
+  color: #c4b5fd !important;
+}
+
+html.dark .ai-provider-white-container .bg-emerald-50,
+html.dark .ai-modal-box .bg-emerald-50,
+html.dark .fixed .bg-emerald-50,
+html[data-theme="dark"] .ai-provider-white-container .bg-emerald-50,
+html[data-theme="dark"] .ai-modal-box .bg-emerald-50,
+html[data-theme="dark"] .fixed .bg-emerald-50 {
+  background-color: rgba(5, 150, 105, 0.15) !important;
+  border-color: rgba(16, 185, 129, 0.3) !important;
+  color: #6ee7b7 !important;
+}
+
+html.dark .ai-provider-white-container .bg-amber-50,
+html.dark .ai-modal-box .bg-amber-50,
+html.dark .fixed .bg-amber-50,
+html[data-theme="dark"] .ai-provider-white-container .bg-amber-50,
+html[data-theme="dark"] .ai-modal-box .bg-amber-50,
+html[data-theme="dark"] .fixed .bg-amber-50 {
+  background-color: rgba(217, 119, 6, 0.15) !important;
+  border-color: rgba(245, 158, 11, 0.3) !important;
+  color: #fcd34d !important;
+}
+
+html.dark .ai-provider-white-container .bg-rose-50,
+html.dark .ai-modal-box .bg-rose-50,
+html.dark .fixed .bg-rose-50,
+html[data-theme="dark"] .ai-provider-white-container .bg-rose-50,
+html[data-theme="dark"] .ai-modal-box .bg-rose-50,
+html[data-theme="dark"] .fixed .bg-rose-50 {
+  background-color: rgba(225, 29, 72, 0.15) !important;
+  border-color: rgba(244, 63, 94, 0.3) !important;
+  color: #fda4af !important;
+}
+
+html.dark .ai-provider-white-container .bg-indigo-50,
+html.dark .ai-modal-box .bg-indigo-50,
+html[data-theme="dark"] .ai-provider-white-container .bg-indigo-50,
+html[data-theme="dark"] .ai-modal-box .bg-indigo-50 {
+  background-color: rgba(79, 70, 229, 0.15) !important;
+  border-color: rgba(99, 102, 241, 0.3) !important;
+  color: #a5b4fc !important;
+}
+
+/* Dark Mode Switcher Active Pill */
+html.dark .ai-provider-white-container .bg-blue-50.border-blue-400,
+html[data-theme="dark"] .ai-provider-white-container .bg-blue-50.border-blue-400 {
+  background-color: rgba(37, 99, 235, 0.25) !important;
+  border-color: rgba(59, 130, 246, 0.7) !important;
+  color: #bfdbfe !important;
+}
+
+html.dark .ai-provider-white-container .bg-orange-50.border-orange-400,
+html[data-theme="dark"] .ai-provider-white-container .bg-orange-50.border-orange-400 {
+  background-color: rgba(234, 88, 12, 0.25) !important;
+  border-color: rgba(249, 115, 22, 0.7) !important;
+  color: #fed7aa !important;
+}
+
+html.dark .ai-provider-white-container .bg-sky-50.border-sky-400,
+html[data-theme="dark"] .ai-provider-white-container .bg-sky-50.border-sky-400 {
+  background-color: rgba(2, 132, 199, 0.25) !important;
+  border-color: rgba(14, 165, 233, 0.7) !important;
+  color: #bae6fd !important;
+}
+
+html.dark .ai-provider-white-container .bg-violet-50.border-violet-400,
+html[data-theme="dark"] .ai-provider-white-container .bg-violet-50.border-violet-400 {
+  background-color: rgba(124, 58, 237, 0.25) !important;
+  border-color: rgba(139, 92, 246, 0.7) !important;
+  color: #ddd6fe !important;
+}
+
+html.dark .ai-provider-white-container .bg-emerald-50.border-emerald-400,
+html[data-theme="dark"] .ai-provider-white-container .bg-emerald-50.border-emerald-400 {
+  background-color: rgba(5, 150, 105, 0.25) !important;
+  border-color: rgba(16, 185, 129, 0.7) !important;
+  color: #a7f3d0 !important;
+}
+
+html.dark .ai-provider-white-container .bg-amber-50.border-amber-400,
+html[data-theme="dark"] .ai-provider-white-container .bg-amber-50.border-amber-400 {
+  background-color: rgba(217, 119, 6, 0.25) !important;
+  border-color: rgba(245, 158, 11, 0.7) !important;
+  color: #fde68a !important;
+}
+
+/* Dark Mode Badges & General Backgrounds */
+html.dark .ai-provider-white-container .bg-gray-100,
+html.dark .ai-modal-box .bg-gray-100,
+html[data-theme="dark"] .ai-provider-white-container .bg-gray-100,
+html[data-theme="dark"] .ai-modal-box .bg-gray-100 {
+  background-color: #1c1d17 !important;
+  color: #d8cfbc !important;
+  border-color: rgba(216, 207, 188, 0.2) !important;
+}
+
+html.dark .ai-provider-white-container .bg-gray-50,
+html.dark .ai-modal-box .bg-gray-50,
+html[data-theme="dark"] .ai-provider-white-container .bg-gray-50,
+html[data-theme="dark"] .ai-modal-box .bg-gray-50 {
+  background-color: #11120d !important;
+  color: #fffbf4 !important;
+  border-color: rgba(216, 207, 188, 0.12) !important;
+}
+
+html.dark .ai-provider-white-container .text-emerald-600,
+html.dark .ai-provider-white-container .text-emerald-700,
+html[data-theme="dark"] .ai-provider-white-container .text-emerald-600,
+html[data-theme="dark"] .ai-provider-white-container .text-emerald-700 {
+  color: #34d399 !important;
+}
+
+html.dark .ai-provider-white-container .text-amber-600,
+html.dark .ai-provider-white-container .text-amber-700,
+html.dark .ai-provider-white-container .text-amber-800,
+html[data-theme="dark"] .ai-provider-white-container .text-amber-600,
+html[data-theme="dark"] .ai-provider-white-container .text-amber-700,
+html[data-theme="dark"] .ai-provider-white-container .text-amber-800 {
+  color: #fbbf24 !important;
+}
+
+html.dark .ai-provider-white-container .text-rose-600,
+html.dark .ai-provider-white-container .text-rose-700,
+html[data-theme="dark"] .ai-provider-white-container .text-rose-600,
+html[data-theme="dark"] .ai-provider-white-container .text-rose-700 {
+  color: #fb7185 !important;
+}
+
+html.dark .ai-provider-white-container .border-gray-100,
+html.dark .ai-provider-white-container .border-gray-200,
+html.dark .ai-provider-white-container .border-gray-300,
+html.dark .ai-modal-box .border-gray-200,
+html.dark .ai-modal-box .border-gray-300,
+html[data-theme="dark"] .ai-provider-white-container .border-gray-100,
+html[data-theme="dark"] .ai-provider-white-container .border-gray-200,
+html[data-theme="dark"] .ai-provider-white-container .border-gray-300,
+html[data-theme="dark"] .ai-modal-box .border-gray-200,
+html[data-theme="dark"] .ai-modal-box .border-gray-300 {
+  border-color: rgba(216, 207, 188, 0.12) !important;
+}
+
+html.dark .ai-provider-white-container .border-gray-400,
+html.dark .ai-modal-box .border-gray-400,
+html[data-theme="dark"] .ai-provider-white-container .border-gray-400,
+html[data-theme="dark"] .ai-modal-box .border-gray-400 {
+  border-color: rgba(216, 207, 188, 0.25) !important;
+}
+
+html.dark .ai-provider-white-container .bg-zinc-300,
+html[data-theme="dark"] .ai-provider-white-container .bg-zinc-300 {
+  background-color: #2e3025 !important;
+}
+
+/* Reduced Motion */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ==============================================================================
+ * THEME SYSTEM & LIGHT MODE (Liquid Glass Light Palette)
+ * Translucent linen/bone surfaces, sharp obsidian typography, and delicate olive borders.
+ * Seamless transition between Dark, Light, and System Default.
+ * ============================================================================== */
+
+/* Theme Toggle Button Styling */
+.theme-toggle-btn {
+  background-color: rgba(24, 25, 19, 0.75);
+  border-color: rgba(216, 207, 188, 0.2);
+  color: #D8CFBC;
+}
+.theme-toggle-btn:hover {
+  background-color: rgba(86, 84, 73, 0.35);
+  color: #FFFBF4;
+  border-color: rgba(216, 207, 188, 0.35);
+}
+.theme-dropdown-menu {
+  background-color: rgba(20, 21, 16, 0.95);
+  border-color: rgba(216, 207, 188, 0.2);
+  color: #FFFBF4;
+}
+.theme-dropdown-label {
+  color: rgba(216, 207, 188, 0.6);
+}
+.theme-dropdown-item {
+  color: #D8CFBC;
+}
+.theme-dropdown-item:hover {
+  background-color: rgba(86, 84, 73, 0.3);
+  color: #FFFBF4;
+}
+.theme-dropdown-item-active {
+  background-color: #FFFBF4;
+  color: #11120D;
+  font-weight: 700;
+}
+
+/* In Light Mode: Toggle & Dropdown Styling (Luxury White #FAFAFA Theme) */
+html.light .theme-toggle-btn {
+  background-color: #FFFFFF;
+  border-color: #E4E4E7;
+  color: #52525B;
+}
+html.light .theme-toggle-btn:hover {
+  background-color: #F4F4F5;
+  color: #09090B;
+  border-color: #D4D4D8;
+}
+html.light .theme-dropdown-menu {
+  background-color: #FFFFFF;
+  border-color: #E4E4E7;
+  color: #09090B;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+}
+html.light .theme-dropdown-label {
+  color: #71717A;
+}
+html.light .theme-dropdown-item {
+  color: #52525B;
+}
+html.light .theme-dropdown-item:hover {
+  background-color: #F4F4F5;
+  color: #09090B;
+}
+html.light .theme-dropdown-item-active {
+  background-color: #09090B;
+  color: #FAFAFA;
+  font-weight: 700;
+}
+
+/* ==============================================================================
+ * LIGHT MODE: LIQUID GLASS CLASS OVERRIDES (Luxury White #FAFAFA System)
+ * ============================================================================== */
+html.light .liquid-glass {
+  background-color: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(16px) saturate(160%);
+  -webkit-backdrop-filter: blur(16px) saturate(160%);
+  border: 1px solid #E4E4E7;
+  box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.05), inset 0 1px 0 rgba(255, 255, 255, 1);
+}
+
+html.light .liquid-glass-elevated {
+  background-color: rgba(255, 255, 255, 0.98);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border: 1px solid #E4E4E7;
+  box-shadow: 0 12px 36px -4px rgba(0, 0, 0, 0.08), inset 0 1px 0 rgba(255, 255, 255, 1);
+}
+
+html.light .liquid-glass-subtle {
+  background-color: rgba(244, 244, 245, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid #E4E4E7;
+}
+
+html.light .liquid-glass-nav {
+  background-color: rgba(250, 250, 250, 0.85);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  border-bottom: 1px solid #E4E4E7;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+html.light .liquid-glass-capsule {
+  background-color: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid #E4E4E7;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.06), inset 0 1px 0 rgba(255, 255, 255, 1);
+}
+
+html.light .liquid-glass-pill {
+  background-color: #F4F4F5;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid #E4E4E7;
+  color: #09090B;
+}
+
+html.light .liquid-glass-input {
+  background-color: #FFFFFF;
+  border: 1px solid #E4E4E7;
+  color: #09090B;
+}
+
+html.light .liquid-glass-input:focus {
+  background-color: #FFFFFF;
+  border-color: #09090B;
+  box-shadow: 0 0 0 2px rgba(9, 9, 11, 0.08);
+}
+
+html.light .liquid-glass-input::placeholder {
+  color: #A1A1AA;
+}
+
+html.light .liquid-glass-btn-primary {
+  background-color: #09090B;
+  color: #FAFAFA;
+  border: 1px solid #09090B;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+}
+
+html.light .liquid-glass-btn-primary:hover {
+  background-color: #27272A;
+  color: #FAFAFA;
+}
+
+html.light .liquid-glass-btn-secondary {
+  background-color: #F4F4F5;
+  color: #09090B;
+  border: 1px solid #E4E4E7;
+}
+
+html.light .liquid-glass-btn-secondary:hover {
+  background-color: #E4E4E7;
+  border-color: #D4D4D8;
+}
+
+/* ==============================================================================
+ * LIGHT MODE: GLOBAL COLOR OVERRIDES (Luxury White #FAFAFA System)
+ * Converts dark obsidian classes to radiant luxury white (#FAFAFA) styling
+ * without altering any layout element, spacing, or structure.
+ * ============================================================================== */
+
+/* Base Canvas & Body: Luxury White #FAFAFA */
+html.light,
+html.light body,
+html.light main {
+  background-color: #FAFAFA !important;
+  color: #09090B !important;
+}
+
+/* Dark Canvas Backgrounds -> Luxury White #FAFAFA */
+html.light .bg-\[\#11120D\],
+html.light .bg-\[\#11120d\] {
+  background-color: #FAFAFA !important;
+}
+
+html.light .bg-\[\#11120D\]\/80,
+html.light .bg-\[\#11120D\]\/85,
+html.light .bg-\[\#11120D\]\/90 {
+  background-color: rgba(250, 250, 250, 0.88) !important;
+}
+
+/* Elevated Card & Surface Backgrounds -> Pure White #FFFFFF with Refined Border */
+html.light .bg-\[\#11120D\]\/60,
+html.light .bg-\[\#11120D\]\/70,
+html.light .bg-\[\#11120D\]\/80,
+html.light .bg-\[\#11120D\]\/85,
+html.light .bg-\[\#11120D\]\/90,
+html.light .bg-\[\#131416\],
+html.light .bg-\[\#141510\],
+html.light .bg-\[\#141510\]\/50,
+html.light .bg-\[\#141510\]\/60,
+html.light .bg-\[\#141510\]\/70,
+html.light .bg-\[\#141510\]\/80,
+html.light .bg-\[\#141510\]\/90,
+html.light .bg-\[\#141510\]\/95,
+html.light .bg-\[\#161712\],
+html.light .bg-\[\#161712\]\/50,
+html.light .bg-\[\#161712\]\/60,
+html.light .bg-\[\#16171a\],
+html.light .bg-\[\#181913\],
+html.light .bg-\[\#181913\]\/40,
+html.light .bg-\[\#181913\]\/60,
+html.light .bg-\[\#181913\]\/70,
+html.light .bg-\[\#181913\]\/75,
+html.light .bg-\[\#181913\]\/80,
+html.light .bg-\[\#181913\]\/85,
+html.light .bg-\[\#181913\]\/90,
+html.light .bg-\[\#181913\]\/95,
+html.light .bg-\[\#18191d\],
+html.light .bg-\[\#1a1b1e\],
+html.light .bg-\[\#1A1C16\],
+html.light .bg-\[\#1A1C16\]\/80,
+html.light .bg-\[\#1C1D17\],
+html.light .bg-\[\#1C1D17\]\/60,
+html.light .bg-\[\#1C1D17\]\/70,
+html.light .bg-\[\#1C1D17\]\/80,
+html.light .bg-\[\#1C1D17\]\/90,
+html.light .bg-\[\#1c1d22\],
+html.light .bg-\[\#1F2019\]\/60,
+html.light .bg-\[\#1F211A\],
+html.light .bg-\[\#1F211A\]\/80,
+html.light .bg-\[\#1F211A\]\/90,
+html.light .bg-\[\#1f2125\],
+html.light .bg-\[\#202227\],
+html.light .bg-\[\#22241D\],
+html.light .bg-\[\#22241D\]\/90,
+html.light .bg-\[\#252720\],
+html.light .bg-\[\#26282e\],
+html.light .bg-\[\#2B2D24\],
+html.light .bg-slate-800,
+html.light .bg-slate-800\/30,
+html.light .bg-slate-800\/40,
+html.light .bg-slate-800\/50,
+html.light .bg-slate-800\/60,
+html.light .bg-slate-800\/80,
+html.light .bg-slate-900,
+html.light .bg-slate-900\/40,
+html.light .bg-slate-900\/60,
+html.light .bg-slate-950 {
+  background-color: #FFFFFF !important;
+  border-color: #E4E4E7 !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05), 0 4px 16px -2px rgba(0, 0, 0, 0.03) !important;
+}
+
+/* Card hover states */
+html.light .group:hover.bg-\[\#181913\]\/75,
+html.light .hover\:border-\[\#D8CFBC\]\/30:hover,
+html.light .hover\:border-\[\#D8CFBC\]\/35:hover {
+  border-color: #A1A1AA !important;
+  box-shadow: 0 8px 24px -4px rgba(0, 0, 0, 0.08) !important;
+}
+
+html.light .hover\:bg-\[\#1F2019\]\/60:hover,
+html.light .hover\:bg-\[\#1C1D17\]:hover,
+html.light .hover\:bg-\[\#181913\]:hover,
+html.light .hover\:bg-\[\#151619\]:hover,
+html.light .hover\:bg-\[\#22241D\]:hover,
+html.light .hover\:bg-\[\#2B2D24\]:hover,
+html.light .hover\:bg-slate-800\/30:hover,
+html.light .hover\:bg-slate-700:hover {
+  background-color: #F4F4F5 !important;
+  border-color: #D4D4D8 !important;
+}
+
+/* Icon Containers & Badges */
+html.light .bg-\[\#D8CFBC\]\/10,
+html.light .bg-\[\#D8CFBC\]\/15,
+html.light .bg-\[\#D8CFBC\]\/20,
+html.light .bg-\[\#D8CFBC\]\/25,
+html.light .bg-\[\#565449\]\/20,
+html.light .bg-\[\#565449\]\/25,
+html.light .bg-\[\#565449\]\/30,
+html.light .bg-\[\#565449\]\/35 {
+  background-color: #F4F4F5 !important;
+  border-color: #E4E4E7 !important;
+  color: #09090B !important;
+}
+
+html.light .bg-\[\#D8CFBC\]\/10 svg,
+html.light .bg-\[\#D8CFBC\]\/15 svg,
+html.light .bg-\[\#D8CFBC\]\/20 svg,
+html.light .bg-\[\#D8CFBC\]\/25 svg,
+html.light .bg-\[\#565449\]\/20 svg,
+html.light .bg-\[\#565449\]\/25 svg,
+html.light .bg-\[\#565449\]\/30 svg,
+html.light .bg-\[\#565449\]\/35 svg {
+  color: #09090B !important;
+}
+
+/* High-Contrast Semantic Status Badges in Light Mode */
+html.light .bg-emerald-500\/10,
+html.light .bg-emerald-500\/15,
+html.light .bg-emerald-500\/20 {
+  background-color: #ECFDF5 !important;
+  border-color: #A7F3D0 !important;
+  color: #047857 !important;
+  font-weight: 600 !important;
+}
+html.light .text-emerald-300,
+html.light .text-emerald-400 {
+  color: #047857 !important;
+}
+
+html.light .bg-amber-500\/10,
+html.light .bg-amber-500\/15,
+html.light .bg-amber-500\/20 {
+  background-color: #FFFBEB !important;
+  border-color: #FDE68A !important;
+  color: #B45309 !important;
+  font-weight: 600 !important;
+}
+html.light .text-amber-200,
+html.light .text-amber-300,
+html.light .text-amber-400 {
+  color: #B45309 !important;
+}
+
+html.light .bg-rose-500\/10,
+html.light .bg-rose-500\/15,
+html.light .bg-rose-500\/20,
+html.light .bg-rose-600\/20,
+html.light .bg-rose-950\/30,
+html.light .bg-rose-950\/40 {
+  background-color: #FFF1F2 !important;
+  border-color: #FECDD3 !important;
+  color: #BE123C !important;
+  font-weight: 600 !important;
+}
+html.light .text-rose-200,
+html.light .text-rose-300,
+html.light .text-rose-400 {
+  color: #BE123C !important;
+}
+
+html.light .bg-blue-500\/10,
+html.light .bg-blue-500\/15,
+html.light .bg-indigo-950\/30,
+html.light .bg-indigo-500\/10 {
+  background-color: #EFF6FF !important;
+  border-color: #BFDBFE !important;
+  color: #1D4ED8 !important;
+  font-weight: 600 !important;
+}
+html.light .text-blue-300,
+html.light .text-blue-400,
+html.light .text-indigo-300,
+html.light .text-indigo-400 {
+  color: #1D4ED8 !important;
+}
+
+/* Typography Overrides: Obsidian #09090B on White Cards */
+html.light .text-\[\#FFFBF4\],
+html.light .text-white {
+  color: #09090B !important;
+}
+
+html.light .text-\[\#EAE3D5\] {
+  color: #18181B !important;
+}
+
+html.light .text-\[\#D8CFBC\],
+html.light .text-\[\#ABA291\],
+html.light .text-slate-300 {
+  color: #27272A !important;
+}
+
+html.light .text-\[\#D8CFBC\]\/90,
+html.light .text-\[\#D8CFBC\]\/80,
+html.light .text-\[\#D8CFBC\]\/70,
+html.light .text-slate-400 {
+  color: #3F3F46 !important;
+}
+
+html.light .text-\[\#D8CFBC\]\/60,
+html.light .text-\[\#D8CFBC\]\/50,
+html.light .text-\[\#8B8878\],
+html.light .text-\[\#8C8678\],
+html.light .text-\[\#706E61\],
+html.light .text-slate-500 {
+  color: #52525B !important;
+}
+
+/* ALL Borders & Dividers -> Clean #E4E4E7 */
+html.light .border-\[\#D8CFBC\]\/10,
+html.light .border-\[\#D8CFBC\]\/15,
+html.light .border-\[\#D8CFBC\]\/20,
+html.light .border-\[\#D8CFBC\]\/25,
+html.light .border-\[\#D8CFBC\]\/30,
+html.light .border-\[\#D8CFBC\]\/35,
+html.light .border-\[\#D8CFBC\]\/40,
+html.light .border-\[\#D8CFBC\]\/50,
+html.light .border-\[\#565449\],
+html.light .border-\[\#565449\]\/10,
+html.light .border-\[\#565449\]\/15,
+html.light .border-\[\#565449\]\/20,
+html.light .border-\[\#565449\]\/25,
+html.light .border-\[\#565449\]\/30,
+html.light .border-\[\#565449\]\/35,
+html.light .border-\[\#565449\]\/40,
+html.light .border-\[\#565449\]\/50,
+html.light .border-\[\#1e2024\],
+html.light .border-\[\#212328\],
+html.light .border-\[\#26282e\],
+html.light .border-\[\#2d3037\],
+html.light .border-slate-800,
+html.light .border-slate-700,
+html.light .border-slate-600 {
+  border-color: #E4E4E7 !important;
+}
+
+/* Selected / Active Card Border in Light Mode */
+html.light .border-\[\#D8CFBC\] {
+  border-color: #09090B !important;
+}
+
+html.light .ring-\[\#D8CFBC\]\/30,
+html.light .ring-\[\#D8CFBC\]\/40,
+html.light .ring-\[\#D8CFBC\]\/50,
+html.light .ring-\[\#D8CFBC\] {
+  --tw-ring-color: rgba(9, 9, 11, 0.15) !important;
+}
+
+html.light .divide-\[\#D8CFBC\]\/10 > :not([hidden]) ~ :not([hidden]),
+html.light .divide-\[\#D8CFBC\]\/15 > :not([hidden]) ~ :not([hidden]),
+html.light .divide-slate-800\/60 > :not([hidden]) ~ :not([hidden]) {
+  border-color: #E4E4E7 !important;
+}
+
+/* Tables in Light Mode -> Pure White Body with Clean Zinc Borders & High Contrast */
+html.light table {
+  background-color: #FFFFFF !important;
+  border-color: #E4E4E7 !important;
+}
+
+html.light thead,
+html.light thead.bg-\[\#141510\],
+html.light thead.bg-slate-950\/80,
+html.light thead tr {
+  background-color: #F4F4F5 !important;
+  color: #09090B !important;
+  border-color: #E4E4E7 !important;
+  font-weight: 700 !important;
+}
+
+html.light thead th {
+  background-color: #F4F4F5 !important;
+  color: #09090B !important;
+  border-color: #E4E4E7 !important;
+}
+
+html.light tbody,
+html.light tbody tr,
+html.light tbody tr td {
+  background-color: #FFFFFF !important;
+  color: #27272A !important;
+  border-color: #E4E4E7 !important;
+}
+
+html.light tbody tr:hover,
+html.light tbody tr:hover td {
+  background-color: #F4F4F5 !important;
+}
+
+html.light tbody td strong {
+  color: #09090B !important;
+}
+
+/* Form Inputs, Selects, and Textareas */
+html.light input:not([type="checkbox"]):not([type="radio"]),
+html.light select,
+html.light textarea {
+  background-color: #FFFFFF !important;
+  color: #09090B !important;
+  border-color: #E4E4E7 !important;
+}
+
+html.light input:focus,
+html.light select:focus,
+html.light textarea:focus {
+  border-color: #09090B !important;
+  box-shadow: 0 0 0 2px rgba(9, 9, 11, 0.08) !important;
+}
+
+html.light input::placeholder,
+html.light textarea::placeholder {
+  color: #A1A1AA !important;
+}
+
+html.light select option {
+  background-color: #FFFFFF !important;
+  color: #09090B !important;
+}
+
+/* Primary Action Buttons in Light Mode */
+html.light button.bg-\[\#FFFBF4\],
+html.light a.bg-\[\#FFFBF4\] {
+  background-color: #09090B !important;
+  color: #FAFAFA !important;
+  border-color: #09090B !important;
+}
+
+html.light button.bg-\[\#FFFBF4\]:hover,
+html.light a.bg-\[\#FFFBF4\]:hover {
+  background-color: #27272A !important;
+  color: #FAFAFA !important;
+}
+
+html.light button.bg-\[\#FFFBF4\] svg,
+html.light a.bg-\[\#FFFBF4\] svg {
+  color: #FAFAFA !important;
+}
+
+/* Secondary Action Buttons in Light Mode */
+html.light button.bg-\[\#11120D\],
+html.light a.bg-\[\#11120D\] {
+  background-color: #F4F4F5 !important;
+  color: #09090B !important;
+  border-color: #E4E4E7 !important;
+}
+
+html.light button.bg-\[\#11120D\]:hover,
+html.light a.bg-\[\#11120D\]:hover {
+  background-color: #E4E4E7 !important;
+  color: #09090B !important;
+}
+
+/* Modals & Backdrop */
+html.light .fixed.inset-0.bg-\[\#11120D\]\/80,
+html.light .fixed.inset-0.bg-black\/70,
+html.light .fixed.inset-0.bg-black\/80 {
+  background-color: rgba(9, 9, 11, 0.45) !important;
+}
+
+/* Admin Sidebar in Light Mode */
+html.light aside {
+  background-color: #FFFFFF !important;
+  border-right-color: #E4E4E7 !important;
+}
+
+html.light aside .bg-\[\#11120D\] {
+  background-color: #FFFFFF !important;
+}
+
+html.light aside .bg-\[\#181913\] {
+  background-color: #FAFAFA !important;
+  border-color: #E4E4E7 !important;
+}
+
+html.light aside .bg-\[\#141510\] {
+  background-color: #F4F4F5 !important;
+  border-color: #E4E4E7 !important;
+}
+
+html.light aside a {
+  color: #52525B !important;
+}
+
+html.light aside a:hover {
+  background-color: #F4F4F5 !important;
+  color: #09090B !important;
+}
+
+html.light aside a.bg-\[\#1C1D17\] {
+  background-color: #F4F4F5 !important;
+  color: #09090B !important;
+  font-weight: 700 !important;
+  border-color: #E4E4E7 !important;
+}
+
+html.light aside a.bg-\[\#1C1D17\] svg {
+  color: #09090B !important;
+}
+
+html.light aside .bg-\[\#FFFBF4\] {
+  background-color: #09090B !important;
+  color: #FAFAFA !important;
+}
+
+/* Ambient Glow Circles in Light Mode (Soft Neutral Highlights) */
+html.light .from-\[\#565449\]\/20 {
+  --tw-gradient-from: rgba(0, 0, 0, 0.025) !important;
+}
+
+html.light .via-\[\#D8CFBC\]\/8,
+html.light .via-\[\#D8CFBC\]\/10 {
+  --tw-gradient-via: rgba(0, 0, 0, 0.015) !important;
+}
+
+html.light .bg-\[\#565449\]\/15,
+html.light .bg-\[\#D8CFBC\]\/10,
+html.light .bg-\[\#D8CFBC\]\/8 {
+  background-color: rgba(0, 0, 0, 0.02) !important;
+}
+
+/* Custom Scrollbar in Light Mode */
+html.light ::-webkit-scrollbar-thumb {
+  background: #D4D4D8;
+  border: 1px solid #E4E4E7;
+}
+
+html.light ::-webkit-scrollbar-thumb:hover {
+  background: #A1A1AA;
+}
+
+/* CTA Gradient Banners in Light Mode */
+html.light .bg-gradient-to-r.from-\[\#181913\]\/90 {
+  background-image: linear-gradient(to right, #FFFFFF, #F4F4F5, #FFFFFF) !important;
+  border-color: #E4E4E7 !important;
+  box-shadow: 0 10px 30px -4px rgba(0, 0, 0, 0.05) !important;
+}
+
+/* Chat Message Bubbles in Light Mode */
+html.light .rounded-tr-xs.bg-\[\#FFFBF4\],
+html.light .rounded-br-none.bg-\[\#FFFBF4\] {
+  background-color: #09090B !important;
+  color: #FAFAFA !important;
+}
+
+html.light .rounded-tl-xs.bg-\[\#1C1D17\],
+html.light .rounded-bl-none.bg-\[\#1C1D17\]\/90 {
+  background-color: #FFFFFF !important;
+  border-color: #E4E4E7 !important;
+  color: #09090B !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05) !important;
+}
+
+/* Top Subtle Rim Lights in Cards - Soften in Light Mode */
+html.light .via-\[\#FFFBF4\]\/15,
+html.light .via-\[\#FFFBF4\]\/20 {
+  --tw-gradient-via: rgba(255, 255, 255, 0.9) !important;
+}
+
+/* Diagnosis Box & Warning Alert in Light Mode */
+html.light .border-amber-500\/40.bg-\[\#1F211A\]\/90 {
+  background-color: #FFFBEB !important;
+  border-color: #FDE68A !important;
+}
+html.light .border-amber-500\/40.bg-\[\#1F211A\]\/90 .bg-\[\#11120D\]\/70,
+html.light .border-amber-500\/40.bg-\[\#1F211A\]\/90 .bg-\[\#11120D\]\/80 {
+  background-color: #FFFFFF !important;
+  border-color: #FDE68A !important;
+  color: #09090B !important;
+}
+
+/* Landing Page Category Action Buttons */
+html.light .group:hover a.group-hover\:bg-\[\#FFFBF4\] {
+  background-color: #09090B !important;
+  color: #FAFAFA !important;
+}
+html.light a.bg-\[\#22241D\] {
+  background-color: #F4F4F5 !important;
+  border-color: #E4E4E7 !important;
+  color: #09090B !important;
+}
+
+/* Stepper Status Indicators */
+html.light .border.bg-\[\#22241D\] {
+  background-color: #F4F4F5 !important;
+  border-color: #A1A1AA !important;
+  color: #09090B !important;
+}
+html.light .border.bg-\[\#181913\]\/40 {
+  background-color: #FAFAFA !important;
+  border-color: #E4E4E7 !important;
+  color: #71717A !important;
+}
+
+/* Footer in Light Mode */
+html.light footer {
+  background-color: #F4F4F5 !important;
+  border-top-color: #E4E4E7 !important;
+  color: #71717A !important;
+}
+html.light footer a:hover {
+  color: #09090B !important;
+}
+
+/* Code & Pre Snapshot Diff Viewers */
+html.light pre {
+  background-color: #F4F4F5 !important;
+  border-color: #E4E4E7 !important;
+  color: #09090B !important;
+}
+
+html.light pre.text-rose-200 {
+  background-color: #FFF1F2 !important;
+  border-color: #FECDD3 !important;
+  color: #BE123C !important;
+}
+
+html.light pre.text-emerald-200 {
+  background-color: #ECFDF5 !important;
+  border-color: #A7F3D0 !important;
+  color: #047857 !important;
+}
+
+/* Selection Highlight in Light Mode */
+html.light ::selection {
+  background-color: rgba(9, 9, 11, 0.12) !important;
+  color: #09090B !important;
+}
+
+
+
