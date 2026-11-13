@@ -3,6 +3,7 @@ import { query, pool } from '@/lib/db';
 import { resetPasswordSchema } from '@/lib/validations/auth';
 import { verifyOtpCode } from '@/lib/otp';
 import { hashPassword } from '@/lib/auth';
+import { bumpUserTokenVersion } from '@/lib/token-revocation';
 
 export async function POST(request: NextRequest) {
   try {
@@ -85,6 +86,19 @@ export async function POST(request: NextRequest) {
       throw dbErr;
     } finally {
       connection.release();
+    }
+
+    // T5: cabut seluruh JWT yang diterbitkan sebelum reset ini dengan
+    // menaikkan users.token_version. Dilakukan TERPISAH SETELAH transaksi
+    // commit — best-effort: bila kolom token_version belum ada (migrasi
+    // 004 belum dijalankan), bump gagal dengan warning dan reset kata
+    // sandi itu sendiri tetap berhasil. Pencabutan refresh token di atas
+    // dibiarkan apa adanya: tabel user_refresh_tokens tidak pernah ditulis
+    // oleh kode mana pun, jadi pencabutan itu no-op (lihat temuan T5);
+    // pencabutan JWT yang nyata adalah bump token_version ini.
+    const revoked = await bumpUserTokenVersion(targetUserId);
+    if (!revoked) {
+      console.warn('[Reset Password] PERINGATAN: token_version tidak naik — sesi lama (JWT) masih berlaku sampai kedaluwarsa. Jalankan migrasi 004.');
     }
 
     return NextResponse.json({

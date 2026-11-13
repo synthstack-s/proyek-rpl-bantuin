@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getUserSession } from '@/lib/auth';
+import { checkChatRateLimit } from '@/lib/rate-limiter';
 import { getOrCreateSession, isSessionForbiddenError, markSessionConverted } from '@/lib/chatbot/repository';
 
 export async function POST(req: NextRequest) {
@@ -13,6 +14,20 @@ export async function POST(req: NextRequest) {
           message: 'Silakan masuk ke akun pelanggan Anda untuk melanjutkan pemesanan teknisi.',
         },
         { status: 401 }
+      );
+    }
+
+    // F9: batasi konversi per pengguna (10/menit) — tanpa ini, endpoint
+    // bisa dipanggil berulang tanpa batas untuk menandai sesi sebagai
+    // terkonversi.
+    const convertLimit = checkChatRateLimit(`convert:${userSession.userId}`, 10);
+    if (!convertLimit.allowed) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: `Terlalu banyak permintaan konversi. Silakan tunggu ${convertLimit.retryAfterSeconds} detik sebelum mencoba lagi.`,
+        },
+        { status: 429 }
       );
     }
 

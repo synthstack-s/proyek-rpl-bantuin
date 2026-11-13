@@ -3,6 +3,7 @@ import { query } from '@/lib/db';
 import { otpVerifySchema } from '@/lib/validations/auth';
 import { verifyOtpCode } from '@/lib/otp';
 import { createUserToken, getUserCookieOptions } from '@/lib/auth';
+import { getUserTokenVersion } from '@/lib/token-revocation';
 
 export async function POST(request: NextRequest) {
   try {
@@ -76,9 +77,30 @@ export async function POST(request: NextRequest) {
     }
 
     const user = users[0];
+
+    // T4: akun yang ditangguhkan/dinonaktifkan TIDAK BOLEH masuk lewat OTP.
+    // Sebelumnya query sudah mengambil u.status tetapi tidak pernah
+    // diperiksa — pengguna yang di-suspend bisa login dengan OTP dan
+    // melewati blokir yang sama di route login kata sandi.
+    if (user.status === 'suspended') {
+      return NextResponse.json(
+        { success: false, message: 'Akun Anda sedang ditangguhkan. Hubungi tim dukungan BANTUIN.' },
+        { status: 403 }
+      );
+    }
+    if (user.status === 'inactive') {
+      return NextResponse.json(
+        { success: false, message: 'Akun Anda saat ini tidak aktif.' },
+        { status: 403 }
+      );
+    }
+
     const fullName = user.customer_name || user.technician_name || 'Pengguna BANTUIN';
 
     // 3. Terbitkan token sesi JWT pengguna (Customer atau Teknisi)
+    // T5: sematkan tokenVersion terkini agar token yang diterbitkan sesudah
+    // reset password tidak langsung ditolak oleh pemeriksaan pencabutan.
+    const tokenVersion = await getUserTokenVersion(user.id);
     const token = await createUserToken(
       {
         userId: user.id,
@@ -89,6 +111,7 @@ export async function POST(request: NextRequest) {
         status: user.status,
         isVerified: true,
         name: fullName,
+        tokenVersion,
       },
       false
     );

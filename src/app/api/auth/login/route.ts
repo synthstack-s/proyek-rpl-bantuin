@@ -8,6 +8,7 @@ import {
   getAdminCookieOptions,
 } from '@/lib/auth';
 import { userLoginSchema } from '@/lib/validations/auth';
+import { getUserTokenVersion } from '@/lib/token-revocation';
 import { checkLoginRateLimit, recordFailedLoginAttempt, clearLoginRateLimit } from '@/lib/rate-limiter';
 import { normalizePhoneNumber, maskPhoneNumber } from '@/lib/fonnte';
 import { createAndSendOtp } from '@/lib/otp';
@@ -137,6 +138,9 @@ export async function POST(request: NextRequest) {
     const fullName = user.customer_name || user.technician_name || (user.role === 'admin' ? 'Administrator' : 'Pengguna BANTUIN');
 
     // 9. Terbitkan token sesi dan cookie berdasarkan peran
+    // T5: sematkan tokenVersion terkini agar token yang diterbitkan sesudah
+    // reset password tidak langsung ditolak oleh pemeriksaan pencabutan.
+    const tokenVersion = await getUserTokenVersion(user.id);
     let response: NextResponse;
     let redirectUrl = '/customer/dashboard';
 
@@ -149,6 +153,7 @@ export async function POST(request: NextRequest) {
           email: user.email,
           role: 'admin',
           name: fullName,
+          tokenVersion,
         },
         rememberMe ? '7d' : '8h'
       );
@@ -186,6 +191,7 @@ export async function POST(request: NextRequest) {
           status: user.status,
           isVerified: true,
           name: fullName,
+          tokenVersion,
         },
         rememberMe
       );

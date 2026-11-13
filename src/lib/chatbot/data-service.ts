@@ -135,6 +135,48 @@ export async function getPublicCatalog(): Promise<PublicServiceCatalogItem[]> {
   return DEFAULT_FALLBACK_CATEGORIES;
 }
 
+/**
+ * N10 — Daftar harga layanan dari katalog (untuk pertanyaan "berapa biaya
+ * perbaikan AC?" dsb.). Berbeda dengan getPublicCatalog yang memakai
+ * fallback statis saat DB offline, fungsi ini mengembalikan null bila DB
+ * tidak dapat dibaca — harga TIDAK BOLEH ditebak dari data fallback —
+ * dan [] bila katalog kosong.
+ */
+export async function getPublicServicePrices(): Promise<Array<{
+  serviceId: number;
+  name: string;
+  slug: string;
+  basePrice: number;
+  estimatedDurationMin: number;
+  categoryName: string;
+  categorySlug: string;
+}> | null> {
+  try {
+    const rows = await query<any[]>(
+      `SELECT s.id, s.name, s.slug, s.base_price, s.estimated_duration_min,
+              ac.name AS category_name, ac.slug AS category_slug
+       FROM services s
+       JOIN appliance_categories ac ON s.category_id = ac.id
+       WHERE s.is_active = TRUE AND s.deleted_at IS NULL
+         AND ac.is_active = TRUE AND ac.deleted_at IS NULL
+       ORDER BY ac.id ASC, s.base_price ASC`
+    );
+    if (!rows || rows.length === 0) return [];
+    return rows.map(r => ({
+      serviceId: Number(r.id),
+      name: r.name,
+      slug: r.slug,
+      basePrice: Number(r.base_price),
+      estimatedDurationMin: Number(r.estimated_duration_min),
+      categoryName: r.category_name,
+      categorySlug: r.category_slug,
+    }));
+  } catch (err) {
+    console.error('[data-service] getPublicServicePrices gagal:', err);
+    return null;
+  }
+}
+
 export async function getPublicApplianceCategories() {
   try {
     const rows = await query<any[]>(
@@ -781,14 +823,38 @@ export async function getTechnicianPerformanceMetrics(userId: number) {
       }
     }
 
+    // N12: "Rata-rata Waktu Penyelesaian" diukur dari riwayat status
+    // (repair_status_history) — dari teknisi MENERIMA tawaran (responded_at,
+    // fallback ke created_at penugasan bila kosong) sampai pesanan pertama
+    // kali berstatus 'completed'. Rumus lama (created_at -> responded_at)
+    // mengukur waktu RESPON tawaran, bukan waktu penyelesaian pekerjaan.
+    // Bila tidak ada baris riwayat 'completed' (data lama sebelum history
+    // ditulis), fallback ke updated_at pesanan yang sudah completed.
     const [durationRow]: any = await query<any[]>(
-      `SELECT AVG(TIMESTAMPDIFF(HOUR, ta.created_at, ta.responded_at)) AS avg_hours
+      `SELECT AVG(TIMESTAMPDIFF(HOUR, COALESCE(ta.responded_at, ta.created_at), h.completed_at)) AS avg_hours
        FROM technician_assignments ta
+       JOIN (
+         SELECT repair_request_id, MIN(created_at) AS completed_at
+         FROM repair_status_history
+         WHERE new_status = 'completed'
+         GROUP BY repair_request_id
+       ) h ON h.repair_request_id = ta.repair_request_id
        WHERE ta.technician_id = ? AND ta.status = 'completed'`,
       [userId]
     );
 
-    const avgHours = durationRow?.avg_hours ? Number(durationRow.avg_hours).toFixed(1) : null;
+    let avgHours = durationRow?.avg_hours != null ? Number(durationRow.avg_hours).toFixed(1) : null;
+
+    if (avgHours === null) {
+      const [fallbackRow]: any = await query<any[]>(
+        `SELECT AVG(TIMESTAMPDIFF(HOUR, COALESCE(ta.responded_at, ta.created_at), rr.updated_at)) AS avg_hours
+         FROM technician_assignments ta
+         JOIN repair_requests rr ON rr.id = ta.repair_request_id
+         WHERE ta.technician_id = ? AND ta.status = 'completed' AND rr.current_status = 'completed'`,
+        [userId]
+      );
+      avgHours = fallbackRow?.avg_hours != null ? Number(fallbackRow.avg_hours).toFixed(1) : null;
+    }
 
     // Statistik riil (0 bila teknisi belum punya tugas — bukan angka demo).
     return {
@@ -841,6 +907,16 @@ export async function getAdminOperationalOverview() {
        WHERE status IN ('submitted', 'in_investigation')`
     );
 
+    // N6: hitungan berfilter tanggal — D#1 menjawab "pesanan hari ini /
+    // bulan ini" dengan angka ini, bukan total sepanjang masa.
+    const [periodCounts]: any = await query<any[]>(
+      `SELECT
+        SUM(CASE WHEN DATE(created_at) = CURDATE() THEN 1 ELSE 0 END) AS today_count,
+        SUM(CASE WHEN YEAR(created_at) = YEAR(CURDATE()) AND MONTH(created_at) = MONTH(CURDATE()) THEN 1 ELSE 0 END) AS month_count
+       FROM repair_requests
+       WHERE deleted_at IS NULL`
+    );
+
     // Hitungan riil — termasuk 0 bila database kosong (bukan angka demo).
     return {
       orders: {
@@ -853,6 +929,9 @@ export async function getAdminOperationalOverview() {
         completed: Number(counts?.completed_count || 0),
         cancelled: Number(counts?.cancelled_count || 0),
         complained: Number(counts?.complained_count || 0),
+        // N6: pesanan yang DIBUAT hari ini / bulan kalender berjalan.
+        today: Number(periodCounts?.today_count || 0),
+        thisMonth: Number(periodCounts?.month_count || 0),
       },
       technicians: {
         active: Number(activeTechs?.total_active_techs || 0),
@@ -872,23 +951,50 @@ export async function getAdminOperationalOverview() {
 
 export async function getAdminDelayedRepairs() {
   try {
+    // N15: definisi "tertunda" per status, diukur dari saat pesanan MEMASUKI
+    // statusnya saat ini (entri terakhir repair_status_history untuk status
+    // itu; fallback ke created_at bila tidak ada riwayat). Definisi lama
+    // (status IN (...) AND umur sejak dibuat >= 2 jam) salah dua arah:
+    // pesanan in_repair 3 jam adalah pekerjaan normal, sementara pesanan
+    // yang macet di in_diagnosis/estimated/customer_approved tidak pernah
+    // muncul. Ambang per status (jam): submitted 24, assigned 24,
+    // scheduled 48, in_diagnosis 48, estimated 48, customer_approved 72.
+    // in_repair hanya tertunda bila melebihi estimasi durasi layanannya
+    // (minimal 24 jam) — pekerjaan yang sedang berjalan bukan keterlambatan.
     const rows = await query<any[]>(
-      `SELECT 
+      `SELECT
         rr.id,
         rr.order_code,
         ac.name AS category_name,
         rr.current_status,
         rr.problem_description,
         rr.created_at,
-        TIMESTAMPDIFF(HOUR, rr.created_at, NOW()) AS elapsed_hours,
+        TIMESTAMPDIFF(HOUR, COALESCE(h.status_since, rr.created_at), NOW()) AS elapsed_hours,
         tp.full_name AS assigned_technician
        FROM repair_requests rr
        JOIN appliance_categories ac ON rr.category_id = ac.id
+       LEFT JOIN services s ON s.id = rr.service_id
+       LEFT JOIN (
+         SELECT h1.repair_request_id, MAX(h1.created_at) AS status_since
+         FROM repair_status_history h1
+         JOIN repair_requests rr1 ON rr1.id = h1.repair_request_id
+         WHERE h1.new_status = rr1.current_status
+         GROUP BY h1.repair_request_id
+       ) h ON h.repair_request_id = rr.id
        LEFT JOIN technician_assignments ta ON (ta.repair_request_id = rr.id AND ta.status IN ('accepted', 'offered'))
        LEFT JOIN technician_profiles tp ON ta.technician_id = tp.user_id
-       WHERE rr.current_status IN ('submitted', 'assigned', 'scheduled', 'in_repair')
+       WHERE rr.current_status IN ('submitted', 'assigned', 'scheduled', 'in_diagnosis', 'estimated', 'customer_approved', 'in_repair')
          AND rr.deleted_at IS NULL
-         AND TIMESTAMPDIFF(HOUR, rr.created_at, NOW()) >= 2
+         AND TIMESTAMPDIFF(HOUR, COALESCE(h.status_since, rr.created_at), NOW()) >= CASE rr.current_status
+           WHEN 'submitted' THEN 24
+           WHEN 'assigned' THEN 24
+           WHEN 'scheduled' THEN 48
+           WHEN 'in_diagnosis' THEN 48
+           WHEN 'estimated' THEN 48
+           WHEN 'customer_approved' THEN 72
+           WHEN 'in_repair' THEN GREATEST(24, CEIL(COALESCE(s.estimated_duration_min, 60) / 30))
+           ELSE 999999
+         END
        ORDER BY rr.created_at ASC
        LIMIT 10`
     );
@@ -903,7 +1009,17 @@ export async function getAdminDelayedRepairs() {
         technician: r.assigned_technician || 'Belum ada teknisi ditugaskan (Menunggu Penugasan)',
         cause: r.current_status === 'submitted'
           ? 'Belum ada teknisi yang menerima tawaran penugasan'
-          : 'Pengerjaan unit atau proses suku cadang memakan waktu lebih lama',
+          : r.current_status === 'assigned'
+          ? 'Sudah ditugaskan tetapi kunjungan belum dijadwalkan'
+          : r.current_status === 'scheduled'
+          ? 'Sudah dijadwalkan tetapi kunjungan belum terlaksana'
+          : r.current_status === 'in_diagnosis'
+          ? 'Diagnosis belum selesai'
+          : r.current_status === 'estimated'
+          ? 'Estimasi biaya belum diselesaikan'
+          : r.current_status === 'customer_approved'
+          ? 'Menunggu persetujuan/pembayaran pelanggan'
+          : 'Pengerjaan melebihi estimasi durasi layanan',
       }));
     }
     // Tidak ada perbaikan tertunda: [] (bukan pesanan demo).
@@ -1463,6 +1579,18 @@ export interface DatabaseUserRecord {
 }
 
 /**
+ * N14 — Escape karakter wildcard LIKE (`%`, `_`) pada istilah pencarian dari
+ * pengguna, memakai `!` sebagai karakter escape (klausa LIKE yang memakai
+ * hasil helper ini WAJIB menambahkan `ESCAPE '!'`). Tanpa escape, searchTerm
+ * `%` cocok dengan SEMUA baris dan `_` cocok dengan satu karakter apa pun.
+ * `!` dipilih sebagai karakter escape (bukan backslash) agar tidak ada
+ * ambiguitas escaping bertingkat antara JavaScript dan MySQL.
+ */
+function escapeLikePattern(value: string): string {
+  return value.replace(/!/g, '!!').replace(/%/g, '!%').replace(/_/g, '!_');
+}
+
+/**
  * Mencari data pengguna berdasarkan nomor telepon, email, nama, atau UUID
  */
 export async function searchDatabaseUsers(
@@ -1488,8 +1616,22 @@ export async function searchDatabaseUsers(
     }
   }
 
-  const phoneSuffixPattern = isPhone ? `%${digitsOnly.slice(-8)}%` : `%${cleanTerm}%`;
-  const termPattern = `%${cleanTerm}%`;
+  const phoneSuffixPattern = isPhone ? `%${escapeLikePattern(digitsOnly.slice(-10))}` : `%${escapeLikePattern(cleanTerm)}%`;
+  const termPattern = `%${escapeLikePattern(cleanTerm)}%`;
+
+  // N14: pencocokan telepon memakai sufiks AKHIR nomor (10 digit terakhir),
+  // bukan `%8 digit%` di posisi mana pun (false positive antar-nomor yang
+  // mengandung 8 digit yang sama di tengah). 10 digit terakhir sama untuk
+  // semua format awalan (0…, 62…, +62…) sehingga pencocokan akhir
+  // menoleransi perbedaan format tanpa mengorbankan presisi.
+
+  // N14: hormati options.role (sebelumnya parameter diterima tetapi tidak
+  // pernah dipakai di SQL, sehingga pemanggil yang memfilter peran tidak
+  // mendapat filter itu). Allowlist ketat — nilai lain diabaikan.
+  const roleFilter = options.role === 'admin' || options.role === 'customer' || options.role === 'technician'
+    ? 'AND u.role = ?'
+    : '';
+  const roleParams: any[] = roleFilter ? [options.role] : [];
 
   try {
     const rows = await query<any[]>(
@@ -1513,19 +1655,20 @@ export async function searchDatabaseUsers(
        LEFT JOIN customer_profiles cp ON u.id = cp.user_id
        LEFT JOIN technician_profiles tp ON u.id = tp.user_id
        WHERE u.deleted_at IS NULL
+         ${roleFilter}
          AND (
            u.phone_number = ?
            OR u.phone_number = ?
-           OR u.phone_number LIKE ?
+           OR u.phone_number LIKE ? ESCAPE '!'
            OR u.email = ?
-           OR u.email LIKE ?
+           OR u.email LIKE ? ESCAPE '!'
            OR u.uuid = ?
-           OR cp.full_name LIKE ?
-           OR tp.full_name LIKE ?
+           OR cp.full_name LIKE ? ESCAPE '!'
+           OR tp.full_name LIKE ? ESCAPE '!'
          )
        ORDER BY u.created_at DESC
        LIMIT ?`,
-      [cleanTerm, phoneLike1, phoneSuffixPattern, cleanTerm, termPattern, cleanTerm, termPattern, termPattern, limit]
+      [...roleParams, cleanTerm, phoneLike1, phoneSuffixPattern, cleanTerm, termPattern, cleanTerm, termPattern, termPattern, limit]
     );
 
     if (rows && rows.length > 0) {
@@ -1565,8 +1708,12 @@ export async function searchDatabaseOrders(
   options: { status?: string; limit?: number } = {}
 ) {
   const cleanTerm = (searchTerm || '').trim();
+  // N14: istilah kosong -> [] (konsisten dengan searchDatabaseUsers /
+  // searchDatabaseTechnicians — tanpa ini pola `%%` mengembalikan semua
+  // pesanan).
+  if (!cleanTerm) return [];
   const limit = Math.min(20, Math.max(1, options.limit || 5));
-  const termPattern = `%${cleanTerm}%`;
+  const termPattern = `%${escapeLikePattern(cleanTerm)}%`;
 
   try {
     const rows = await query<any[]>(
@@ -1600,11 +1747,11 @@ export async function searchDatabaseOrders(
        WHERE rr.deleted_at IS NULL
          AND (
            rr.order_code = ?
-           OR rr.order_code LIKE ?
-           OR cp.full_name LIKE ?
-           OR u_cust.phone_number LIKE ?
-           OR ac.name LIKE ?
-           OR rr.problem_description LIKE ?
+           OR rr.order_code LIKE ? ESCAPE '!'
+           OR cp.full_name LIKE ? ESCAPE '!'
+           OR u_cust.phone_number LIKE ? ESCAPE '!'
+           OR ac.name LIKE ? ESCAPE '!'
+           OR rr.problem_description LIKE ? ESCAPE '!'
          )
        ORDER BY rr.created_at DESC
        LIMIT ?`,
@@ -1662,7 +1809,7 @@ export async function searchDatabaseTechnicians(
   if (!cleanTerm) return [];
 
   const limit = Math.min(20, Math.max(1, options.limit || 5));
-  const termPattern = `%${cleanTerm}%`;
+  const termPattern = `%${escapeLikePattern(cleanTerm)}%`;
   // N16: filter verifikasi default; hanya admin eksplisit yang boleh
   // melihat teknisi belum terverifikasi/ditolak/ditangguhkan.
   const verifiedFilter = options.includeUnverified === true
@@ -1691,9 +1838,9 @@ export async function searchDatabaseTechnicians(
        WHERE u.deleted_at IS NULL
          ${verifiedFilter}
          AND (
-           tp.full_name LIKE ?
-           OR u.phone_number LIKE ?
-           OR u.email LIKE ?
+           tp.full_name LIKE ? ESCAPE '!'
+           OR u.phone_number LIKE ? ESCAPE '!'
+           OR u.email LIKE ? ESCAPE '!'
          )
        ORDER BY tp.rating_avg DESC, tp.rating_count DESC
        LIMIT ?`,
@@ -1732,8 +1879,12 @@ export async function searchDatabaseInvoices(
   options: { status?: string; limit?: number } = {}
 ) {
   const cleanTerm = (searchTerm || '').trim();
+  // N14: istilah kosong -> [] (konsisten dengan searchDatabaseUsers /
+  // searchDatabaseTechnicians — tanpa ini pola `%%` mengembalikan semua
+  // invoice).
+  if (!cleanTerm) return [];
   const limit = Math.min(20, Math.max(1, options.limit || 5));
-  const termPattern = `%${cleanTerm}%`;
+  const termPattern = `%${escapeLikePattern(cleanTerm)}%`;
 
   try {
     const rows = await query<any[]>(
@@ -1757,11 +1908,11 @@ export async function searchDatabaseInvoices(
        JOIN users u ON inv.customer_id = u.id
        LEFT JOIN customer_profiles cp ON u.id = cp.user_id
        WHERE inv.invoice_number = ?
-          OR inv.invoice_number LIKE ?
+          OR inv.invoice_number LIKE ? ESCAPE '!'
           OR rr.order_code = ?
-          OR rr.order_code LIKE ?
-          OR cp.full_name LIKE ?
-          OR u.phone_number LIKE ?
+          OR rr.order_code LIKE ? ESCAPE '!'
+          OR cp.full_name LIKE ? ESCAPE '!'
+          OR u.phone_number LIKE ? ESCAPE '!'
        ORDER BY inv.created_at DESC
        LIMIT ?`,
       [cleanTerm, termPattern, cleanTerm, termPattern, termPattern, termPattern, limit]
@@ -2053,8 +2204,10 @@ export function buildGovernedQuerySQL(
       whereParts.push(`${qcol} IN (${items.map(() => '?').join(', ')})`);
       params.push(...items);
     } else if (op === 'LIKE') {
-      whereParts.push(`${qcol} LIKE ?`);
-      params.push(`%${String(f.value ?? '')}%`);
+      // N14: nilai LIKE dari AI juga di-escape (tanpa ini nilai `%` cocok
+      // dengan semua baris). `ESCAPE '!'` — lihat escapeLikePattern.
+      whereParts.push(`${qcol} LIKE ? ESCAPE '!'`);
+      params.push(`%${escapeLikePattern(String(f.value ?? ''))}%`);
     } else {
       whereParts.push(`${qcol} ${op} ?`);
       params.push(f.value);

@@ -431,7 +431,29 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
       // salah mengklasifikasi error 429 sebagai invalid_api_key.
       const lower = sanitizedMsg.toLowerCase();
 
-      if (lower.includes('resource_exhausted') || lower.includes('quota') || lower.includes('rate limit') || lower.includes('too many requests') || lower.includes('429')) {
+      // M5: error jaringan transient (tanpa respons HTTP sama sekali). Sinyal
+      // diambil dari pesan + kode error Node (error.code / cause.code),
+      // karena fetch yang gagal DNS/koneksi sering hanya membawa pesan
+      // generik "fetch failed" dengan kode di cause. Tanpa cabang ini semua
+      // error jaringan jatuh ke unknown_error dan tidak pernah memicu
+      // retry/fallback — padahal inilah kasus paling layak untuk keduanya.
+      // Cabang ini HARUS pertama: tidak ada respons HTTP berarti tidak ada
+      // status 4xx/5xx yang bisa diklaim dari substring pesan.
+      const networkSignal = `${lower} ${typeof error?.code === 'string' ? error.code : ''} ${typeof error?.cause?.code === 'string' ? error.cause.code : ''} ${typeof error?.cause?.message === 'string' ? error.cause.message : ''}`.toLowerCase();
+      const isNetworkError =
+        networkSignal.includes('enotfound') ||
+        networkSignal.includes('econnrefused') ||
+        networkSignal.includes('econnreset') ||
+        networkSignal.includes('eai_again') ||
+        networkSignal.includes('socket hang up') ||
+        networkSignal.includes('fetch failed');
+
+      if (isNetworkError) {
+        status = 'provider_error';
+        httpStatusCode = null; // tidak ada respons HTTP yang diterima
+        isRetryable = true;
+        isFallbackEligible = true;
+      } else if (lower.includes('resource_exhausted') || lower.includes('quota') || lower.includes('rate limit') || lower.includes('too many requests') || lower.includes('429')) {
         status = 'rate_limit_exceeded';
         httpStatusCode = 429;
         isRetryable = true;
