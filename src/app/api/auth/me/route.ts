@@ -6,6 +6,7 @@ import {
   verifyUserToken,
   verifyAdminToken,
 } from '@/lib/auth';
+import { checkSessionRevocation } from '@/lib/token-revocation';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,13 +17,13 @@ export async function GET(request: NextRequest) {
     const adminCookie = request.cookies.get(ADMIN_COOKIE_NAME)?.value;
 
     let sessionUserId: number | null = null;
-    let sessionRole: string | null = null;
+    let sessionPayload: { userId: number; tokenVersion?: number; jti?: string } | null = null;
 
     if (userCookie) {
       const userPayload = await verifyUserToken(userCookie);
       if (userPayload) {
         sessionUserId = userPayload.userId;
-        sessionRole = userPayload.role;
+        sessionPayload = userPayload;
       }
     }
 
@@ -30,13 +31,28 @@ export async function GET(request: NextRequest) {
       const adminPayload = await verifyAdminToken(adminCookie);
       if (adminPayload) {
         sessionUserId = adminPayload.userId;
-        sessionRole = 'admin';
+        sessionPayload = adminPayload;
       }
     }
 
-    if (!sessionUserId) {
+    if (!sessionUserId || !sessionPayload) {
       return NextResponse.json(
         { success: false, message: 'Tidak ada sesi autentikasi aktif' },
+        { status: 401 }
+      );
+    }
+
+    // T5+T6: route ini memverifikasi token langsung (bukan lewat
+    // getUserSession/getAdminSession) sehingga HARUS menjalankan
+    // pemeriksaan pencabutan yang sama — bila tidak, token yang sudah
+    // dicabut (reset password), akun yang di-suspend, dan token yang
+    // sudah logout tetap bisa mengambil data profil di sini. Role/status
+    // yang dikembalikan di bawah sudah dibaca dari DB (revalidasi T6),
+    // tetapi tanpa pemeriksaan ini token yang dicabut tetap lolos.
+    const revocation = await checkSessionRevocation(sessionPayload);
+    if (!revocation.valid) {
+      return NextResponse.json(
+        { success: false, message: `Sesi tidak valid: ${revocation.reason || 'sesi dicabut'}` },
         { status: 401 }
       );
     }
