@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getUserSession } from '@/lib/auth';
-import { getOrCreateSession, markSessionConverted } from '@/lib/chatbot/repository';
+import { getOrCreateSession, isSessionForbiddenError, markSessionConverted } from '@/lib/chatbot/repository';
 
 export async function POST(req: NextRequest) {
   try {
@@ -26,6 +26,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // F1/F2: getOrCreateSession menolak (403) bila sesi dimiliki pengguna lain.
+    // Sesi guest boleh dikonversi (alur guest → booking yang sah), tetapi TIDAK
+    // diikat ke peminta — konversi hanya menautkan ai_session_id ke pesanan.
     const session = await getOrCreateSession(sessionUuid, userSession.userId);
     await markSessionConverted(session.id);
 
@@ -44,6 +47,13 @@ export async function POST(req: NextRequest) {
     });
   } catch (error: any) {
     console.error('Error in POST /api/chat/convert-to-order:', error);
+    // F1: sesi milik pengguna lain tidak boleh dikonversi peminta ini.
+    if (isSessionForbiddenError(error)) {
+      return NextResponse.json(
+        { success: false, message: 'Sesi chat ini milik pengguna lain.' },
+        { status: 403 }
+      );
+    }
     return NextResponse.json(
       { success: false, message: 'Gagal mengonversi sesi ke pesanan.' },
       { status: 500 }

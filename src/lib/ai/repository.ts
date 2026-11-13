@@ -484,7 +484,10 @@ export async function saveProviderConfig(
           apiKey: activePlainKey,
           selectedModel,
         },
-        adminId
+        adminId,
+        // H1: auto-probe menguji key yang BARU SAJA DISIMPAN (= kredensial
+        // tersimpan), jadi hasilnya boleh memperbarui status tersimpan.
+        { usesStoredCredentials: true }
       );
 
       if (probeResult.status === 'success') {
@@ -532,6 +535,14 @@ export async function saveProviderConfig(
 
 /**
  * Menghapus Provider Kustom dari Database dan Memori
+ *
+ * M1: Bila DELETE di database gagal, fungsi ini MELEMPAR error dan provider
+ * TIDAK dihapus dari memori (sebelumnya kegagalan hanya di-log lalu tetap
+ * dilaporkan sukses). Semua validasi dilakukan SEBELUM mutasi apa pun:
+ * bila provider yang dihapus sedang aktif, key Gemini (provider pengganti)
+ * diperiksa dulu — sebelumnya pemeriksaan ini terjadi di
+ * setActiveAIProvider('gemini') SETELAH penghapusan, sehingga route
+ * mengembalikan 400 padahal provider sudah terhapus.
  */
 export async function deleteProviderConfig(
   provider: string,
@@ -542,28 +553,46 @@ export async function deleteProviderConfig(
     throw new Error(`Provider bawaan sistem '${provider}' tidak dapat dihapus.`);
   }
 
-  try {
-    await query('DELETE FROM ai_provider_configs WHERE provider = ?', [provider]);
-    await recordAIAuditLog({
-      adminUserId: adminId,
-      provider,
-      action: 'DELETE_PROVIDER',
-      changes: { provider },
-      ipAddress: clientMeta.ip,
-      userAgent: clientMeta.userAgent,
-    });
-  } catch (err: any) {
-    console.warn(`[AI Repository] Gagal hapus provider di DB: ${err.message}`);
+  // 1. VALIDASI DULU (tanpa mutasi): bila provider yang dihapus sedang aktif,
+  // pastikan provider pengganti (Gemini) memiliki API key.
+  const currentGlobal = await getGlobalAISettings();
+  const isActiveProvider = currentGlobal.activeProvider === provider;
+  const isFallbackProvider = currentGlobal.fallbackProvider === provider;
+
+  if (isActiveProvider) {
+    const geminiConfig = await getProviderRuntimeConfig('gemini');
+    if (!geminiConfig.apiKey || !geminiConfig.apiKey.trim()) {
+      throw new Error(
+        `Tidak dapat menghapus provider aktif '${provider}': provider pengganti Gemini belum memiliki API Key. Harap simpan API Key Gemini terlebih dahulu.`
+      );
+    }
   }
 
+  // 2. Hapus dari database (Source of Truth). Bila gagal, lempar error dan
+  // jangan sentuh state in-memory.
+  try {
+    await query('DELETE FROM ai_provider_configs WHERE provider = ?', [provider]);
+  } catch (err: any) {
+    throw new Error(`Gagal menghapus provider '${provider}' dari database: ${err.message}. Provider tidak dihapus.`);
+  }
+
+  await recordAIAuditLog({
+    adminUserId: adminId,
+    provider,
+    action: 'DELETE_PROVIDER',
+    changes: { provider },
+    ipAddress: clientMeta.ip,
+    userAgent: clientMeta.userAgent,
+  });
+
+  // 3. Baru setelah DB memastikan penghapusan, hapus dari memori.
   delete IN_MEMORY_CONFIGS[provider];
 
   // Jika provider yang dihapus sedang aktif, kembalikan ke gemini
-  const currentGlobal = await getGlobalAISettings();
-  if (currentGlobal.activeProvider === provider) {
+  if (isActiveProvider) {
     await setActiveAIProvider('gemini', adminId, clientMeta);
   }
-  if (currentGlobal.fallbackProvider === provider) {
+  if (isFallbackProvider) {
     await setAutomaticFallbackSettings(currentGlobal.enableFallback, 'groq', adminId, clientMeta);
   }
 
@@ -624,7 +653,11 @@ export async function setActiveAIProvider(
       userAgent: clientMeta.userAgent,
     });
   } catch (err: any) {
-    console.warn(`[AI Repository] DB switch failed, using in-memory state: ${err.message}`);
+    // H2: Database adalah Source of Truth. Bila penulisan DB gagal, LEMPAR
+    // error (pola yang sama dengan saveProviderConfig pasca-PR #2) dan JANGAN
+    // perbarui state in-memory — sebelumnya kegagalan hanya di-log lalu tetap
+    // dilaporkan sukses, sehingga pengaturan kembali ke nilai lama saat restart.
+    throw new Error(`Gagal mengubah provider aktif di database: ${err.message}. Pengaturan tidak berubah.`);
   }
 
   inMemoryGlobalSettings = {
@@ -667,15 +700,31 @@ export async function setAutomaticFallbackSettings(
   const nextVersion = currentSettings.version + 1;
 
   try {
+    // H2+M1: pakai INSERT ... ON DUPLICATE KEY UPDATE (pola yang sama dengan
+    // setActiveAIProvider), bukan UPDATE ... WHERE id = 1 — pada DB fresh yang
+    // belum punya baris id = 1, UPDATE diam-diam tidak mengubah apa-apa dan
+    // pengaturan fallback tidak pernah tersimpan. Kolom active_provider hanya
+    // dipakai untuk cabang INSERT (nilai = provider aktif saat ini); cabang
+    // UPDATE tidak menyentuhnya. Semua kolom yang sebelumnya ditulis
+    // (enable_fallback, fallback_provider, version, updated_by_admin_id,
+    // updated_at) tetap ditulis.
     await query(
-      `UPDATE ai_global_settings SET
-        enable_fallback = ?,
-        fallback_provider = ?,
+      `INSERT INTO ai_global_settings (
+        id, active_provider, enable_fallback, fallback_provider, version, updated_by_admin_id
+      ) VALUES (1, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        enable_fallback = VALUES(enable_fallback),
+        fallback_provider = VALUES(fallback_provider),
         version = version + 1,
-        updated_by_admin_id = ?,
-        updated_at = CURRENT_TIMESTAMP
-       WHERE id = 1`,
-      [enableFallback ? 1 : 0, fallbackProvider, adminId]
+        updated_by_admin_id = VALUES(updated_by_admin_id),
+        updated_at = CURRENT_TIMESTAMP`,
+      [
+        currentSettings.activeProvider,
+        enableFallback ? 1 : 0,
+        fallbackProvider,
+        nextVersion,
+        adminId,
+      ]
     );
 
     await recordAIAuditLog({
@@ -691,7 +740,9 @@ export async function setAutomaticFallbackSettings(
       userAgent: clientMeta.userAgent,
     });
   } catch (err: any) {
-    console.warn(`[AI Repository] DB fallback toggle failed, using in-memory: ${err.message}`);
+    // H2: bila penulisan DB gagal, LEMPAR error (pola saveProviderConfig
+    // pasca-PR #2) dan JANGAN perbarui state in-memory.
+    throw new Error(`Gagal menyimpan pengaturan fallback di database: ${err.message}. Pengaturan tidak berubah.`);
   }
 
   inMemoryGlobalSettings = {
@@ -711,11 +762,21 @@ export async function setAutomaticFallbackSettings(
 
 /**
  * Mencatat Hasil Connection Test ke Database & Memperbarui Status Provider
+ *
+ * H1: `opts.usesStoredCredentials` (default true) menandakan apakah tes
+ * memakai kredensial tersimpan. Bila tes memakai override dari form yang
+ * belum disimpan (false), hasil tes TETAP dicatat ke ai_connection_test_logs,
+ * tetapi status tersimpan (ai_provider_configs.last_connection_status dan
+ * status in-memory) TIDAK disentuh — status itu adalah milik konfigurasi
+ * tersimpan, bukan milik key yang sedang dites.
  */
 export async function recordConnectionTestLog(
   testResult: AIConnectionTestResult,
-  adminId?: number
+  adminId?: number,
+  opts?: { usesStoredCredentials?: boolean }
 ): Promise<void> {
+  const usesStoredCredentials = opts?.usesStoredCredentials !== false;
+
   const statusToConfigStatus: Record<string, AIConnectionStatus> = {
     success: 'connected',
     invalid_api_key: 'connection_error',
@@ -747,14 +808,18 @@ export async function recordConnectionTestLog(
       ]
     );
 
-    await query(
-      `UPDATE ai_provider_configs SET
-        last_connection_status = ?,
-        last_tested_at = CURRENT_TIMESTAMP,
-        last_error_message = ?
-       WHERE provider = ?`,
-      [newStatus, testResult.errorMessage, testResult.provider]
-    );
+    // H1: hanya perbarui status konfigurasi tersimpan bila tes memakai
+    // kredensial tersimpan. Tes override hanya tercatat di log di atas.
+    if (usesStoredCredentials) {
+      await query(
+        `UPDATE ai_provider_configs SET
+          last_connection_status = ?,
+          last_tested_at = CURRENT_TIMESTAMP,
+          last_error_message = ?
+         WHERE provider = ?`,
+        [newStatus, testResult.errorMessage, testResult.provider]
+      );
+    }
   } catch {
     // Fallback
   }
@@ -762,7 +827,9 @@ export async function recordConnectionTestLog(
   inMemoryConnectionLogs.unshift(testResult);
   if (inMemoryConnectionLogs.length > 50) inMemoryConnectionLogs.pop();
 
-  if (IN_MEMORY_CONFIGS[testResult.provider]) {
+  // H1: status in-memory adalah cermin status tersimpan, jadi ikut hanya
+  // diperbarui untuk tes kredensial tersimpan.
+  if (usesStoredCredentials && IN_MEMORY_CONFIGS[testResult.provider]) {
     IN_MEMORY_CONFIGS[testResult.provider].lastConnectionStatus = newStatus;
     IN_MEMORY_CONFIGS[testResult.provider].lastTestedAt = testResult.testedAt;
     IN_MEMORY_CONFIGS[testResult.provider].lastErrorMessage = testResult.errorMessage;

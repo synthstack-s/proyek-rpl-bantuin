@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getUserSession, getAdminSession } from '@/lib/auth';
-import { getOrCreateSession } from '@/lib/chatbot/repository';
+import { getOrCreateSession, isSessionForbiddenError } from '@/lib/chatbot/repository';
 import { ChatUserContext } from '@/lib/chatbot/types';
 import { getPageContextSuggestions } from '@/lib/chatbot/engine';
 
@@ -69,6 +69,14 @@ export async function POST(req: NextRequest) {
     });
   } catch (error: any) {
     console.error('Error in POST /api/chat/session:', error);
+    // F1: sesi milik pengguna lain — getOrCreateSession menolak, bukan 500.
+    // Objek sesi orang lain tidak pernah dikembalikan.
+    if (isSessionForbiddenError(error)) {
+      return NextResponse.json(
+        { success: false, message: 'Sesi chat ini milik pengguna lain.' },
+        { status: 403 }
+      );
+    }
     return NextResponse.json(
       { success: false, message: 'Gagal menginisialisasi sesi chat.' },
       { status: 500 }

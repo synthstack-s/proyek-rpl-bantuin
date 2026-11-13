@@ -20,6 +20,22 @@ export const getAdminOverview = DataService.getAdminOperationalOverview;
 export const getApplianceCategories = DataService.getPublicApplianceCategories;
 export const getTechnicianTasks = (userId: number) => DataService.getTechnicianAssignedTasks(userId);
 
+
+/**
+ * N1: data-service mengembalikan null saat database tidak dapat diakses
+ * (daftar kosong mengembalikan [], agregat kosong mengembalikan objek 0).
+ * null di sini berarti error, bukan "tidak ada data" — laporkan sebagai
+ * error agar AI tidak menyajikan "tidak ada data" saat sebenarnya DB down.
+ * (Pengecualian: pencarian objek tunggal — profil/detail — tetap
+ * mengembalikan data: null, karena null di sana juga berarti "tidak ditemukan".)
+ */
+function dbResult(data: any): { success: boolean; data?: any; error?: string } {
+  if (data === null || data === undefined) {
+    return { success: false, error: 'Database tidak dapat diakses saat ini. Coba lagi nanti.' };
+  }
+  return { success: true, data };
+}
+
 /**
  * Eksekusi tool berbasis peran pengguna (Role-Based Access Control)
  * Memvalidasi apakah peran pengguna diizinkan memanggil fungsi tersebut
@@ -64,13 +80,12 @@ export async function executeRoleBasedTool(
             error: 'Akses ditolak: Riwayat pesanan hanya dapat diakses oleh Pelanggan yang telah masuk.',
           };
         }
-        return {
-          success: true,
-          data: await DataService.getCustomerRepairs(userContext.userId, {
+        return dbResult(
+          await DataService.getCustomerRepairs(userContext.userId, {
             status: args?.status,
             limit: args?.limit,
-          }),
-        };
+          })
+        );
 
       case 'getCustomerRepairDetail':
         if (userContext.role !== 'customer' || !userContext.userId) {
@@ -91,12 +106,11 @@ export async function executeRoleBasedTool(
             error: 'Akses ditolak: Data tagihan hanya dapat diakses oleh Pelanggan yang telah masuk.',
           };
         }
-        return {
-          success: true,
-          data: await DataService.getCustomerInvoices(userContext.userId, {
+        return dbResult(
+          await DataService.getCustomerInvoices(userContext.userId, {
             status: args?.status,
-          }),
-        };
+          })
+        );
 
       case 'getCustomerMessages':
         if (userContext.role !== 'customer' || !userContext.userId) {
@@ -105,10 +119,7 @@ export async function executeRoleBasedTool(
             error: 'Akses ditolak: Pesan koordinasi perbaikan hanya dapat diakses oleh Pelanggan bersangkutan.',
           };
         }
-        return {
-          success: true,
-          data: await DataService.getCustomerMessages(userContext.userId, args?.orderCodeOrId),
-        };
+        return dbResult(await DataService.getCustomerMessages(userContext.userId, args?.orderCodeOrId));
 
       // ----------------------------------------------------------------------
       // TOOL KHUSUS TEKNISI (Hanya Teknisi Terautentikasi)
@@ -130,13 +141,12 @@ export async function executeRoleBasedTool(
             error: 'Akses ditolak: Fitur tugas teknisi hanya dapat diakses oleh Teknisi terverifikasi.',
           };
         }
-        return {
-          success: true,
-          data: await DataService.getTechnicianAssignedTasks(userContext.userId, {
+        return dbResult(
+          await DataService.getTechnicianAssignedTasks(userContext.userId, {
             status: args?.status,
             limit: args?.limit,
-          }),
-        };
+          })
+        );
 
       case 'getTechnicianPerformanceMetrics':
         if (userContext.role !== 'technician' || !userContext.userId) {
@@ -145,7 +155,7 @@ export async function executeRoleBasedTool(
             error: 'Akses ditolak: Metrik performa hanya dapat diakses oleh Teknisi bersangkutan.',
           };
         }
-        return { success: true, data: await DataService.getTechnicianPerformanceMetrics(userContext.userId) };
+        return dbResult(await DataService.getTechnicianPerformanceMetrics(userContext.userId));
 
       case 'executeTechnicianTaskStatusUpdate':
         if (userContext.role !== 'technician' || !userContext.userId) {
@@ -167,7 +177,7 @@ export async function executeRoleBasedTool(
             error: 'Akses ditolak: Ringkasan operasional hanya dapat diakses oleh Administrator.',
           };
         }
-        return { success: true, data: await DataService.getAdminOperationalOverview() };
+        return dbResult(await DataService.getAdminOperationalOverview());
 
       case 'getAdminUserStats':
         if (userContext.role !== 'admin') {
@@ -176,7 +186,7 @@ export async function executeRoleBasedTool(
             error: 'Akses ditolak: Statistik pengguna sistem hanya dapat diakses oleh Administrator.',
           };
         }
-        return { success: true, data: await DataService.getAdminUserStats() };
+        return dbResult(await DataService.getAdminUserStats());
 
       case 'getAdminSystemSettings':
         if (userContext.role !== 'admin') {
@@ -185,7 +195,7 @@ export async function executeRoleBasedTool(
             error: 'Akses ditolak: Pengaturan konfigurasi sistem hanya dapat diakses oleh Administrator.',
           };
         }
-        return { success: true, data: await DataService.getAdminSystemSettings() };
+        return dbResult(await DataService.getAdminSystemSettings());
 
       case 'getAdminDelayedRepairs':
         if (userContext.role !== 'admin') {
@@ -194,7 +204,7 @@ export async function executeRoleBasedTool(
             error: 'Akses ditolak: Data perbaikan tertunda hanya dapat diakses oleh Administrator.',
           };
         }
-        return { success: true, data: await DataService.getAdminDelayedRepairs() };
+        return dbResult(await DataService.getAdminDelayedRepairs());
 
       case 'getAdminTechnicianWorkload':
         if (userContext.role !== 'admin') {
@@ -203,7 +213,7 @@ export async function executeRoleBasedTool(
             error: 'Akses ditolak: Data beban kerja teknisi hanya dapat diakses oleh Administrator.',
           };
         }
-        return { success: true, data: await DataService.getAdminTechnicianWorkload() };
+        return dbResult(await DataService.getAdminTechnicianWorkload());
 
       case 'getAdminFinancialAnalytics':
         if (userContext.role !== 'admin') {
@@ -212,7 +222,7 @@ export async function executeRoleBasedTool(
             error: 'Akses ditolak: Data keuangan hanya dapat diakses oleh Administrator.',
           };
         }
-        return { success: true, data: await DataService.getAdminFinancialAnalytics() };
+        return dbResult(await DataService.getAdminFinancialAnalytics());
 
       case 'getAdminSystemHealth':
         if (userContext.role !== 'admin') {
@@ -230,7 +240,7 @@ export async function executeRoleBasedTool(
             error: 'Akses ditolak: Log audit hanya dapat diakses oleh Administrator.',
           };
         }
-        return { success: true, data: await DataService.getAdminRecentAuditLogs(args?.limit) };
+        return dbResult(await DataService.getAdminRecentAuditLogs(args?.limit));
 
       case 'getCustomerCancellationGuide':
         return { success: true, data: DataService.getCustomerCancellationGuide() };
@@ -248,7 +258,7 @@ export async function executeRoleBasedTool(
             error: 'Akses ditolak: Analitik pelanggan hanya dapat diakses oleh Administrator.',
           };
         }
-        return { success: true, data: await DataService.getAdminCustomerAnalytics() };
+        return dbResult(await DataService.getAdminCustomerAnalytics());
 
       case 'getAdminOperationalReport':
         if (userContext.role !== 'admin') {
@@ -257,7 +267,7 @@ export async function executeRoleBasedTool(
             error: 'Akses ditolak: Laporan operasional platform hanya dapat diakses oleh Administrator.',
           };
         }
-        return { success: true, data: await DataService.getAdminOperationalReport() };
+        return dbResult(await DataService.getAdminOperationalReport());
 
       case 'getAdminNotificationStatus':
         if (userContext.role !== 'admin') {
@@ -266,7 +276,7 @@ export async function executeRoleBasedTool(
             error: 'Akses ditolak: Status notifikasi sistem hanya dapat diakses oleh Administrator.',
           };
         }
-        return { success: true, data: await DataService.getAdminNotificationStatus() };
+        return dbResult(await DataService.getAdminNotificationStatus());
 
       case 'executeAdminCreateOperationalSnapshot':
         if (userContext.role !== 'admin') {
@@ -346,21 +356,19 @@ export async function executeRoleBasedTool(
             }),
           };
         } else if (userContext.role === 'customer' && userContext.userId) {
-          return {
-            success: true,
-            data: await DataService.getCustomerRepairs(userContext.userId, {
+          return dbResult(
+            await DataService.getCustomerRepairs(userContext.userId, {
               status: args?.status,
               limit: args?.limit,
-            }),
-          };
+            })
+          );
         } else if (userContext.role === 'technician' && userContext.userId) {
-          return {
-            success: true,
-            data: await DataService.getTechnicianAssignedTasks(userContext.userId, {
+          return dbResult(
+            await DataService.getTechnicianAssignedTasks(userContext.userId, {
               status: args?.status,
               limit: args?.limit,
-            }),
-          };
+            })
+          );
         }
         return {
           success: false,
@@ -394,12 +402,11 @@ export async function executeRoleBasedTool(
             }),
           };
         } else if (userContext.role === 'customer' && userContext.userId) {
-          return {
-            success: true,
-            data: await DataService.getCustomerInvoices(userContext.userId, {
+          return dbResult(
+            await DataService.getCustomerInvoices(userContext.userId, {
               status: args?.status,
-            }),
-          };
+            })
+          );
         }
         return {
           success: false,

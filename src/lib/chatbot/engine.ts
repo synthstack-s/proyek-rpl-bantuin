@@ -419,7 +419,9 @@ ${userContext.role === 'admin' ? '💡 _Catatan Administrator: Anda dapat mengga
     // Tagihan & Invoice & Pembayaran
     else if (/tagihan|invoice|belum\s+dibayar|biaya\s+perbaikan|pembayaran\s+berhasil|riwayat\s+transaksi/i.test(norm)) {
       const invoices = await DataService.getCustomerInvoices(custId);
-      if (invoices.length === 0) {
+      if (invoices === null) {
+        directReply = 'Tagihan Anda tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else if (invoices.length === 0) {
         directReply = `Saat ini tidak ada tagihan invoice aktif di akun Anda. Tagihan resmi baru akan diterbitkan secara transparan setelah teknisi menyelesaikan inspeksi/perbaikan dan disetujui oleh Anda.`;
       } else {
         directReply = `📋 **Data Tagihan Invoice Anda:**\n\n` +
@@ -431,7 +433,9 @@ ${userContext.role === 'admin' ? '💡 _Catatan Administrator: Anda dapat mengga
     // Komunikasi & Pesan dari Teknisi
     else if (/pesan\s+terbaru\s+dari\s+teknisi|catatan\s+terbaru|pesan\s+teknisi|hubungi\s+teknisi/i.test(norm)) {
       const messages = await DataService.getCustomerMessages(custId, contextEntities.activeOrderCode || 1);
-      if (messages.length === 0) {
+      if (messages === null) {
+        directReply = 'Pesan teknisi tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else if (messages.length === 0) {
         directReply = `Belum ada pesan chat terbaru dari teknisi untuk pesanan Anda. Anda dapat mengirim pesan langsung melalui fitur **Chat Pesanan** di aplikasi BANTUIN.`;
       } else {
         directReply = `💬 **Pesan Koordinasi Teknisi Terbaru:**\n\n` +
@@ -443,7 +447,9 @@ ${userContext.role === 'admin' ? '💡 _Catatan Administrator: Anda dapat mengga
     // Teknisi Penangan
     else if (/siapa\s+teknisi|teknisi\s+yang\s+menangani|kontak\s+teknisi/i.test(norm)) {
       const repairs = await DataService.getCustomerRepairs(custId, { limit: 1 });
-      if (repairs.length === 0) {
+      if (repairs === null) {
+        directReply = 'Pesanan Anda tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else if (repairs.length === 0) {
         directReply = `Anda belum memiliki pesanan perbaikan aktif di sistem BANTUIN. Silakan ajukan pesanan teknisi terlebih dahulu.`;
       } else {
         const r = repairs[0];
@@ -472,7 +478,9 @@ Anda dapat berkomunikasi secara langsung dengan teknisi melalui fitur **Chat Pes
 
       if (!orderDetail) {
         const repairs = await DataService.getCustomerRepairs(custId, { limit: 3 });
-        if (repairs.length === 0) {
+        if (repairs === null) {
+          directReply = 'Pesanan Anda tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+        } else if (repairs.length === 0) {
           directReply = `Saat ini Anda belum memiliki pesanan perbaikan aktif di database BANTUIN. Jika membutuhkan perbaikan AC, Kulkas, atau peralatan rumah tangga lainnya, silakan klik tombol **Pesan Layanan** di aplikasi.`;
         } else {
           directReply = `📋 **Daftar Pesanan Perbaikan Anda:**\n\n` +
@@ -506,7 +514,10 @@ ${orderDetail.invoice ? `- **Status Tagihan:** Rp ${orderDetail.invoice.totalAmo
         DataService.getTechnicianPerformanceMetrics(techId),
       ]);
 
-      directReply = `👨‍🔧 **Ringkasan Profil & Aktivitas Kinerja Rekan Teknisi:**
+      if (metrics === null) {
+        directReply = 'Data kinerja Anda tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else {
+        directReply = `👨‍🔧 **Ringkasan Profil & Aktivitas Kinerja Rekan Teknisi:**
 - **Nama Lengkap:** ${profile?.fullName || userContext.name}
 - **Email:** ${profile?.email}
 - **Nomor WhatsApp:** ${profile?.phoneNumber}
@@ -516,12 +527,16 @@ ${orderDetail.invoice ? `- **Status Tagihan:** Rp ${orderDetail.invoice.totalAmo
 - **Total Pekerjaan Selesai:** **${metrics.stats.completed} pesanan**
 - **Tugas Aktif Saat Ini:** **${metrics.pendingTasksCount} tugas**
 - **Rata-rata Waktu Penyelesaian:** ${metrics.averageCompletionHours}`;
+      }
     }
 
     // Statistik & Laporan Pekerjaan Selesai / Waktu Penyelesaian
     else if (/jumlah\s+tugas|pekerjaan\s+yang\s+sudah\s+saya\s+selesai|pekerjaan\s+yang\s+sudah\s+selesai|tugas\s+yang\s+belum\s+selesai|rata-rata\s+waktu|pekerjaan\s+masih\s+tertunda|penyebab\s+pekerjaan\s+tertunda|ringkasan\s+aktivitas|ringkasan\s+pekerjaan|performa/i.test(norm)) {
       const metrics = await DataService.getTechnicianPerformanceMetrics(techId);
-      directReply = `📊 **Laporan Kinerja & Aktivitas Pekerjaan Anda:**
+      if (metrics === null) {
+        directReply = 'Data kinerja Anda tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else {
+        directReply = `📊 **Laporan Kinerja & Aktivitas Pekerjaan Anda:**
 - **Pekerjaan Selesai Tuntas:** **${metrics.stats.completed} pesanan**
 - **Tugas Sedang Diterima / Berjalan:** **${metrics.stats.accepted} tugas**
 - **Tawaran Tugas Baru (Offered):** **${metrics.stats.offered} tugas**
@@ -530,12 +545,15 @@ ${orderDetail.invoice ? `- **Status Tagihan:** Rp ${orderDetail.invoice.totalAmo
 - **Tugas Ditolak:** ${metrics.stats.rejected} tugas
 
 💡 **Catatan Kinerja:** Pekerjaan tertunda umumnya disebabkan oleh waktu tunggu kedatangan suku cadang pengganti atau penyesuaian jadwal kunjungan ulang oleh pelanggan.`;
+      }
     }
 
     // Manajemen Tugas & Tugas Hari Ini
     else if (/tugas\s+hari\s+ini|apa\s+saja\s+tugas|tugas\s+mana\s+yang\s+paling\s+mendesak|paling\s+mendesak|deadline|pekerjaan\s+terlambat|detail\s+perangkat|siapa\s+customer/i.test(norm)) {
       const tasks = await DataService.getTechnicianAssignedTasks(techId, { limit: 5 });
-      if (tasks.length === 0) {
+      if (tasks === null) {
+        directReply = 'Daftar tugas Anda tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else if (tasks.length === 0) {
         directReply = `Halo Rekan Teknisi! Saat ini tidak ada tugas perbaikan aktif yang ditugaskan kepada Anda. Tetap pantau dashboard teknisi Anda.`;
       } else {
         directReply = `🛠️ **Daftar Tugas Perbaikan Anda:**\n\n` +
@@ -547,7 +565,9 @@ ${orderDetail.invoice ? `- **Status Tagihan:** Rp ${orderDetail.invoice.totalAmo
     // Diagnosis & Pemeriksaan Awal
     else if (/keluhan\s+customer|riwayat\s+kerusakan|penyebab\s+kerusakan|pemeriksaan\s+awal|rekomendasi\s+tindakan|catatan\s+diagnosis/i.test(norm)) {
       const tasks = await DataService.getTechnicianAssignedTasks(techId, { limit: 1 });
-      if (tasks.length === 0) {
+      if (tasks === null) {
+        directReply = 'Data tugas Anda tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else if (tasks.length === 0) {
         directReply = `Belum ada tugas aktif untuk menampilkan data diagnosis.`;
       } else {
         const t = tasks[0];
@@ -562,7 +582,9 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
     // Komunikasi dengan Customer
     else if (/customer\s+yang\s+harus\s+dihubungi|pesan\s+terbaru\s+dari\s+customer|informasi\s+yang\s+perlu\s+disampaikan/i.test(norm)) {
       const tasks = await DataService.getTechnicianAssignedTasks(techId, { limit: 1 });
-      if (tasks.length === 0) {
+      if (tasks === null) {
+        directReply = 'Data tugas Anda tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else if (tasks.length === 0) {
         directReply = `Saat ini tidak ada customer dari tugas aktif yang perlu Anda hubungi.`;
       } else {
         const t = tasks[0];
@@ -581,21 +603,32 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
     }
 
     // Tindakan Aksi Teknisi: Perbarui Status
-    else if (/terima\s+tugas|menuju\s+lokasi|mulai\s+diagnosa|mulai\s+perbaikan/i.test(norm) && contextEntities.activeOrderCode) {
-      let actionType: 'accept' | 'on_the_way' | 'start_diagnosis' | 'start_repair' = 'on_the_way';
-      if (/terima/i.test(norm)) actionType = 'accept';
-      else if (/diagnosa/i.test(norm)) actionType = 'start_diagnosis';
-      else if (/perbaikan/i.test(norm)) actionType = 'start_repair';
+    // N4: kode order WAJIB disebut eksplisit di pesan yang sama
+    // (orderCodeFromCurrentMessage === true). Jangan pernah mengeksekusi aksi
+    // pada kode order yang diingat dari pesan lama (entitas sesi bisa
+    // kedaluwarsa dan aksi akan mengubah pesanan yang salah).
+    else if (/terima\s+tugas|menuju\s+lokasi|mulai\s+diagnosa|mulai\s+perbaikan/i.test(norm)) {
+      const explicitOrderCode = contextEntities.orderCodeFromCurrentMessage === true
+        ? contextEntities.activeOrderCode
+        : null;
+      if (!explicitOrderCode) {
+        directReply = 'Untuk memperbarui status tugas, sebutkan kode ordernya di pesan yang sama, contoh: "terima tugas REP-2026-0001".';
+      } else {
+        let actionType: 'accept' | 'on_the_way' | 'start_diagnosis' | 'start_repair' = 'on_the_way';
+        if (/terima/i.test(norm)) actionType = 'accept';
+        else if (/diagnosa/i.test(norm)) actionType = 'start_diagnosis';
+        else if (/perbaikan/i.test(norm)) actionType = 'start_repair';
 
-      const actionResult = await ActionService.executeTechnicianTaskStatusUpdate(userContext, {
-        orderCodeOrId: contextEntities.activeOrderCode,
-        newStatus: actionType,
-        notes: userMessage,
-      });
+        const actionResult = await ActionService.executeTechnicianTaskStatusUpdate(userContext, {
+          orderCodeOrId: explicitOrderCode,
+          newStatus: actionType,
+          notes: userMessage,
+        });
 
-      directReply = actionResult.success
-        ? `✅ **Berhasil:** ${actionResult.message}`
-        : `⚠️ **Gagal:** ${actionResult.message}`;
+        directReply = actionResult.success
+          ? `✅ **Berhasil:** ${actionResult.message}`
+          : `⚠️ **Gagal:** ${actionResult.message}`;
+      }
     }
   }
 
@@ -607,28 +640,28 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
     const singleMetric = norm.replace(/[?!.]+$/g, '').trim();
     if (/^(berapa\s+)?total\s+pendapatan$/.test(singleMetric) || singleMetric === 'pendapatan') {
       const finance = await DataService.getAdminFinancialAnalytics();
-      directReply = `Total Pendapatan Terkonfirmasi: Rp ${finance.totalRevenuePaid.toLocaleString('id-ID')}`;
+      directReply = finance === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : `Total Pendapatan Terkonfirmasi: Rp ${finance.totalRevenuePaid.toLocaleString('id-ID')}`;
     } else if (/^(berapa\s+)?total\s+pengguna$/.test(singleMetric) || /^(berapa\s+)?jumlah\s+pengguna$/.test(singleMetric)) {
       const stats = await DataService.getAdminUserStats();
-      directReply = `Total Pengguna Terdaftar: ${stats.totalUsers}`;
+      directReply = stats === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : `Total Pengguna Terdaftar: ${stats.totalUsers}`;
     } else if (/^(berapa\s+)?total\s+pesanan$/.test(singleMetric) || /^(berapa\s+)?jumlah\s+pesanan$/.test(singleMetric)) {
       const overview = await DataService.getAdminOperationalOverview();
-      directReply = `Total Seluruh Pesanan: ${overview.orders.total} pesanan`;
+      directReply = overview === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : `Total Seluruh Pesanan: ${overview.orders.total} pesanan`;
     } else if (/^(berapa\s+)?total\s+(customer|pelanggan)$/.test(singleMetric) || /^(berapa\s+)?jumlah\s+(customer|pelanggan)$/.test(singleMetric)) {
       const custData = await DataService.getAdminCustomerAnalytics();
-      directReply = `Total Pelanggan Terdaftar: ${custData.totalCustomers} akun`;
+      directReply = custData === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : `Total Pelanggan Terdaftar: ${custData.totalCustomers} akun`;
     } else if (/^(berapa\s+)?total\s+teknisi$/.test(singleMetric) || /^(berapa\s+)?jumlah\s+teknisi$/.test(singleMetric)) {
       const stats = await DataService.getAdminUserStats();
-      directReply = `Total Mitra Teknisi: ${stats.technicians.total}`;
+      directReply = stats === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : `Total Mitra Teknisi: ${stats.technicians.total}`;
     } else if (/^(berapa\s+)?(total\s+|jumlah\s+)?pengguna\s+aktif$/.test(singleMetric)) {
       const stats = await DataService.getAdminUserStats();
-      directReply = `Total Pengguna Aktif: ${stats.customers.active + stats.technicians.active + stats.admins.active}`;
+      directReply = stats === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : `Total Pengguna Aktif: ${stats.customers.active + stats.technicians.active + stats.admins.active}`;
     } else if (/^(berapa\s+)?(total\s+|jumlah\s+)?(customer|pelanggan)\s+aktif$/.test(singleMetric)) {
       const stats = await DataService.getAdminUserStats();
-      directReply = `Total Pelanggan Aktif: ${stats.customers.active}`;
+      directReply = stats === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : `Total Pelanggan Aktif: ${stats.customers.active}`;
     } else if (/^(berapa\s+)?(total\s+|jumlah\s+)?teknisi\s+aktif$/.test(singleMetric)) {
       const stats = await DataService.getAdminUserStats();
-      directReply = `Total Teknisi Aktif: ${stats.technicians.active}`;
+      directReply = stats === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : `Total Teknisi Aktif: ${stats.technicians.active}`;
     }
 
     // 0a. Daftar nama pengguna (mode list lugas: "siapa saja nama customer" -> list nama saja)
@@ -654,7 +687,10 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
     // 1. Dashboard, Total Pesanan & Status Perbaikan
     else if (/total\s+pesanan|pesanan\s+bulan\s+ini|pesanan\s+hari\s+ini|pesanan\s+yang\s+dibatalkan|pesanan\s+dibatalkan|perbaikan\s+berdasarkan\s+status|ringkasan\s+operasional|dashboard|operasional\s+hari\s+ini/i.test(norm)) {
       const overview = await DataService.getAdminOperationalOverview();
-      directReply = `📊 **Ringkasan Operasional & Total Pesanan BANTUIN (Admin Dashboard):**
+      if (overview === null) {
+        directReply = 'Ringkasan operasional tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else {
+        directReply = `📊 **Ringkasan Operasional & Total Pesanan BANTUIN (Admin Dashboard):**
 - **Total Seluruh Pesanan:** **${overview.orders.total} pesanan**
 - **Menunggu Penugasan (Submitted):** **${overview.orders.submitted}**
 - **Penugasan Diterima (Assigned):** **${overview.orders.assigned}**
@@ -666,12 +702,16 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
 - **Mitra Teknisi Aktif:** **${overview.technicians.active} teknisi**
 - **Pelanggan Aktif Terdaftar:** **${overview.customers.active} akun**
 - **Pengaduan Terbuka (Open Complaints):** **${overview.complaints.active} kasus**`;
+      }
     }
 
     // 2. Analitik Customer / Pelanggan
     else if (/customer|pelanggan/i.test(norm) && /daftar|terbaru|baru|sering|terbanyak|belum\s+selesai|riwayat|total/i.test(norm)) {
       const custData = await DataService.getAdminCustomerAnalytics();
-      directReply = `👥 **Analisis Pelanggan BANTUIN (Customer Intelligence):**
+      if (custData === null) {
+        directReply = 'Analitik pelanggan tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else {
+        directReply = `👥 **Analisis Pelanggan BANTUIN (Customer Intelligence):**
 - **Total Pelanggan Terdaftar:** **${custData.totalCustomers} akun**
 - **Pelanggan Baru Bulan Ini:** **${custData.newCustomersThisMonth} pelanggan**
 
@@ -679,12 +719,15 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
         custData.recentCustomers.map((c, i) => `${i + 1}. **${c.name}** (${c.phone}) - Kota: ${c.city} - _Daftar: ${c.registeredAt}_`).join('\n') +
         `\n\n**Pelanggan dengan Pesanan Sedang Berjalan:**\n` +
         custData.pendingOrders.map((p, i) => `${i + 1}. **${p.customerName}** (Order #${p.orderCode}) - ${p.category} [${p.status.toUpperCase()}]`).join('\n');
+      }
     }
 
     // 3. Analitik & Beban Kerja Mitra Teknisi
     else if (/teknisi/i.test(norm) && /total|aktif|terbanyak|tertunda|performa|rata-rata|beban\s+kerja|statistik/i.test(norm)) {
       const workload = await DataService.getAdminTechnicianWorkload();
-      if (workload.length === 0) {
+      if (workload === null) {
+        directReply = 'Data beban kerja teknisi tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else if (workload.length === 0) {
         directReply = 'Belum ada data teknisi yang tercatat di database BANTUIN.';
       } else {
         directReply = `👨‍🔧 **Analitik Kinerja & Beban Kerja Mitra Teknisi:**\n\n| No | Nama Teknisi | Rating | Tugas Aktif | Pekerjaan Selesai | Kesiapan |\n| :--- | :--- | :---: | :---: | :---: | :---: |\n` +
@@ -696,7 +739,9 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
     // 4. Perbaikan Tertunda / Keterlambatan / Belum Diproses
     else if (/belum\s+diproses|belum\s+dapat\s+teknisi|belum\s+mendapatkan\s+teknisi|terlambat|keterlambatan|penyebab\s+keterlambatan|perbaikan\s+tertunda/i.test(norm)) {
       const delayed = await DataService.getAdminDelayedRepairs();
-      if (delayed.length === 0) {
+      if (delayed === null) {
+        directReply = 'Data perbaikan tertunda tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else if (delayed.length === 0) {
         directReply = `✅ **Status Aman:** Saat ini tidak ada pesanan perbaikan yang terdeteksi mengalami keterlambatan atau penundaan kritis di sistem BANTUIN.`;
       } else {
         directReply = `⚠️ **Daftar Pesanan Memerlukan Perhatian (Tertunda / Unassigned):**\n\n` +
@@ -707,18 +752,25 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
     // 5. Keuangan & Transaksi Platform
     else if (/total\s+transaksi|pendapatan|omzet|tagihan\s+belum\s+dibayar|pembayaran\s+gagal|transaksi\s+berhasil|keuangan|laba/i.test(norm)) {
       const finance = await DataService.getAdminFinancialAnalytics();
-      directReply = `💰 **Rekapitulasi Keuangan Platform BANTUIN:**
+      if (finance === null) {
+        directReply = 'Data keuangan tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else {
+        directReply = `💰 **Rekapitulasi Keuangan Platform BANTUIN:**
 - **Total Seluruh Invoice:** ${finance.totalInvoices} tagihan
 - **Total Pendapatan Terkonfirmasi (Lunas):** **Rp ${finance.totalRevenuePaid.toLocaleString('id-ID')}**
 - **Total Biaya Platform (Platform Fee):** **Rp ${finance.totalPlatformFee.toLocaleString('id-ID')}**
 - **Piutang Invoice Tertunggak (Unpaid):** **Rp ${finance.totalUnpaidAmount.toLocaleString('id-ID')}**\n\n**Sebaran Metode Pembayaran Berhasil:**\n` +
         finance.paymentMethodsBreakdown.map(p => `- ${p.method.toUpperCase()}: ${p.transactionCount} transaksi (Rp ${p.volume.toLocaleString('id-ID')})`).join('\n');
+      }
     }
 
     // 6. Laporan & Analisis Strategis
     else if (/laporan\s+operasional|bandingkan\s+jumlah\s+pesanan|layanan\s+paling\s+diminati|kendala\s+operasional|tren\s+penyelesaian|rekomendasi\s+peningkatan\s+efisiensi/i.test(norm)) {
       const rep = await DataService.getAdminOperationalReport();
-      directReply = `📈 **Laporan Strategis Operasional Platform:**
+      if (rep === null) {
+        directReply = 'Laporan operasional tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else {
+        directReply = `📈 **Laporan Strategis Operasional Platform:**
 - **Pesanan Bulan Ini:** **${rep.monthlyComparison.currentMonthOrders} pesanan** (Bulan Sebelumnya: ${rep.monthlyComparison.previousMonthOrders} | Pertumbuhan: **${rep.monthlyComparison.growthPercent}**)
 - **Pendapatan Bulan Ini:** **${rep.monthlyComparison.currentMonthRevenue}** (Pertumbuhan: **${rep.monthlyComparison.revenueGrowthPercent}**)
 
@@ -728,16 +780,21 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
         rep.frequentIssues.map(f => `- ${f.issue} (Dampak: ${f.impact})`).join('\n') +
         `\n\n**Rekomendasi Peningkatan Efisiensi:**\n` +
         rep.efficiencyRecommendations.map(r => `✅ ${r}`).join('\n');
+      }
     }
 
     // 7. Notifikasi Gagal
     else if (/notifikasi.*gagal|gagal\s+dikirim/i.test(norm)) {
       const notif = await DataService.getAdminNotificationStatus();
-      directReply = `📱 **Status Pengiriman Notifikasi WhatsApp OTP:**
+      if (notif === null) {
+        directReply = 'Status notifikasi tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else {
+        directReply = `📱 **Status Pengiriman Notifikasi WhatsApp OTP:**
 - **Total Notifikasi Terkirim:** **${notif.totalSent}**
 - **Berhasil Diterima (Delivered):** **${notif.delivered}**
 - **Gagal Dikirim (Failed):** **${notif.failed}**\n\n**Rincian Log Kegagalan:**\n` +
         notif.failedLogs.map((l, i) => `${i + 1}. Tujuan: \`${l.phone}\` - Penyebab: ${l.reason} (${l.createdAt})`).join('\n');
+      }
     }
 
     // 8. Diagnostik Sistem, Database, OTP & AI
@@ -753,25 +810,41 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
     // 9. Pengaturan Konfigurasi Sistem
     else if (/konfigurasi|system\s+settings|pengaturan\s+aplikasi|pengaturan\s+sistem/i.test(norm)) {
       const settings = await DataService.getAdminSystemSettings();
-      directReply = `⚙️ **Pengaturan Konfigurasi Sistem BANTUIN (Admin View):**\n\n` +
-        settings.map((s, i) => `**${i + 1}. ${s.key}** [${s.group}]\n- Nilai: \`${s.value}\`\n${s.description ? `- Deskripsi: ${s.description}\n` : ''}`).join('\n');
+      if (settings === null) {
+        directReply = 'Pengaturan sistem tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else if (settings.length === 0) {
+        directReply = 'Belum ada pengaturan sistem yang tercatat di database BANTUIN.';
+      } else {
+        directReply = `⚙️ **Pengaturan Konfigurasi Sistem BANTUIN (Admin View):**\n\n` +
+          settings.map((s, i) => `**${i + 1}. ${s.key}** [${s.group}]\n- Nilai: \`${s.value}\`\n${s.description ? `- Deskripsi: ${s.description}\n` : ''}`).join('\n');
+      }
     }
 
     // 10. Log Audit Aktivitas Admin
     else if (/audit\s+log|aktivitas\s+administrasi|jejak\s+audit/i.test(norm)) {
       const logs = await DataService.getAdminRecentAuditLogs(5);
-      directReply = `📜 **Riwayat Aktivitas Administrator Terbaru (Audit Trail):**\n\n` +
-        logs.map((l, i) => `**${i + 1}. Aksi: ${l.action}**\n- Entitas: \`${l.entityName}\` (ID: ${l.entityId})\n- Admin: ${l.adminEmail}\n- Waktu: ${new Date(l.createdAt).toLocaleString('id-ID')}\n`).join('\n');
+      if (logs === null) {
+        directReply = 'Log audit tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else if (logs.length === 0) {
+        directReply = 'Belum ada aktivitas administrator yang tercatat di database BANTUIN.';
+      } else {
+        directReply = `📜 **Riwayat Aktivitas Administrator Terbaru (Audit Trail):**\n\n` +
+          logs.map((l, i) => `**${i + 1}. Aksi: ${l.action}**\n- Entitas: \`${l.entityName}\` (ID: ${l.entityId})\n- Admin: ${l.adminEmail}\n- Waktu: ${new Date(l.createdAt).toLocaleString('id-ID')}\n`).join('\n');
+      }
     }
 
     // 11. Statistik Pengguna Berdasarkan Role
     else if (/total\s+pengguna|statistik\s+user|jumlah\s+user|pengguna\s+berdasarkan\s+role/i.test(norm)) {
       const stats = await DataService.getAdminUserStats();
-      directReply = `👥 **Statistik Pengguna Sistem BANTUIN:**
+      if (stats === null) {
+        directReply = 'Statistik pengguna tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else {
+        directReply = `👥 **Statistik Pengguna Sistem BANTUIN:**
 - **Total Pengguna Terdaftar:** **${stats.totalUsers}**
 - **Pelanggan (Customer):** ${stats.customers.total} (${stats.customers.active} Aktif, ${stats.customers.pending} Menunggu OTP)
 - **Mitra Teknisi:** ${stats.technicians.total} (${stats.technicians.active} Aktif, ${stats.technicians.pending} Menunggu Verifikasi)
 - **Administrator:** ${stats.admins.total} Akun`;
+      }
     }
 
     // 12. Pencarian Pengguna Berdasarkan Nomor Telepon, Email, UUID, atau Nama (Admin User Search)
@@ -894,16 +967,26 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
             DataService.getCustomerRepairs(userContext.userId, { limit: 3 }),
             DataService.getCustomerInvoices(userContext.userId),
           ]);
+          // N1: repairs/invoices null saat DB error (kosong = []).
+          const repairsList = repairs || [];
+          const invoicesList = invoices || [];
+          if (repairs === null || invoices === null) {
+            dbContextSummary += 'Data pesanan/tagihan tidak dapat dibaca saat ini (database tidak dapat diakses).\n';
+          }
           dbContextSummary += `Profil Customer: Nama: ${profile?.fullName || '-'}, Telp: ${profile?.phoneNumber || '-'}, Alamat: ${profile?.defaultAddress || '-'}\n`;
-          dbContextSummary += `Pesanan Terkini: ${repairs.length} pesanan tercatat.\n`;
-          repairs.forEach(r => {
+          dbContextSummary += `Pesanan Terkini: ${repairsList.length} pesanan tercatat.\n`;
+          repairsList.forEach(r => {
             dbContextSummary += `  - Order #${r.orderCode}: Alat: ${r.device} (${r.categoryName}), Status: ${r.status}, Teknisi: ${r.technician?.name || 'Belum ada'}\n`;
           });
-          dbContextSummary += `Tagihan Invoice: ${invoices.length} invoice (${invoices.filter(i => i.status === 'unpaid').length} belum lunas).\n`;
+          dbContextSummary += `Tagihan Invoice: ${invoicesList.length} invoice (${invoicesList.filter(i => i.status === 'unpaid').length} belum lunas).\n`;
         } else if (userContext.role === 'technician' && userContext.userId) {
           const tasks = await DataService.getTechnicianAssignedTasks(userContext.userId, { limit: 5 });
-          dbContextSummary += `Tugas Aktif Teknisi: ${tasks.length} penugasan.\n`;
-          tasks.forEach(t => {
+          const tasksList = tasks || [];
+          if (tasks === null) {
+            dbContextSummary += 'Data tugas tidak dapat dibaca saat ini (database tidak dapat diakses).\n';
+          }
+          dbContextSummary += `Tugas Aktif Teknisi: ${tasksList.length} penugasan.\n`;
+          tasksList.forEach(t => {
             dbContextSummary += `  - Order #${t.orderCode}: Pelanggan: ${t.customerName}, Status: ${t.assignmentStatus}, Alamat: ${t.address}\n`;
           });
         } else if (userContext.role === 'admin') {
@@ -913,10 +996,15 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
             DataService.getAdminFinancialAnalytics(),
             DataService.getAdminUserStats(),
           ]);
-          const totalActiveUsers = userStats.customers.active + userStats.technicians.active + userStats.admins.active;
-          dbContextSummary += `Ringkasan Admin: Total Pesanan: ${overview.orders.total}, Menunggu: ${overview.orders.submitted}, Dikerjakan: ${overview.orders.inRepair}, Selesai: ${overview.orders.completed}, Mitra Teknisi Aktif: ${overview.technicians.active}, Pelanggan Aktif: ${overview.customers.active}, Total Pengguna Aktif: ${totalActiveUsers}, Total Pengguna Terdaftar: ${userStats.totalUsers}\n`;
-          dbContextSummary += `Keuangan: Total Pendapatan: Rp ${finance.totalRevenuePaid.toLocaleString('id-ID')}, Piutang Tertunggak: Rp ${finance.totalUnpaidAmount.toLocaleString('id-ID')}, Total Invoice: ${finance.totalInvoices}\n`;
-          dbContextSummary += `Teknisi: ${workload.length} mitra teknisi aktif terdaftar.\n`;
+          // N1: overview/finance/userStats null saat DB error (kosong = objek 0).
+          if (overview === null || finance === null || userStats === null) {
+            dbContextSummary += 'Ringkasan admin tidak dapat dibaca saat ini (database tidak dapat diakses).\n';
+          } else {
+            const totalActiveUsers = userStats.customers.active + userStats.technicians.active + userStats.admins.active;
+            dbContextSummary += `Ringkasan Admin: Total Pesanan: ${overview.orders.total}, Menunggu: ${overview.orders.submitted}, Dikerjakan: ${overview.orders.inRepair}, Selesai: ${overview.orders.completed}, Mitra Teknisi Aktif: ${overview.technicians.active}, Pelanggan Aktif: ${overview.customers.active}, Total Pengguna Aktif: ${totalActiveUsers}, Total Pengguna Terdaftar: ${userStats.totalUsers}\n`;
+            dbContextSummary += `Keuangan: Total Pendapatan: Rp ${finance.totalRevenuePaid.toLocaleString('id-ID')}, Piutang Tertunggak: Rp ${finance.totalUnpaidAmount.toLocaleString('id-ID')}, Total Invoice: ${finance.totalInvoices}\n`;
+          }
+          dbContextSummary += `Teknisi: ${(workload || []).length} mitra teknisi aktif terdaftar.\n`;
 
           if (currentPath.includes('/admin/users') || contextEntities.activePhoneNumber || contextEntities.activeEmail || contextEntities.activeUserUuid) {
             const userRecords = await DataService.searchDatabaseUsers(

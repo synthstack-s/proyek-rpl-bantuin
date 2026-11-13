@@ -344,6 +344,11 @@ export default function AIProviderSettingsSection() {
 
   // Form input states per provider slug
   const [inputKeys, setInputKeys] = useState<Record<string, string>>({});
+  // H1: API key yang terakhir dimuat dari server per provider — dipakai untuk
+  // membedakan tes terhadap key tersimpan vs key yang diedit di form (belum
+  // disimpan). Diisi ulang di loadData setiap configs dimuat, termasuk setelah
+  // save berhasil (handleSaveConfig memanggil loadData).
+  const [loadedKeys, setLoadedKeys] = useState<Record<string, string>>({});
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
   const [endpoints, setEndpoints] = useState<Record<string, string>>({
     gemini: 'https://generativelanguage.googleapis.com',
@@ -438,6 +443,7 @@ export default function AIProviderSettingsSection() {
           const nextModels: Record<string, string> = {};
           const nextParams: Record<string, { temp: number; maxTokens: number; timeout: number; retries: number }> = {};
           const nextInputKeys: Record<string, string> = {};
+          const nextLoadedKeys: Record<string, string> = {};
 
           for (const [providerKey, conf] of Object.entries(configMap)) {
             nextEndpoints[providerKey] = conf.apiEndpoint || (providerKey === 'gemini' ? 'https://generativelanguage.googleapis.com' : 'https://api.groq.com/openai/v1');
@@ -452,12 +458,16 @@ export default function AIProviderSettingsSection() {
             if (conf.apiKey) {
               nextInputKeys[providerKey] = conf.apiKey;
             }
+            // H1: catat key tersimpan apa adanya ('' bila provider belum punya
+            // key) sebagai pembanding dirty-tracking untuk tes koneksi.
+            nextLoadedKeys[providerKey] = conf.apiKey || '';
           }
 
           setEndpoints((prev) => ({ ...prev, ...nextEndpoints }));
           setSelectedModels((prev) => ({ ...prev, ...nextModels }));
           setParams((prev) => ({ ...prev, ...nextParams }));
           setInputKeys((prev) => ({ ...prev, ...nextInputKeys }));
+          setLoadedKeys((prev) => ({ ...prev, ...nextLoadedKeys }));
 
           // Pastikan activeFormTab valid
           if (!configMap[activeFormTab]) {
@@ -525,6 +535,28 @@ export default function AIProviderSettingsSection() {
       if (inputKeys[provider] && inputKeys[provider].trim()) {
         body.apiKey = inputKeys[provider].trim();
       }
+
+      // H1: beri tahu server apakah tes ini memakai kredensial tersimpan.
+      // - Field key kosong berarti manager memakai key tersimpan (override
+      //   kosong diabaikan di testProviderConnection), jadi tetap dihitung
+      //   sebagai tes tersimpan.
+      // - Key yang diedit (berbeda dari yang dimuat) berarti tes override:
+      //   hasilnya dicatat di log tetapi TIDAK boleh menimpa status tersimpan.
+      // - Endpoint/model yang diedit juga membuat tes menjadi override
+      //   meskipun key-nya tidak berubah (dibandingkan dengan config yang
+      //   dimuat dari server), karena tes itu tidak lagi mencerminkan
+      //   konfigurasi tersimpan.
+      const trimmedInputKey = (inputKeys[provider] || '').trim();
+      const loadedKey = (loadedKeys[provider] || '').trim();
+      const keyIsStored = trimmedInputKey.length === 0 || trimmedInputKey === loadedKey;
+      const storedConf = configs[provider];
+      const endpointIsStored =
+        !endpoints[provider] || !storedConf?.apiEndpoint ||
+        endpoints[provider].trim() === storedConf.apiEndpoint.trim();
+      const modelIsStored =
+        !selectedModels[provider] || !storedConf?.selectedModel ||
+        selectedModels[provider].trim() === storedConf.selectedModel.trim();
+      body.usesStoredCredentials = keyIsStored && endpointIsStored && modelIsStored;
 
       const res = await fetch('/api/admin/ai/test-connection', {
         method: 'POST',
