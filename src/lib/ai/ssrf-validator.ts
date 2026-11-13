@@ -89,37 +89,104 @@ export function isPrivateIPv4(ip: string): boolean {
 }
 
 /**
+ * L4: kembangkan alamat IPv6 menjadi 8 grup heksadesimal 16-bit (bentuk
+ * biner/expanded). Menangani kompresi `::`, bentuk expanded penuh, dan ekor
+ * IPv4 tersemat (`::ffff:192.168.1.1`, `::192.168.1.1` — dikonversi ke dua
+ * grup heksa). Mengembalikan null untuk input malformed (pemanggil fail-closed).
+ */
+function expandIPv6ToGroups(ip: string): number[] | null {
+  let addr = ip.toLowerCase().trim();
+  // Buang zone id (mis. %eth0) bila ada.
+  const zoneIdx = addr.indexOf('%');
+  if (zoneIdx !== -1) addr = addr.slice(0, zoneIdx);
+
+  // Ekor IPv4 tersemat: ubah ke dua grup heksa agar parsing seragam.
+  if (addr.includes('.')) {
+    const lastColon = addr.lastIndexOf(':');
+    if (lastColon === -1) return null;
+    const v4 = addr.slice(lastColon + 1);
+    if (!net.isIPv4(v4)) return null;
+    const [a, b, c, d] = v4.split('.').map(Number);
+    addr = `${addr.slice(0, lastColon + 1)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+
+  const parseHextets = (s: string): number[] | null => {
+    if (s === '') return [];
+    const out: number[] = [];
+    for (const h of s.split(':')) {
+      if (!/^[0-9a-f]{1,4}$/.test(h)) return null;
+      out.push(parseInt(h, 16));
+    }
+    return out;
+  };
+
+  const parts = addr.split('::');
+  if (parts.length > 2) return null;
+
+  if (parts.length === 2) {
+    const head = parseHextets(parts[0]);
+    const tail = parseHextets(parts[1]);
+    if (!head || !tail) return null;
+    // '::' wajib mewakili minimal satu grup nol — bila head+tail sudah 8,
+    // alamatnya malformed (mis. '1:2:3:4:5:6:7:8::').
+    const missing = 8 - head.length - tail.length;
+    if (missing < 1) return null;
+    return [...head, ...new Array(missing).fill(0), ...tail];
+  }
+
+  const groups = parseHextets(parts[0]);
+  if (!groups || groups.length !== 8) return null;
+  return groups;
+}
+
+/**
  * Memeriksa apakah sebuah alamat IPv6 berada dalam jangkauan privat, loopback, atau link-local
+ *
+ * L4: pemeriksaan dilakukan pada 8 grup 16-bit hasil normalisasi, BUKAN pada
+ * prefix string bentuk terkompresi — sebelumnya bentuk expanded seperti
+ * `0:0:0:0:0:0:0:1` (loopback), `::192.168.1.1` (IPv4-compatible), dan prefix
+ * NAT64 `64:ff9b::/96` lolos karena tidak cocok dengan prefix mana pun.
+ * Daftar blokir kini mencakup: unspecified/loopback, IPv4-mapped (didelegasikan
+ * ke isPrivateIPv4), IPv4-compatible `::/96`, NAT64 `64:ff9b::/96`, Teredo
+ * `2001::/32`, link-local `fe80::/10`, ULA `fc00::/7`, dan multicast `ff00::/8`.
  */
 export function isPrivateIPv6(ip: string): boolean {
-  const norm = ip.toLowerCase().trim();
+  const g = expandIPv6ToGroups(ip);
+  if (!g) return true; // Malformed dianggap tidak aman (fail-closed)
 
-  // ::1 (Loopback) & :: (Unspecified)
-  if (norm === '::1' || norm === '::') return true;
+  const [g0, g1, g2, g3, g4, g5, g6, g7] = g;
+  const firstFiveZero = g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0;
 
-  // IPv4-mapped IPv6 (::ffff:192.168.1.1)
-  if (norm.startsWith('::ffff:')) {
-    const v4 = norm.replace('::ffff:', '');
-    if (net.isIPv4(v4)) {
-      return isPrivateIPv4(v4);
-    }
-    return true;
+  // ::/128 (Unspecified) & ::1/128 (Loopback) — berlaku juga untuk bentuk
+  // expanded (0:0:0:0:0:0:0:0 dan 0:0:0:0:0:0:0:1).
+  if (firstFiveZero && g5 === 0 && g6 === 0 && (g7 === 0 || g7 === 1)) return true;
+
+  // IPv4-mapped IPv6 ::ffff:0:0/96 — putuskan dari IPv4 yang dibungkus
+  // (perilaku lama dipertahankan: ::ffff:8.8.8.8 tetap publik).
+  if (firstFiveZero && g5 === 0xffff) {
+    const v4 = `${(g6 >> 8) & 0xff}.${g6 & 0xff}.${(g7 >> 8) & 0xff}.${g7 & 0xff}`;
+    return isPrivateIPv4(v4);
   }
+
+  // ::/96 (IPv4-compatible, mis. ::192.168.1.1 dan ::8.8.8.8) — seluruh
+  // prefix diblokir karena membungkus alamat IPv4.
+  if (firstFiveZero && g5 === 0) return true;
+
+  // 64:ff9b::/96 (NAT64 — membungkus IPv4, mis. 64:ff9b::a9fe:a9fe =
+  // 169.254.169.254 metadata cloud).
+  if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) return true;
+
+  // 2001::/32 (Teredo — membungkus IPv4).
+  if (g0 === 0x2001 && g1 === 0x0000) return true;
 
   // fe80::/10 (Link-Local)
-  if (norm.startsWith('fe80:') || norm.startsWith('fe8') || norm.startsWith('fe9') || norm.startsWith('fea') || norm.startsWith('feb')) {
-    return true;
-  }
+  if (g0 >= 0xfe80 && g0 <= 0xfebf) return true;
 
-  // fc00::/7 & fd00::/8 (Unique Local Address RFC 4193)
-  if (norm.startsWith('fc') || norm.startsWith('fd')) {
-    return true;
-  }
+  // fc00::/7 (Unique Local Address RFC 4193: fc00::/8 & fd00::/8)
+  if ((g0 & 0xfe00) === 0xfc00) return true;
 
   // ff00::/8 (Multicast)
-  if (norm.startsWith('ff')) {
-    return true;
-  }
+  if ((g0 & 0xff00) === 0xff00) return true;
 
   return false;
 }

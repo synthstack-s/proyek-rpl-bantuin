@@ -172,7 +172,12 @@ export function resolveConversationContext(
   const invMatch = currentMessage.match(/\bINV-[A-Za-z0-9-]+\b/i);
   let detectedInvoiceNumber: string | null = invMatch ? invMatch[0] : null;
 
-  const phoneMatch = currentMessage.match(/(?:\+?62|0)8[0-9]{8,12}\b|\b\d{10,15}\b/);
+  // F22 — Hanya pola nomor HP Indonesia yang valid (08… / +62 8… /
+  // 62 8…). Alternatif lama `\b\d{10,15}\b` DIHAPUS: ia menangkap angka
+  // apa pun sepanjang 10–15 digit (jumlah rupiah, nomor invoice,
+  // tanggal-waktu) lalu menyimpannya sebagai nomor telepon aktif dan
+  // memakainya sebagai target pencarian pengguna.
+  const phoneMatch = currentMessage.match(/(?:\+?62|0)8[0-9]{8,12}\b/);
   let detectedPhoneNumber: string | null = phoneMatch ? phoneMatch[0] : null;
 
   const emailMatch = currentMessage.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
@@ -182,8 +187,13 @@ export function resolveConversationContext(
   let detectedUserUuid: string | null = uuidMatch ? uuidMatch[0] : null;
 
   // 2. Cek apakah pengguna menggunakan kata ganti penunjuk atau pertanyaan lanjutan bertingkat
+  // F22 — 'dia' dan 'nya' DIHAPUS sebagai pemicu mandiri: keduanya terlalu
+  // umum ('nya' bahkan muncul sebagai substring di 'punya', 'tanya',
+  // 'lainnya', dsb) dan memicu resolusi follow-up terhadap entitas usang.
+  // Bentuk posesif spesifik ('alamatnya', 'diagnosisnya', 'kerusakannya')
+  // tetap dipertahankan karena sungguh-sungguh anaforis.
   const followUpIndicators = [
-    'tadi', 'itu', 'tersebut', 'dia', 'nya', 'siapa teknisi', 'berapa biaya',
+    'tadi', 'itu', 'tersebut', 'siapa teknisi', 'berapa biaya',
     'kapan selesai', 'kapan jadwal', 'alamatnya', 'diagnosisnya', 'kerusakannya'
   ];
 

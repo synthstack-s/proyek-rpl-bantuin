@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAdminSession } from '@/lib/auth';
 import { AIProviderManager } from '@/lib/ai/provider-manager';
+import { checkAdminAiRateLimit } from '@/lib/rate-limiter';
 import { AIProviderType } from '@/lib/ai/types';
 
 /**
@@ -50,6 +51,20 @@ export async function GET(req: NextRequest) {
 
     // M2: normalisasi slug provider.
     const normalizedProvider = provider.trim().toLowerCase() as AIProviderType;
+
+    // L8: batasi pengambilan daftar model per admin per provider
+    // (10/menit) — setiap panggilan memanggil API provider. GET dan POST
+    // berbagi kuota yang sama (satu kunci) karena bebannya identik.
+    const rateLimit = checkAdminAiRateLimit(`ai-models:${adminSession.userId}:${normalizedProvider}`, 10);
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: `Terlalu banyak permintaan daftar model untuk provider ${normalizedProvider}. Silakan tunggu ${rateLimit.retryAfterSeconds} detik sebelum mencoba lagi.`,
+        },
+        { status: 429 }
+      );
+    }
 
     const configOverride: any = {};
     if (apiEndpoint && apiEndpoint.trim()) configOverride.apiEndpoint = apiEndpoint.trim();
@@ -101,6 +116,19 @@ export async function POST(req: NextRequest) {
 
     // M2: normalisasi slug provider.
     const normalizedProvider = provider.trim().toLowerCase() as AIProviderType;
+
+    // L8: batasi pengambilan daftar model per admin per provider
+    // (10/menit) — berbagi kuota dengan GET (lihat di atas).
+    const rateLimit = checkAdminAiRateLimit(`ai-models:${adminSession.userId}:${normalizedProvider}`, 10);
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: `Terlalu banyak permintaan daftar model untuk provider ${normalizedProvider}. Silakan tunggu ${rateLimit.retryAfterSeconds} detik sebelum mencoba lagi.`,
+        },
+        { status: 429 }
+      );
+    }
 
     const configOverride: any = {};
     if (typeof apiKey === 'string' && apiKey.trim()) configOverride.apiKey = apiKey.trim();

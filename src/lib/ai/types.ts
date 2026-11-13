@@ -131,6 +131,10 @@ export interface AIConnectionTestResult {
   responseTimeMs: number;
   testedAt: string;
   errorMessage: string | null;
+  // L2: bila auto-heal model berhasil saat tes (Groq), berisi model pengganti
+  // yang BENAR-BENAR diuji (sama dengan modelTested). Model tersimpan TIDAK
+  // diubah otomatis — UI menawarkan untuk menyimpannya sebagai model terpilih.
+  healedModel?: string | null;
 }
 
 export interface AIModelInfo {

@@ -11,7 +11,7 @@
  * 6. In-memory state synchronization & distributed cache invalidation counter.
  */
 
-import { query } from '@/lib/db';
+import { query, pool } from '@/lib/db';
 import {
   AIProviderType,
   AIConnectionStatus,
@@ -327,6 +327,37 @@ export async function getAllProviderConfigsPublic(): Promise<Array<Omit<Provider
 }
 
 /**
+ * L5: konversi numerik yang MENOLAK NaN/Infinity. Math.min/Math.max tidak
+ * membersihkan NaN — string non-numerik dari body JSON (mis. "abc") sebelumnya
+ * lolos clamping sebagai NaN lalu diteruskan ke query DB (bisa tersimpan NULL
+ * atau menggagalkan penyimpanan dengan pesan yang membingungkan). Route
+ * mengembalikan error ini sebagai 400.
+ */
+function toFiniteNumber(value: unknown, fieldName: string): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    throw new Error(`Nilai ${fieldName} tidak valid: harus berupa angka.`);
+  }
+  return n;
+}
+
+/**
+ * L13: kolom `provider` adalah VARCHAR(50) (migrasi 003) — slug yang lebih
+ * panjang gagal di DB dengan pesan "Data too long" yang sebelumnya disalahartikan
+ * sebagai migrasi 003 belum dijalankan. Validasi panjang di sini (dan di route
+ * configs) dengan pesan yang jelas.
+ */
+export const MAX_PROVIDER_SLUG_LENGTH = 50;
+
+function validateProviderSlug(provider: string): void {
+  if (provider.length > MAX_PROVIDER_SLUG_LENGTH) {
+    throw new Error(
+      `Nama provider maksimal 50 karakter (slug '${provider}' sepanjang ${provider.length} karakter). Persingkat slug provider lalu coba lagi.`
+    );
+  }
+}
+
+/**
  * Menyimpan atau Memperbarui Konfigurasi Provider AI
  */
 export async function saveProviderConfig(
@@ -341,10 +372,19 @@ export async function saveProviderConfig(
     maxOutputTokens?: number;
     requestTimeoutMs?: number;
     retryLimit?: number;
+    // L14: true = HAPUS API key tersimpan (kolom terenkripsi dikosongkan,
+    // status menjadi not_configured). apiKey kosong SAJA tetap berarti
+    // "pertahankan key lama" — hanya flag eksplisit ini yang menghapus key.
+    // Bila key baru diisi bersamaan dengan flag, key baru yang menang.
+    clearApiKey?: boolean;
   },
   adminId: number,
   clientMeta: { ip?: string; userAgent?: string } = {}
 ): Promise<{ success: boolean; message: string; maskedKeyPreview: string; config: ProviderRuntimeConfig }> {
+  // L13: tolak slug terlalu panjang SEBELUM menyentuh DB, dengan pesan yang
+  // jelas (bukan petunjuk migrasi yang menyesatkan).
+  validateProviderSlug(provider);
+
   const current = await getProviderRuntimeConfig(provider);
 
   const providerDisplayName =
@@ -360,6 +400,10 @@ export async function saveProviderConfig(
   );
 
   // 2. Kelola Kredensial API Key (Enkripsi baru jika diisi, pertahankan jika kosong)
+  // L14: flag clearApiKey yang menghapus key tersimpan. Bila key baru diisi
+  // BERSAMAAN dengan flag, key baru yang menang (flag diabaikan) agar tidak
+  // ada ambiguitas antara "ganti key" dan "hapus key".
+  const clearApiKey = updates.clearApiKey === true && !(updates.apiKey && updates.apiKey.trim().length > 0);
   let encryptedPayload: string | null = null;
   let keyIdentifier = current.keyIdentifier;
   let maskedPreview = current.maskedKeyPreview;
@@ -371,22 +415,41 @@ export async function saveProviderConfig(
     encryptedPayload = enc.encryptedPayload;
     keyIdentifier = enc.keyIdentifier;
     maskedPreview = enc.maskedPreview;
+  } else if (clearApiKey) {
+    // L14: kosongkan key di memori; kolom terenkripsi di DB dihapus oleh
+    // cabang upsert clear di bawah (encryptedPayload tetap null).
+    activePlainKey = '';
+    maskedPreview = '';
   }
 
   const selectedModel = updates.selectedModel ? updates.selectedModel.trim() : current.selectedModel;
   const defaultModel = updates.defaultModel ? updates.defaultModel.trim() : current.defaultModel || selectedModel;
+  // L5: tolak input non-numerik (NaN) dengan error yang jelas — JANGAN
+  // meneruskan NaN ke query DB.
   const temperature =
-    updates.temperature !== undefined ? Math.max(0, Math.min(2, Number(updates.temperature))) : current.temperature;
+    updates.temperature !== undefined ? Math.max(0, Math.min(2, toFiniteNumber(updates.temperature, 'temperature'))) : current.temperature;
   const maxTokens =
-    updates.maxOutputTokens !== undefined ? Math.max(64, Math.min(32768, Number(updates.maxOutputTokens))) : current.maxOutputTokens;
+    updates.maxOutputTokens !== undefined ? Math.max(64, Math.min(32768, toFiniteNumber(updates.maxOutputTokens, 'maxOutputTokens'))) : current.maxOutputTokens;
   const timeoutMs =
-    updates.requestTimeoutMs !== undefined ? Math.max(5000, Math.min(120000, Number(updates.requestTimeoutMs))) : current.requestTimeoutMs;
+    updates.requestTimeoutMs !== undefined ? Math.max(5000, Math.min(120000, toFiniteNumber(updates.requestTimeoutMs, 'requestTimeoutMs'))) : current.requestTimeoutMs;
   const retryLimit =
-    updates.retryLimit !== undefined ? Math.max(0, Math.min(5, Number(updates.retryLimit))) : current.retryLimit;
+    updates.retryLimit !== undefined ? Math.max(0, Math.min(5, toFiniteNumber(updates.retryLimit, 'retryLimit'))) : current.retryLimit;
 
+  // L3: upsert konfigurasi + bump version dalam SATU transaksi DB (pola yang
+  // sama dengan action-service Batch 2: pool.getConnection +
+  // BEGIN/COMMIT/ROLLBACK). Sebelumnya bump version berada di try/catch
+  // tersendiri yang hanya console.warn bila gagal — konfigurasi tersimpan
+  // tetapi version DB tidak berubah, sehingga instance lain tidak me-refresh
+  // cache dan terus memakai key lama. Sekarang bila bump gagal, SELURUH
+  // transaksi di-rollback dan error dilempar seperti kegagalan upsert; state
+  // in-memory (di bawah) hanya diperbarui setelah commit berhasil.
+  let conn: Awaited<ReturnType<typeof pool.getConnection>> | null = null;
   try {
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+
     if (encryptedPayload) {
-      await query(
+      await conn.execute(
         `INSERT INTO ai_provider_configs (
           provider, name, api_endpoint, encrypted_api_key, key_identifier,
           masked_key_preview, selected_model, default_model, temperature,
@@ -420,8 +483,44 @@ export async function saveProviderConfig(
           retryLimit,
         ]
       );
+    } else if (clearApiKey) {
+      // L14: HAPUS key tersimpan — kolom terenkripsi + preview dikosongkan
+      // (NULL). Seluruh konfigurasi lain tetap tersimpan; provider TIDAK
+      // dihapus. Status menjadi 'not_configured' lewat cabang tanpa-key di
+      // bawah (activePlainKey kosong → UPDATE status).
+      await conn.execute(
+        `INSERT INTO ai_provider_configs (
+          provider, name, api_endpoint, encrypted_api_key, key_identifier,
+          masked_key_preview, selected_model, default_model, temperature,
+          max_output_tokens, request_timeout_ms, retry_limit, last_connection_status
+        ) VALUES (?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?, ?, ?, 'disconnected')
+        ON DUPLICATE KEY UPDATE
+          name = VALUES(name),
+          api_endpoint = VALUES(api_endpoint),
+          encrypted_api_key = NULL,
+          masked_key_preview = NULL,
+          selected_model = VALUES(selected_model),
+          default_model = VALUES(default_model),
+          temperature = VALUES(temperature),
+          max_output_tokens = VALUES(max_output_tokens),
+          request_timeout_ms = VALUES(request_timeout_ms),
+          retry_limit = VALUES(retry_limit),
+          updated_at = CURRENT_TIMESTAMP`,
+        [
+          provider,
+          providerDisplayName,
+          endpointValidation.normalizedUrl,
+          keyIdentifier,
+          selectedModel,
+          defaultModel,
+          temperature,
+          maxTokens,
+          timeoutMs,
+          retryLimit,
+        ]
+      );
     } else {
-      await query(
+      await conn.execute(
         `INSERT INTO ai_provider_configs (
           provider, name, api_endpoint, key_identifier,
           masked_key_preview, selected_model, default_model, temperature,
@@ -453,47 +552,69 @@ export async function saveProviderConfig(
       );
     }
 
-    // Catat log audit perubahan
-    await recordAIAuditLog({
-      adminUserId: adminId,
-      provider,
-      action: 'UPDATE_CONFIG',
-      changes: {
-        name: providerDisplayName,
-        apiEndpoint: endpointValidation.normalizedUrl,
-        selectedModel,
-        temperature,
-        maxOutputTokens: maxTokens,
-        apiKeyUpdated: Boolean(encryptedPayload),
-      },
-      ipAddress: clientMeta.ip,
-      userAgent: clientMeta.userAgent,
-    });
+    // Bump version global agar AIProviderManager mendeteksi perubahan
+    // konfigurasi dan me-refresh cachedConfigs. Tanpa ini, manager terus
+    // memakai API key lama dari cache (syncWithDatabase hanya me-refresh jika
+    // version berubah), sehingga request gagal 401 berulang dan circuit
+    // breaker terus trip. Pakai INSERT ... ON DUPLICATE KEY UPDATE (pola
+    // setActiveAIProvider) agar baris id = 1 dibuat bila belum ada (DB
+    // fresh) — UPDATE ... WHERE id = 1 diam-diam tidak mengubah apa-apa bila
+    // baris belum ada. Semua kolom lain punya DEFAULT di schema.sql.
+    await conn.execute(
+      `INSERT INTO ai_global_settings (id, version) VALUES (1, 1)
+       ON DUPLICATE KEY UPDATE version = version + 1, updated_at = CURRENT_TIMESTAMP`
+    );
+
+    await conn.commit();
   } catch (err: any) {
     // Database adalah Source of Truth konfigurasi AI. Jika penyimpanan ke DB
-    // gagal, perubahan TIDAK BOLEH dilaporkan berhasil — sebelumnya kegagalan
-    // ini disembunyikan (lanjut dengan in-memory state), sehingga admin melihat
-    // status "connected" dari auto-probe padahal key baru tidak pernah tersimpan
-    // dan chat tetap memakai key lama (atau hilang saat server restart).
+    // gagal (termasuk kegagalan bump version — L3), perubahan TIDAK BOLEH
+    // dilaporkan berhasil dan TIDAK BOLEH ter-commit sebagian: rollback
+    // mengembalikan upsert yang sudah dieksekusi di transaksi ini.
+    if (conn) {
+      try {
+        await conn.rollback();
+      } catch {
+        // Abaikan error rollback — error asli yang dilaporkan.
+      }
+    }
+    // L13: persempit deteksi error migrasi — "Data too long" DIHAPUS dari
+    // pemicu petunjuk migrasi. Error kolom ENUM (migrasi 003 belum jalan)
+    // muncul sebagai "Data truncated"/ENUM; "Data too long" berarti nilai
+    // melebihi VARCHAR(50) (slug terlalu panjang — kini divalidasi di muka)
+    // atau kolom lain, BUKAN migrasi yang belum dijalankan.
     const isProviderColumnError =
-      /provider/i.test(err.message) && (/enum/i.test(err.message) || /truncated/i.test(err.message) || /data too long/i.test(err.message));
+      /provider/i.test(err.message) && (/enum/i.test(err.message) || /truncated/i.test(err.message));
     const migrationHint = isProviderColumnError
       ? ' Jika Anda menambah provider baru, pastikan migrasi database/migrations/003_allow_dynamic_ai_providers.sql sudah dijalankan (kolom provider masih ENUM gemini/groq).'
       : '';
     throw new Error(`Gagal menyimpan konfigurasi AI ke database: ${err.message}.${migrationHint}`);
+  } finally {
+    if (conn) conn.release();
   }
 
-  // Bump version global agar AIProviderManager mendeteksi perubahan konfigurasi
-  // dan me-refresh cachedConfigs. Tanpa ini, manager terus memakai API key lama
-  // dari cache (syncWithDatabase hanya me-refresh jika version berubah),
-  // sehingga request gagal 401 berulang dan circuit breaker terus trip.
-  try {
-    await query(
-      `UPDATE ai_global_settings SET version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = 1`
-    );
-  } catch (err: any) {
-    console.warn(`[AI Repository] Gagal bump version global settings: ${err.message}`);
-  }
+  // Catat log audit perubahan — SETELAH commit. recordAIAuditLog tidak pernah
+  // melempar (kegagalannya ditelan internal + fallback in-memory), jadi log
+  // audit tidak boleh menggagalkan penyimpanan yang sudah ter-commit.
+  await recordAIAuditLog({
+    adminUserId: adminId,
+    provider,
+    action: 'UPDATE_CONFIG',
+    changes: {
+      name: providerDisplayName,
+      apiEndpoint: endpointValidation.normalizedUrl,
+      selectedModel,
+      temperature,
+      maxOutputTokens: maxTokens,
+      apiKeyUpdated: Boolean(encryptedPayload),
+      apiKeyCleared: clearApiKey,
+    },
+    ipAddress: clientMeta.ip,
+    userAgent: clientMeta.userAgent,
+  });
+
+  // Bump version in-memory HANYA setelah commit DB berhasil (L3) — sebelumnya
+  // bump in-memory tetap jalan meski bump DB gagal.
   inMemoryGlobalSettings = {
     ...inMemoryGlobalSettings,
     version: inMemoryGlobalSettings.version + 1,
@@ -515,12 +636,27 @@ export async function saveProviderConfig(
     maxOutputTokens: maxTokens,
     requestTimeoutMs: timeoutMs,
     retryLimit,
+    // L14: key yang dihapus tidak lagi berasal dari env / gagal dekripsi —
+    // jangan pertahankan flag M12 dari konfigurasi lama.
+    ...(clearApiKey ? { keyFromEnvFallback: undefined, decryptionFailed: undefined } : {}),
   };
 
   IN_MEMORY_CONFIGS[provider] = updatedConfig;
 
   // 3. Sinkronisasi otomatis ke file .env.local
   try {
+    if (clearApiKey) {
+      // L14: hapus juga key dari .env.local + process.env — tanpa ini,
+      // fallback env di getProviderRuntimeConfig akan menghidupkan kembali
+      // key yang baru saja dihapus (provider tetap "terkonfigurasi" lewat
+      // env). syncProviderToEnvLocal di bawah (dengan apiKey kosong) tidak
+      // menulis ulang var key, tetapi menulis ulang var model/endpoint —
+      // jadi hanya key yang hilang dari .env.local.
+      const envRemoval = removeProviderFromEnvLocal(provider);
+      if (!envRemoval.success) {
+        console.warn(`[AI Repository] Key provider '${provider}' mungkin masih ada di .env.local: ${envRemoval.error || 'penghapusan gagal'}`);
+      }
+    }
     const currentGlobal = await getGlobalAISettings();
     syncProviderToEnvLocal({
       provider,
@@ -596,7 +732,9 @@ export async function saveProviderConfig(
 
   return {
     success: true,
-    message: `Konfigurasi provider ${providerDisplayName} berhasil diperbarui (Status: ${autoProbeStatus}).`,
+    message: clearApiKey
+      ? `API key provider ${providerDisplayName} berhasil dihapus. Konfigurasi lain tetap tersimpan (Status: ${autoProbeStatus}).`
+      : `Konfigurasi provider ${providerDisplayName} berhasil diperbarui (Status: ${autoProbeStatus}).`,
     maskedKeyPreview: maskedPreview,
     config: updatedConfig,
   };

@@ -334,6 +334,19 @@ export async function executeRoleBasedTool(
           if (typeof v === 'string' && v.trim()) return v.split(',').map((x) => x.trim()).filter(Boolean);
           return undefined;
         };
+        // N23: entri JOIN boleh menyebut FK eksplisit dengan sintaks
+        // "tabel:foreignKey" (mis. "users:technician_id") untuk memilih
+        // relasi kedua bila dua tabel punya lebih dari satu relasi.
+        // Entri tanpa ':' berperilaku seperti sebelumnya (relasi pertama).
+        const splitJoins = (v: any): DataService.GovernedQuerySpec['joins'] => {
+          const list = splitList(v);
+          if (!list) return undefined;
+          return list.map((entry) => {
+            const idx = entry.indexOf(':');
+            if (idx === -1) return entry;
+            return { table: entry.slice(0, idx).trim(), via: entry.slice(idx + 1).trim() };
+          });
+        };
         const filters: DataService.GovernedQueryFilter[] = [];
         if (args?.filterColumn && args?.filterOperator) {
           filters.push({ column: args.filterColumn, operator: args.filterOperator, value: args.filterValue ?? '' });
@@ -344,7 +357,7 @@ export async function executeRoleBasedTool(
         const spec: DataService.GovernedQuerySpec = {
           table: args?.table,
           columns: splitList(args?.columns),
-          joins: splitList(args?.joins),
+          joins: splitJoins(args?.joins),
           filters: filters.length > 0 ? filters : undefined,
           aggregate: args?.aggregateFunction
             ? { function: args.aggregateFunction, column: args?.aggregateColumn }

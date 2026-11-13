@@ -6,6 +6,7 @@ import {
   saveProviderConfig,
   deleteProviderConfig,
   toPublicProviderConfig,
+  MAX_PROVIDER_SLUG_LENGTH,
 } from '@/lib/ai/repository';
 import { AIProviderType } from '@/lib/ai/types';
 
@@ -86,6 +87,8 @@ export async function POST(req: NextRequest) {
       maxOutputTokens,
       requestTimeoutMs,
       retryLimit,
+      // L14: flag eksplisit penghapusan API key tersimpan.
+      clearApiKey,
     } = body;
 
     if (!provider || typeof provider !== 'string' || !provider.trim()) {
@@ -96,6 +99,22 @@ export async function POST(req: NextRequest) {
     }
 
     const sanitizedProvider = provider.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+
+    // L13: tolak slug lebih dari 50 karakter (kolom provider VARCHAR(50))
+    // dengan pesan yang jelas — SEBELUM memanggil saveProviderConfig, agar
+    // admin tidak menerima petunjuk migrasi 003 yang menyesatkan dari error
+    // "Data too long" MySQL. saveProviderConfig memvalidasi hal yang sama
+    // sebagai pertahanan lapis kedua untuk pemanggil internal.
+    if (sanitizedProvider.length > MAX_PROVIDER_SLUG_LENGTH) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: `Nama provider maksimal 50 karakter (slug '${sanitizedProvider}' sepanjang ${sanitizedProvider.length} karakter). Persingkat slug provider lalu coba lagi.`,
+        },
+        { status: 400 }
+      );
+    }
+
     const ip = req.headers.get('x-forwarded-for') || '127.0.0.1';
     const userAgent = req.headers.get('user-agent') || 'AdminBrowser';
 
@@ -111,6 +130,7 @@ export async function POST(req: NextRequest) {
         maxOutputTokens,
         requestTimeoutMs,
         retryLimit,
+        clearApiKey: clearApiKey === true,
       },
       adminSession.userId,
       { ip, userAgent }
