@@ -329,6 +329,11 @@ export class AIProviderManager {
 
   /**
    * Pengujian Koneksi Terisolasi (Menguji Provider Tertentu Tanpa Mengubah Konfigurasi Aktif)
+   *
+   * H1: `opts.usesStoredCredentials` (default true) menandakan apakah tes
+   * memakai kredensial tersimpan. Tes override dari form (key belum disimpan)
+   * tetap dicatat ke ai_connection_test_logs tetapi TIDAK boleh menimpa
+   * status tersimpan — flag ini diteruskan ke recordConnectionTestLog.
    */
   public async testProviderConnection(
     provider: AIProviderType,
@@ -337,7 +342,8 @@ export class AIProviderManager {
       apiKey?: string;
       selectedModel?: string;
     },
-    adminId?: number
+    adminId?: number,
+    opts?: { usesStoredCredentials?: boolean }
   ): Promise<AIConnectionTestResult> {
     await this.syncWithDatabase();
 
@@ -352,8 +358,9 @@ export class AIProviderManager {
     const adapter = this.getAdapter(provider);
     const result = await adapter.testConnection(testConfig);
 
-    // Catat log hasil pengujian ke database
-    await recordConnectionTestLog(result, adminId);
+    // Catat log hasil pengujian ke database (status tersimpan hanya diperbarui
+    // bila tes memakai kredensial tersimpan — lihat recordConnectionTestLog).
+    await recordConnectionTestLog(result, adminId, opts);
 
     // Jika tes berhasil, reset circuit breaker untuk provider tersebut
     if (result.status === 'success') {
@@ -399,7 +406,9 @@ export class AIProviderManager {
 
     // 4. Jalankan auto-probe koneksi live agar status provider langsung tersinkronisasi menjadi 'connected'
     try {
-      const probeResult = await this.testProviderConnection(newProvider, undefined, adminId);
+      // H1: auto-probe tanpa override menguji kredensial tersimpan, jadi
+      // hasilnya boleh memperbarui status tersimpan.
+      const probeResult = await this.testProviderConnection(newProvider, undefined, adminId, { usesStoredCredentials: true });
       if (probeResult.status === 'success') {
         this.recordCircuitSuccess(newProvider);
       }

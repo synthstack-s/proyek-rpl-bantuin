@@ -6,6 +6,10 @@
  * 2. Row-Level Authorization (mengunci data berdasarkan user_id / technician_id / customer_id).
  * 3. Whitelist column projection (menjamin password_hash, otp_hash, dan token_hash TIDAK PERNAH terambil).
  * 4. Zero direct SQL dari LLM.
+ * 5. Aturan tiga keadaan (N1/T9): kueri sukses + baris ada -> data riil;
+ *    kueri sukses + kosong -> [] / null / angka 0 riil; kueri error -> null
+ *    (dicatat via console.error). TIDAK ADA data demo untuk data transaksional;
+ *    fallback hanya untuk katalog publik statis (DEFAULT_FALLBACK_CATEGORIES).
  */
 
 import { query, checkDatabaseConnection } from '@/lib/db';
@@ -267,24 +271,12 @@ export async function getCustomerProfile(userId: number) {
         updateProfileGuide: 'Anda dapat memperbarui profil dan alamat Anda melalui menu Pengaturan Profil di Dashboard Pelanggan.',
       };
     }
-  } catch {
-    // Fallback sandbox/offline
+    // Pengguna tidak ditemukan (atau bukan customer): null, bukan profil demo.
+    return null;
+  } catch (err) {
+    console.error('[data-service] getCustomerProfile gagal:', err);
+    return null;
   }
-
-  return {
-    userId,
-    fullName: 'Pelanggan BANTUIN',
-    email: 'pelanggan@bantuin.id',
-    phoneNumber: '081234567890',
-    isVerified: true,
-    status: 'active',
-    registeredAt: '2026-01-10T08:00:00Z',
-    defaultAddress: 'Jl. Sudirman No. 12, Jakarta Pusat',
-    city: 'Jakarta Pusat',
-    postalCode: '10220',
-    isProfileComplete: true,
-    updateProfileGuide: 'Anda dapat memperbarui profil dan alamat Anda melalui menu Pengaturan Profil di Dashboard Pelanggan.',
-  };
 }
 
 export async function getCustomerRepairs(
@@ -370,39 +362,12 @@ export async function getCustomerRepairs(
         updatedAt: r.updated_at,
       }));
     }
-  } catch {
-    // Fallback sandbox/offline
+    // Tidak ada pesanan: [] (bukan pesanan demo).
+    return [];
+  } catch (err) {
+    console.error('[data-service] getCustomerRepairs gagal:', err);
+    return null;
   }
-
-  return [
-    {
-      id: 1,
-      orderCode: 'REP-2026-0001',
-      categoryName: 'Pendingin Ruangan (AC)',
-      serviceName: 'Cuci AC Standar (0.5 - 1 PK)',
-      device: 'Daikin Inverter 1 PK',
-      problem: 'AC mengeluarkan hembusan angin kurang dingin dan bau berdebu',
-      address: 'Jl. Merdeka No. 45, Jakarta Pusat',
-      status: 'in_repair',
-      technician: {
-        name: 'Budi Santoso',
-        rating: 4.9,
-        phone: '081298765432',
-      },
-      diagnosis: {
-        details: 'Evaporator kotor dan tekanan freon berkurang',
-        estimate: 175000,
-        approvalStatus: 'approved',
-      },
-      invoice: {
-        invoiceNumber: 'INV-2026-0001',
-        totalAmount: 175000,
-        status: 'unpaid',
-      },
-      createdAt: '2026-11-01T08:30:00Z',
-      updatedAt: '2026-11-02T10:00:00Z',
-    },
-  ];
 }
 
 export async function getCustomerRepairDetail(userId: number, identifier: string | number) {
@@ -518,54 +483,12 @@ export async function getCustomerRepairDetail(userId: number, identifier: string
         updatedAt: r.updated_at,
       };
     }
-  } catch {
-    // Fallback sandbox/offline
+    // Pesanan tidak ada, atau milik customer lain: null (bukan detail demo).
+    return null;
+  } catch (err) {
+    console.error('[data-service] getCustomerRepairDetail gagal:', err);
+    return null;
   }
-
-  return {
-    id: 1,
-    orderCode: 'REP-2026-0001',
-    categoryName: 'Pendingin Ruangan (AC)',
-    serviceName: 'Cuci AC Standar (0.5 - 1 PK)',
-    device: 'Daikin Inverter 1 PK',
-    problem: 'AC tidak dingin dan mengeluarkan hembusan bau',
-    address: 'Jl. Merdeka No. 45, Jakarta Pusat',
-    status: 'in_repair',
-    schedule: {
-      date: 'Hari ini',
-      timeSlot: '13:00 - 15:00 WIB',
-      status: 'confirmed',
-    },
-    technician: {
-      name: 'Budi Santoso',
-      rating: 4.9,
-      phone: '081298765432',
-    },
-    diagnosis: {
-      damageDetails: 'Pipa drainase kotor berlendir dan tekanan freon kurang',
-      laborCost: 75000,
-      partsCost: 100000,
-      totalEstimate: 175000,
-      approvalStatus: 'approved',
-      approvedAt: '2026-11-02T09:00:00Z',
-    },
-    invoice: {
-      invoiceNumber: 'INV-2026-0001',
-      subtotalLabor: 75000,
-      subtotalParts: 100000,
-      serviceFee: 5000,
-      totalAmount: 180000,
-      status: 'unpaid',
-      dueDate: '2026-11-08',
-    },
-    timeline: [
-      { status: 'submitted', actor: 'customer', notes: 'Pesanan diajukan', time: '2026-11-01 08:30' },
-      { status: 'assigned', actor: 'system', notes: 'Teknisi Budi Santoso ditugaskan', time: '2026-11-01 08:45' },
-      { status: 'in_repair', actor: 'technician', notes: 'Perbaikan sedang berlangsung', time: '2026-11-02 10:00' },
-    ],
-    createdAt: '2026-11-01T08:30:00Z',
-    updatedAt: '2026-11-02T10:00:00Z',
-  };
 }
 
 export async function getCustomerInvoices(
@@ -626,27 +549,12 @@ export async function getCustomerInvoices(
         createdAt: r.created_at,
       }));
     }
-  } catch {
-    // Fallback sandbox/offline
+    // Tidak ada invoice: [] (bukan invoice demo).
+    return [];
+  } catch (err) {
+    console.error('[data-service] getCustomerInvoices gagal:', err);
+    return null;
   }
-
-  return [
-    {
-      invoiceNumber: 'INV-2026-0001',
-      orderCode: 'REP-2026-0001',
-      categoryName: 'Pendingin Ruangan (AC)',
-      laborCost: 75000,
-      partsCost: 100000,
-      serviceFee: 5000,
-      totalAmount: 180000,
-      status: 'unpaid',
-      dueDate: '2026-11-08',
-      paidAt: null,
-      paymentMethod: 'QRIS / Virtual Account',
-      paymentStatus: 'unpaid',
-      createdAt: '2026-11-02T10:00:00Z',
-    },
-  ];
 }
 
 export async function getCustomerMessages(userId: number, orderCodeOrId: string | number) {
@@ -684,21 +592,12 @@ export async function getCustomerMessages(userId: number, orderCodeOrId: string 
         createdAt: r.created_at,
       }));
     }
-  } catch {
-    // Fallback sandbox/offline
+    // Tidak ada pesan: [] (bukan pesan demo).
+    return [];
+  } catch (err) {
+    console.error('[data-service] getCustomerMessages gagal:', err);
+    return null;
   }
-
-  return [
-    {
-      id: 1,
-      senderName: 'Budi Santoso (Mitra Teknisi)',
-      senderRole: 'technician',
-      content: 'Halo Bapak/Ibu, saya Budi Santoso, teknisi resmi BANTUIN. Saya sudah memeriksa unit AC Anda dan saat ini sedang melakukan pembersihan evaporator.',
-      type: 'text',
-      isRead: true,
-      createdAt: '2026-11-02T10:15:00Z',
-    },
-  ];
 }
 
 // ============================================================================
@@ -755,24 +654,12 @@ export async function getTechnicianProfile(userId: number) {
         joinedAt: r.joined_at,
       };
     }
-  } catch {
-    // Fallback sandbox/offline
+    // Teknisi tidak ditemukan: null, bukan profil demo.
+    return null;
+  } catch (err) {
+    console.error('[data-service] getTechnicianProfile gagal:', err);
+    return null;
   }
-
-  return {
-    userId,
-    fullName: 'Mitra Teknisi BANTUIN',
-    email: 'teknisi@bantuin.id',
-    phoneNumber: '081298765432',
-    experienceYears: 5,
-    ratingAvg: 4.9,
-    ratingCount: 28,
-    isAvailable: true,
-    verifiedStatus: 'verified',
-    specializations: ['Pendingin Ruangan (AC)', 'Lemari Es & Freezer'],
-    totalCompletedJobs: 42,
-    joinedAt: '2025-06-01T08:00:00Z',
-  };
 }
 
 export async function getTechnicianAssignedTasks(
@@ -855,34 +742,12 @@ export async function getTechnicianAssignedTasks(
         orderCreatedAt: r.order_created_at,
       }));
     }
-  } catch {
-    // Fallback sandbox/offline
+    // Tidak ada tugas: [] (bukan tugas demo).
+    return [];
+  } catch (err) {
+    console.error('[data-service] getTechnicianAssignedTasks gagal:', err);
+    return null;
   }
-
-  return [
-    {
-      assignmentId: 1,
-      assignmentStatus: 'accepted',
-      repairId: 1,
-      orderCode: 'REP-2026-0001',
-      categoryName: 'Pendingin Ruangan (AC)',
-      serviceName: 'Cuci AC Standar & Tambah Freon',
-      device: 'Daikin Inverter 1 PK',
-      problem: 'AC tidak dingin dan mengeluarkan hembusan berbau',
-      address: 'Jl. Merdeka No. 45, Jakarta Pusat',
-      orderStatus: 'in_repair',
-      customerName: 'Ahmad Fauzi',
-      customerPhone: '081234567890',
-      schedule: 'Hari ini (13:00 - 15:00 WIB)',
-      scheduleStatus: 'confirmed',
-      diagnosis: {
-        damageDetails: 'Evaporator tertutup lendir tebal dan tekanan freon kurang 20 psi',
-        estimate: 175000,
-        approvalStatus: 'approved',
-      },
-      orderCreatedAt: '2026-11-02T08:00:00Z',
-    },
-  ];
 }
 
 export async function getTechnicianPerformanceMetrics(userId: number) {
@@ -923,22 +788,18 @@ export async function getTechnicianPerformanceMetrics(userId: number) {
       [userId]
     );
 
-    const avgHours = durationRow?.avg_hours ? Number(durationRow.avg_hours).toFixed(1) : '2.1';
+    const avgHours = durationRow?.avg_hours ? Number(durationRow.avg_hours).toFixed(1) : null;
 
+    // Statistik riil (0 bila teknisi belum punya tugas — bukan angka demo).
     return {
-      stats: stats.total > 0 ? stats : { offered: 1, accepted: 2, completed: 35, rejected: 1, cancelled: 0, total: 39 },
-      averageCompletionHours: `${avgHours} jam`,
-      pendingTasksCount: stats.offered + stats.accepted || 2,
+      stats,
+      averageCompletionHours: avgHours ? `${avgHours} jam` : 'Belum ada data',
+      pendingTasksCount: stats.offered + stats.accepted,
     };
-  } catch {
-    // Fallback sandbox/offline
+  } catch (err) {
+    console.error('[data-service] getTechnicianPerformanceMetrics gagal:', err);
+    return null;
   }
-
-  return {
-    stats: { offered: 1, accepted: 2, completed: 35, rejected: 1, cancelled: 0, total: 39 },
-    averageCompletionHours: '2.1 jam',
-    pendingTasksCount: 3,
-  };
 }
 
 // ============================================================================
@@ -980,56 +841,33 @@ export async function getAdminOperationalOverview() {
        WHERE status IN ('submitted', 'in_investigation')`
     );
 
-    if (counts && Number(counts.total_orders) > 0) {
-      return {
-        orders: {
-          total: Number(counts?.total_orders || 0),
-          submitted: Number(counts?.submitted_count || 0),
-          assigned: Number(counts?.assigned_count || 0),
-          scheduled: Number(counts?.scheduled_count || 0),
-          inDiagnosis: Number(counts?.in_diagnosis_count || 0),
-          inRepair: Number(counts?.in_repair_count || 0),
-          completed: Number(counts?.completed_count || 0),
-          cancelled: Number(counts?.cancelled_count || 0),
-          complained: Number(counts?.complained_count || 0),
-        },
-        technicians: {
-          active: Number(activeTechs?.total_active_techs || 0),
-        },
-        customers: {
-          active: Number(activeCustomers?.total_active_customers || 0),
-        },
-        complaints: {
-          active: Number(openComplaints?.total_open_complaints || 0),
-        },
-      };
-    }
-  } catch {
-    // Fallback sandbox/offline
+    // Hitungan riil — termasuk 0 bila database kosong (bukan angka demo).
+    return {
+      orders: {
+        total: Number(counts?.total_orders || 0),
+        submitted: Number(counts?.submitted_count || 0),
+        assigned: Number(counts?.assigned_count || 0),
+        scheduled: Number(counts?.scheduled_count || 0),
+        inDiagnosis: Number(counts?.in_diagnosis_count || 0),
+        inRepair: Number(counts?.in_repair_count || 0),
+        completed: Number(counts?.completed_count || 0),
+        cancelled: Number(counts?.cancelled_count || 0),
+        complained: Number(counts?.complained_count || 0),
+      },
+      technicians: {
+        active: Number(activeTechs?.total_active_techs || 0),
+      },
+      customers: {
+        active: Number(activeCustomers?.total_active_customers || 0),
+      },
+      complaints: {
+        active: Number(openComplaints?.total_open_complaints || 0),
+      },
+    };
+  } catch (err) {
+    console.error('[data-service] getAdminOperationalOverview gagal:', err);
+    return null;
   }
-
-  return {
-    orders: {
-      total: 42,
-      submitted: 3,
-      assigned: 5,
-      scheduled: 6,
-      inDiagnosis: 4,
-      inRepair: 8,
-      completed: 14,
-      cancelled: 2,
-      complained: 0,
-    },
-    technicians: {
-      active: 8,
-    },
-    customers: {
-      active: 25,
-    },
-    complaints: {
-      active: 0,
-    },
-  };
 }
 
 export async function getAdminDelayedRepairs() {
@@ -1068,21 +906,12 @@ export async function getAdminDelayedRepairs() {
           : 'Pengerjaan unit atau proses suku cadang memakan waktu lebih lama',
       }));
     }
-  } catch {
-    // Fallback sandbox/offline
+    // Tidak ada perbaikan tertunda: [] (bukan pesanan demo).
+    return [];
+  } catch (err) {
+    console.error('[data-service] getAdminDelayedRepairs gagal:', err);
+    return null;
   }
-
-  return [
-    {
-      orderCode: 'REP-2026-0012',
-      categoryName: 'Pendingin Ruangan (AC)',
-      status: 'submitted',
-      problem: 'AC tidak dingin dan mengeluarkan bunyi mendengung',
-      elapsedHours: 3,
-      technician: 'Belum ada teknisi ditugaskan (Menunggu Penugasan)',
-      cause: 'Menunggu konfirmasi penerimaan tawaran dari mitra teknisi terdekat di jam sibuk',
-    },
-  ];
 }
 
 export async function getAdminTechnicianWorkload() {
@@ -1116,16 +945,12 @@ export async function getAdminTechnicianWorkload() {
         isAvailable: Boolean(r.is_available),
       }));
     }
-  } catch {
-    // Fallback sandbox/offline
+    // Tidak ada teknisi: [] (bukan teknisi demo).
+    return [];
+  } catch (err) {
+    console.error('[data-service] getAdminTechnicianWorkload gagal:', err);
+    return null;
   }
-
-  return [
-    { technicianId: 2, name: 'Budi Santoso', ratingAvg: 4.9, ratingCount: 24, activeTasks: 2, completedTasks: 18, isAvailable: true },
-    { technicianId: 3, name: 'Agus Setiawan', ratingAvg: 4.8, ratingCount: 19, activeTasks: 1, completedTasks: 15, isAvailable: true },
-    { technicianId: 4, name: 'Dedi Pratama', ratingAvg: 4.7, ratingCount: 12, activeTasks: 3, completedTasks: 9, isAvailable: false },
-    { technicianId: 5, name: 'Rian Hidayat', ratingAvg: 4.9, ratingCount: 16, activeTasks: 0, completedTasks: 14, isAvailable: true },
-  ];
 }
 
 export async function getAdminFinancialAnalytics() {
@@ -1146,39 +971,33 @@ export async function getAdminFinancialAnalytics() {
        GROUP BY payment_method`
     );
 
-    if (invoicesSummary && Number(invoicesSummary.total_invoices) > 0) {
-      return {
-        totalInvoices: Number(invoicesSummary?.total_invoices || 0),
-        totalRevenuePaid: Number(invoicesSummary?.total_revenue_paid || 0),
-        totalUnpaidAmount: Number(invoicesSummary?.total_unpaid_amount || 0),
-        totalPlatformFee: Number(invoicesSummary?.total_platform_fee || 0),
-        paymentMethodsBreakdown: (paymentMethods || []).map(p => ({
-          method: p.payment_method,
-          transactionCount: Number(p.count),
-          volume: Number(p.total_amount),
-        })),
-      };
-    }
-  } catch {
-    // Fallback sandbox/offline
+    // Angka riil — termasuk 0 bila belum ada invoice (bukan angka demo).
+    return {
+      totalInvoices: Number(invoicesSummary?.total_invoices || 0),
+      totalRevenuePaid: Number(invoicesSummary?.total_revenue_paid || 0),
+      totalUnpaidAmount: Number(invoicesSummary?.total_unpaid_amount || 0),
+      totalPlatformFee: Number(invoicesSummary?.total_platform_fee || 0),
+      paymentMethodsBreakdown: (paymentMethods || []).map(p => ({
+        method: p.payment_method,
+        transactionCount: Number(p.count),
+        volume: Number(p.total_amount),
+      })),
+    };
+  } catch (err) {
+    console.error('[data-service] getAdminFinancialAnalytics gagal:', err);
+    return null;
   }
-
-  return {
-    totalInvoices: 38,
-    totalRevenuePaid: 12450000,
-    totalUnpaidAmount: 850000,
-    totalPlatformFee: 1245000,
-    paymentMethodsBreakdown: [
-      { method: 'qris', transactionCount: 22, volume: 7850000 },
-      { method: 'bank_transfer', transactionCount: 14, volume: 4600000 },
-    ],
-  };
 }
 
 export async function getAdminSystemHealth() {
   const dbHealth = await checkDatabaseConnection();
 
-  let fonnteStatus = { lastStatus: 'delivered', lastAttempt: new Date().toISOString(), error: null };
+  // Bila belum ada OTP sama sekali, laporkan 'tidak ada data' — bukan 'delivered'.
+  let fonnteStatus: { lastStatus: string; lastAttempt: string | null; error: string | null } = {
+    lastStatus: 'tidak ada data',
+    lastAttempt: null,
+    error: null,
+  };
 
   try {
     const [lastOtp]: any = await query<any[]>(
@@ -1194,8 +1013,9 @@ export async function getAdminSystemHealth() {
         error: lastOtp.delivery_error || null,
       };
     }
-  } catch {
-    // Fallback sandbox/offline
+  } catch (err) {
+    console.error('[data-service] getAdminSystemHealth gagal membaca user_otps:', err);
+    fonnteStatus = { lastStatus: 'tidak diketahui', lastAttempt: null, error: 'database tidak dapat diakses' };
   }
 
   const geminiConfig = {
@@ -1239,14 +1059,12 @@ export async function getAdminRecentAuditLogs(limitCount = 5) {
         createdAt: r.created_at,
       }));
     }
-  } catch {
-    // Fallback sandbox/offline
+    // Tidak ada log audit: [] (bukan log demo).
+    return [];
+  } catch (err) {
+    console.error('[data-service] getAdminRecentAuditLogs gagal:', err);
+    return null;
   }
-
-  return [
-    { id: 1, action: 'UPDATE_ORDER_STATUS', entityName: 'repair_requests', entityId: 1, adminEmail: 'admin@bantuin.id', ipAddress: '127.0.0.1', createdAt: new Date().toISOString() },
-    { id: 2, action: 'VERIFY_TECHNICIAN', entityName: 'technician_profiles', entityId: 2, adminEmail: 'admin@bantuin.id', ipAddress: '127.0.0.1', createdAt: new Date(Date.now() - 3600000).toISOString() },
-  ];
 }
 
 export async function getAdminSystemSettings() {
@@ -1265,16 +1083,12 @@ export async function getAdminSystemSettings() {
         description: r.description,
       }));
     }
-  } catch {
-    // Fallback sandbox/offline
+    // Tidak ada setting: [] (bukan setting demo).
+    return [];
+  } catch (err) {
+    console.error('[data-service] getAdminSystemSettings gagal:', err);
+    return null;
   }
-
-  return [
-    { key: 'app_name', value: 'BANTUIN', type: 'string', group: 'general', description: 'Nama aplikasi resmi BANTUIN' },
-    { key: 'platform_fee', value: '5000', type: 'number', group: 'finance', description: 'Biaya platform per transaksi' },
-    { key: 'warranty_days', value: '30', type: 'number', group: 'service', description: 'Masa garansi resmi hari kalender' },
-    { key: 'otp_provider', value: 'fonnte', type: 'string', group: 'notification', description: 'Gateway WhatsApp OTP resmi' },
-  ];
 }
 
 export async function getAdminUserStats() {
@@ -1286,45 +1100,38 @@ export async function getAdminUserStats() {
        GROUP BY role, status`
     );
 
-    if (rows && rows.length > 0) {
-      const stats = {
-        totalUsers: 0,
-        customers: { total: 0, active: 0, pending: 0, suspended: 0 },
-        technicians: { total: 0, active: 0, pending: 0, suspended: 0 },
-        admins: { total: 0, active: 0 },
-      };
+    // Hitungan riil — 0 di semua bucket bila belum ada pengguna (bukan angka demo).
+    const stats = {
+      totalUsers: 0,
+      customers: { total: 0, active: 0, pending: 0, suspended: 0 },
+      technicians: { total: 0, active: 0, pending: 0, suspended: 0 },
+      admins: { total: 0, active: 0 },
+    };
 
-      for (const r of rows) {
-        const count = Number(r.count);
-        stats.totalUsers += count;
-        if (r.role === 'customer') {
-          stats.customers.total += count;
-          if (r.status === 'active') stats.customers.active += count;
-          if (r.status === 'pending_verification') stats.customers.pending += count;
-          if (r.status === 'suspended') stats.customers.suspended += count;
-        } else if (r.role === 'technician') {
-          stats.technicians.total += count;
-          if (r.status === 'active') stats.technicians.active += count;
-          if (r.status === 'pending_verification') stats.technicians.pending += count;
-          if (r.status === 'suspended') stats.technicians.suspended += count;
-        } else if (r.role === 'admin') {
-          stats.admins.total += count;
-          if (r.status === 'active') stats.admins.active += count;
-        }
+    for (const r of rows || []) {
+      const count = Number(r.count);
+      stats.totalUsers += count;
+      if (r.role === 'customer') {
+        stats.customers.total += count;
+        if (r.status === 'active') stats.customers.active += count;
+        if (r.status === 'pending_verification') stats.customers.pending += count;
+        if (r.status === 'suspended') stats.customers.suspended += count;
+      } else if (r.role === 'technician') {
+        stats.technicians.total += count;
+        if (r.status === 'active') stats.technicians.active += count;
+        if (r.status === 'pending_verification') stats.technicians.pending += count;
+        if (r.status === 'suspended') stats.technicians.suspended += count;
+      } else if (r.role === 'admin') {
+        stats.admins.total += count;
+        if (r.status === 'active') stats.admins.active += count;
       }
-
-      return stats;
     }
-  } catch {
-    // Fallback sandbox/offline
-  }
 
-  return {
-    totalUsers: 35,
-    customers: { total: 25, active: 22, pending: 3, suspended: 0 },
-    technicians: { total: 8, active: 7, pending: 1, suspended: 0 },
-    admins: { total: 2, active: 2 },
-  };
+    return stats;
+  } catch (err) {
+    console.error('[data-service] getAdminUserStats gagal:', err);
+    return null;
+  }
 }
 
 // ============================================================================
@@ -1359,118 +1166,188 @@ export async function getAdminCustomerAnalytics() {
        ORDER BY rr.created_at DESC LIMIT 5`
     );
 
-    if (counts && Number(counts.total_customers) > 0) {
-      return {
-        totalCustomers: Number(counts.total_customers || 0),
-        newCustomersThisMonth: Number(counts.new_this_month || 0),
-        recentCustomers: recent.map(r => ({
-          name: r.full_name || 'Pelanggan',
-          email: r.email,
-          phone: r.phone_number,
-          city: r.city || '-',
-          registeredAt: r.created_at,
-        })),
-        pendingOrders: pendingOrders.map(p => ({
-          orderCode: p.order_code,
-          customerName: p.full_name || 'Pelanggan',
-          phone: p.phone_number,
-          category: p.category_name,
-          status: p.current_status,
-          createdAt: p.created_at,
-        })),
-      };
-    }
-  } catch {
-    // Fallback sandbox/offline
+    // Angka riil — 0 dan daftar kosong bila belum ada customer (bukan data demo).
+    return {
+      totalCustomers: Number(counts?.total_customers || 0),
+      newCustomersThisMonth: Number(counts?.new_this_month || 0),
+      recentCustomers: (recent || []).map(r => ({
+        name: r.full_name || 'Pelanggan',
+        email: r.email,
+        phone: r.phone_number,
+        city: r.city || '-',
+        registeredAt: r.created_at,
+      })),
+      pendingOrders: (pendingOrders || []).map(p => ({
+        orderCode: p.order_code,
+        customerName: p.full_name || 'Pelanggan',
+        phone: p.phone_number,
+        category: p.category_name,
+        status: p.current_status,
+        createdAt: p.created_at,
+      })),
+    };
+  } catch (err) {
+    console.error('[data-service] getAdminCustomerAnalytics gagal:', err);
+    return null;
   }
-
-  return {
-    totalCustomers: 25,
-    newCustomersThisMonth: 8,
-    recentCustomers: [
-      { name: 'Ahmad Fauzi', email: 'ahmad@example.com', phone: '081234567890', city: 'Jakarta Pusat', registeredAt: '2026-11-01' },
-      { name: 'Siti Nurhaliza', email: 'siti@example.com', phone: '081234567891', city: 'Jakarta Selatan', registeredAt: '2026-11-02' },
-      { name: 'Hendra Wijaya', email: 'hendra@example.com', phone: '081234567892', city: 'Jakarta Barat', registeredAt: '2026-11-03' },
-    ],
-    pendingOrders: [
-      { orderCode: 'REP-2026-0001', customerName: 'Ahmad Fauzi', phone: '081234567890', category: 'Pendingin Ruangan (AC)', status: 'in_repair', createdAt: '2026-11-02' },
-      { orderCode: 'REP-2026-0012', customerName: 'Siti Nurhaliza', phone: '081234567891', category: 'Lemari Es & Freezer', status: 'submitted', createdAt: '2026-11-03' },
-    ],
-  };
 }
 
 export async function getAdminOperationalReport() {
-  return {
-    monthlyComparison: {
-      currentMonthOrders: 42,
-      previousMonthOrders: 35,
-      growthPercent: '+20.0%',
-      currentMonthRevenue: 'Rp 12.450.000',
-      previousMonthRevenue: 'Rp 9.800.000',
-      revenueGrowthPercent: '+27.0%',
-    },
-    topServices: [
-      { name: 'Cuci & Servis AC Standar', requests: 18, share: '42.8%' },
-      { name: 'Tambah Freon R32 / R410A', requests: 9, share: '21.4%' },
-      { name: 'Inspeksi & Diagnosis Kulkas', requests: 7, share: '16.7%' },
-      { name: 'Servis Mesin Cuci & Saluran Air', requests: 5, share: '11.9%' },
-      { name: 'Perbaikan Backlight TV LED', requests: 3, share: '7.2%' },
-    ],
-    frequentIssues: [
-      { issue: 'Tawaran tugas terlambat diterima mitra pada jam sibuk (12:00 - 14:00)', count: 4, impact: 'Menengah' },
-      { issue: 'Keterlambatan penyediaan suku cadang inverter kompresor kulkas', count: 2, impact: 'Tinggi' },
-      { issue: 'Alamat pemesan kurang spesifik di area perumahan baru', count: 3, impact: 'Rendah' },
-    ],
-    efficiencyRecommendations: [
-      'Terapkan insentif lonjakan (surge bonus) bagi teknisi yang menerima penugasan di jam sibuk 12:00-14:00.',
-      'Sediakan stok suku cadang cepat aus (kapasitor AC, relay kulkas, drain valve mesin cuci) pada teknisi bertugas.',
-      'Tambahkan integrasi pin point geolokasi yang lebih presisi pada form pemesanan pelanggan.',
-    ],
-  };
+  try {
+    // Perbandingan pesanan bulan berjalan vs bulan lalu (berdasarkan created_at).
+    const [orderCounts]: any = await query<any[]>(
+      `SELECT
+        SUM(CASE WHEN created_at >= DATE_FORMAT(NOW(), '%Y-%m-01') THEN 1 ELSE 0 END) AS current_orders,
+        SUM(CASE WHEN created_at >= DATE_FORMAT(DATE_SUB(NOW(), INTERVAL 1 MONTH), '%Y-%m-01')
+                  AND created_at < DATE_FORMAT(NOW(), '%Y-%m-01') THEN 1 ELSE 0 END) AS previous_orders
+       FROM repair_requests
+       WHERE deleted_at IS NULL`
+    );
+
+    // Pendapatan = invoice berstatus 'paid', dikelompokkan per bulan pembayaran (paid_at).
+    const [revenue]: any = await query<any[]>(
+      `SELECT
+        SUM(CASE WHEN paid_at >= DATE_FORMAT(NOW(), '%Y-%m-01') THEN total_amount ELSE 0 END) AS current_revenue,
+        SUM(CASE WHEN paid_at >= DATE_FORMAT(DATE_SUB(NOW(), INTERVAL 1 MONTH), '%Y-%m-01')
+                  AND paid_at < DATE_FORMAT(NOW(), '%Y-%m-01') THEN total_amount ELSE 0 END) AS previous_revenue
+       FROM invoices
+       WHERE status = 'paid'`
+    );
+
+    // Layanan paling diminati bulan berjalan (GROUP BY service_id, nama dari tabel services).
+    const topServiceRows = await query<any[]>(
+      `SELECT s.name AS service_name, COUNT(*) AS requests
+       FROM repair_requests rr
+       JOIN services s ON rr.service_id = s.id
+       WHERE rr.deleted_at IS NULL
+         AND rr.service_id IS NOT NULL
+         AND rr.created_at >= DATE_FORMAT(NOW(), '%Y-%m-01')
+       GROUP BY rr.service_id, s.name
+       ORDER BY requests DESC
+       LIMIT 5`
+    );
+
+    // Kendala yang dapat diukur dari data: dibatalkan & dikomplain bulan ini,
+    // serta pesanan yang menunggu penugasan/penjadwalan lebih dari 24 jam.
+    const [issueCounts]: any = await query<any[]>(
+      `SELECT
+        SUM(CASE WHEN current_status = 'cancelled' AND created_at >= DATE_FORMAT(NOW(), '%Y-%m-01') THEN 1 ELSE 0 END) AS cancelled_this_month,
+        SUM(CASE WHEN current_status = 'complained' AND created_at >= DATE_FORMAT(NOW(), '%Y-%m-01') THEN 1 ELSE 0 END) AS complained_this_month,
+        SUM(CASE WHEN current_status IN ('submitted', 'assigned', 'scheduled')
+                  AND TIMESTAMPDIFF(HOUR, created_at, NOW()) >= 24 THEN 1 ELSE 0 END) AS delayed_over_24h
+       FROM repair_requests
+       WHERE deleted_at IS NULL`
+    );
+
+    const currentMonthOrders = Number(orderCounts?.current_orders || 0);
+    const previousMonthOrders = Number(orderCounts?.previous_orders || 0);
+    const currentMonthRevenue = Number(revenue?.current_revenue || 0);
+    const previousMonthRevenue = Number(revenue?.previous_revenue || 0);
+
+    const formatGrowth = (current: number, previous: number): string => {
+      if (previous <= 0) return current > 0 ? 'n/a' : '0.0%';
+      const pct = ((current - previous) / previous) * 100;
+      return `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`;
+    };
+    const formatRupiah = (n: number): string => `Rp ${n.toLocaleString('id-ID')}`;
+
+    const topServices = (topServiceRows || []).map(r => {
+      const requests = Number(r.requests || 0);
+      const share = currentMonthOrders > 0 ? `${((requests / currentMonthOrders) * 100).toFixed(1)}%` : '0.0%';
+      return { name: r.service_name, requests, share };
+    });
+
+    // Kendala hanya dimunculkan bila benar-benar ada datanya (count > 0).
+    const impactOf = (count: number): string => (count >= 10 ? 'Tinggi' : count >= 3 ? 'Menengah' : 'Rendah');
+    const frequentIssues: Array<{ issue: string; count: number; impact: string }> = [];
+    const cancelledCount = Number(issueCounts?.cancelled_this_month || 0);
+    const complainedCount = Number(issueCounts?.complained_this_month || 0);
+    const delayedCount = Number(issueCounts?.delayed_over_24h || 0);
+    if (delayedCount > 0) {
+      frequentIssues.push({
+        issue: `${delayedCount} pesanan menunggu penugasan/penjadwalan lebih dari 24 jam`,
+        count: delayedCount,
+        impact: impactOf(delayedCount),
+      });
+    }
+    if (cancelledCount > 0) {
+      frequentIssues.push({
+        issue: `${cancelledCount} pesanan dibatalkan pada bulan berjalan`,
+        count: cancelledCount,
+        impact: impactOf(cancelledCount),
+      });
+    }
+    if (complainedCount > 0) {
+      frequentIssues.push({
+        issue: `${complainedCount} pesanan berstatus komplain pada bulan berjalan`,
+        count: complainedCount,
+        impact: impactOf(complainedCount),
+      });
+    }
+
+    // Rekomendasi diturunkan dari angka di atas; kosong bila tidak ada kendala.
+    const efficiencyRecommendations: string[] = [];
+    if (delayedCount > 0) {
+      efficiencyRecommendations.push(`Tinjau ketersediaan teknisi dan percepat penugasan untuk ${delayedCount} pesanan yang menunggu lebih dari 24 jam.`);
+    }
+    if (cancelledCount > 0) {
+      efficiencyRecommendations.push(`Tinjau alasan pembatalan ${cancelledCount} pesanan bulan ini untuk menemukan pola yang bisa dicegah.`);
+    }
+    if (complainedCount > 0) {
+      efficiencyRecommendations.push(`Tindak lanjuti ${complainedCount} komplain bulan ini dan tinjau kualitas pengerjaan pada pesanan terkait.`);
+    }
+
+    return {
+      monthlyComparison: {
+        currentMonthOrders,
+        previousMonthOrders,
+        growthPercent: formatGrowth(currentMonthOrders, previousMonthOrders),
+        currentMonthRevenue: formatRupiah(currentMonthRevenue),
+        previousMonthRevenue: formatRupiah(previousMonthRevenue),
+        revenueGrowthPercent: formatGrowth(currentMonthRevenue, previousMonthRevenue),
+      },
+      topServices,
+      frequentIssues,
+      efficiencyRecommendations,
+    };
+  } catch (err) {
+    console.error('[data-service] getAdminOperationalReport gagal:', err);
+    return null;
+  }
 }
 
 export async function getAdminNotificationStatus() {
   try {
     const [counts]: any = await query<any[]>(
-      `SELECT 
+      `SELECT
         COUNT(*) AS total_sent,
-        SUM(CASE WHEN delivery_status = 'delivered' THEN 1 ELSE 0 END) AS delivered_count,
+        SUM(CASE WHEN delivery_status = 'sent' THEN 1 ELSE 0 END) AS delivered_count,
         SUM(CASE WHEN delivery_status = 'failed' THEN 1 ELSE 0 END) AS failed_count
        FROM user_otps`
     );
 
     const failedLogs = await query<any[]>(
-      `SELECT phone_number, delivery_error, created_at
+      `SELECT target_phone, delivery_error, created_at
        FROM user_otps
        WHERE delivery_status = 'failed'
        ORDER BY created_at DESC LIMIT 5`
     );
 
-    if (counts && Number(counts.total_sent) > 0) {
-      return {
-        totalSent: Number(counts.total_sent || 0),
-        delivered: Number(counts.delivered_count || 0),
-        failed: Number(counts.failed_count || 0),
-        failedLogs: (failedLogs || []).map(f => ({
-          phone: f.phone_number,
-          reason: f.delivery_error || 'Nomor WhatsApp tidak aktif atau timeout koneksi gateway Fonnte',
-          createdAt: f.created_at,
-        })),
-      };
-    }
-  } catch {
-    // Fallback sandbox/offline
+    // Hitungan riil — 0 dan daftar kosong bila belum ada OTP (bukan data demo).
+    return {
+      totalSent: Number(counts?.total_sent || 0),
+      delivered: Number(counts?.delivered_count || 0),
+      failed: Number(counts?.failed_count || 0),
+      failedLogs: (failedLogs || []).map(f => ({
+        phone: f.target_phone,
+        reason: f.delivery_error || 'Nomor WhatsApp tidak aktif atau timeout koneksi gateway Fonnte',
+        createdAt: f.created_at,
+      })),
+    };
+  } catch (err) {
+    console.error('[data-service] getAdminNotificationStatus gagal:', err);
+    return null;
   }
-
-  return {
-    totalSent: 68,
-    delivered: 66,
-    failed: 2,
-    failedLogs: [
-      { phone: '081999888777', reason: 'Nomor WhatsApp tidak terdaftar di server Fonnte', createdAt: '2026-11-01 14:20:00' },
-      { phone: '082111222333', reason: 'Gateway Fonnte API timeout 10000ms', createdAt: '2026-11-02 09:12:00' },
-    ],
-  };
 }
 
 // ============================================================================
@@ -1585,67 +1462,6 @@ export interface DatabaseUserRecord {
   registeredAt: string;
 }
 
-const FALLBACK_USERS: DatabaseUserRecord[] = [
-  {
-    id: 10,
-    uuid: '32a328a7-68d0-48f8-9307-c717641d03a0',
-    fullName: 'Salsa Nabil',
-    email: 'sn9942136@gmail.com',
-    phoneNumber: '62881022834828',
-    role: 'customer',
-    status: 'active',
-    isVerified: true,
-    city: 'Jakarta Selatan',
-    address: 'Jl. Fatmawati No. 18, Jakarta Selatan',
-    registeredAt: '2026-11-03T10:15:00Z',
-  },
-  {
-    id: 11,
-    uuid: 'ecdc4289-4b2a-49ea-ab21-f2d747e82849',
-    fullName: 'Qonita',
-    email: 'qoniyunulumqonita@gmail.com',
-    phoneNumber: '62853147248123',
-    role: 'customer',
-    status: 'active',
-    isVerified: true,
-    city: 'Jakarta Pusat',
-    address: 'Jl. Menteng No. 5, Jakarta Pusat',
-    registeredAt: '2026-11-03T09:20:00Z',
-  },
-  {
-    id: 12,
-    uuid: 'fa3c8c9d-7133-4270-b40f-17b5f23fe829',
-    fullName: 'Hasan Teknisi Uji',
-    email: 'tech_test_233898@bantuin.id',
-    phoneNumber: '6287788233891',
-    role: 'technician',
-    status: 'active',
-    isVerified: true,
-    city: 'Jakarta Barat',
-    address: 'Jl. Kebon Jeruk No. 88, Jakarta Barat',
-    technicianDetails: {
-      ratingAvg: 4.85,
-      ratingCount: 18,
-      isAvailable: true,
-      yearsOfExperience: 4,
-    },
-    registeredAt: '2026-11-02T14:00:00Z',
-  },
-  {
-    id: 13,
-    uuid: '1fcbd23e-ef64-4097-a192-20fccbf4cb86',
-    fullName: 'Budi Customer Uji',
-    email: 'cust_test_233898@bantuin.id',
-    phoneNumber: '6281234233891',
-    role: 'customer',
-    status: 'active',
-    isVerified: true,
-    city: 'Jakarta Timur',
-    address: 'Jl. Pemuda No. 22, Jakarta Timur',
-    registeredAt: '2026-11-02T11:00:00Z',
-  },
-];
-
 /**
  * Mencari data pengguna berdasarkan nomor telepon, email, nama, atau UUID
  */
@@ -1733,19 +1549,12 @@ export async function searchDatabaseUsers(
         registeredAt: r.created_at,
       }));
     }
-  } catch {
-    // Gunakan fallback
+    // Tidak ada pengguna yang cocok: [] (tanpa fallback data hardcoded).
+    return [];
+  } catch (err) {
+    console.error('[data-service] searchDatabaseUsers gagal:', err);
+    return [];
   }
-
-  // Cari di cache fallback
-  const cleanLower = cleanTerm.toLowerCase();
-  return FALLBACK_USERS.filter(u => {
-    const matchPhone = isPhone && (u.phoneNumber.includes(digitsOnly) || digitsOnly.includes(u.phoneNumber.replace(/[^0-9]/g, '')));
-    const matchEmail = u.email.toLowerCase().includes(cleanLower);
-    const matchName = u.fullName.toLowerCase().includes(cleanLower);
-    const matchUuid = u.uuid.toLowerCase() === cleanLower;
-    return matchPhone || matchEmail || matchName || matchUuid;
-  }).slice(0, limit);
 }
 
 /**
@@ -1820,28 +1629,12 @@ export async function searchDatabaseOrders(
         createdAt: r.created_at,
       }));
     }
-  } catch {
-    // Fallback
+    // Tidak ada pesanan yang cocok: [] (tanpa fallback data hardcoded).
+    return [];
+  } catch (err) {
+    console.error('[data-service] searchDatabaseOrders gagal:', err);
+    return [];
   }
-
-  return [
-    {
-      orderCode: 'REP-2026-0001',
-      category: 'Pendingin Ruangan (AC)',
-      device: 'Daikin Inverter 1 PK',
-      status: 'in_repair',
-      problem: 'AC tidak dingin dan mengeluarkan hembusan bau',
-      address: 'Jl. Merdeka No. 45, Jakarta Pusat',
-      customerName: 'Ahmad Fauzi',
-      customerPhone: '081234567890',
-      technicianName: 'Budi Santoso',
-      technicianRating: 4.9,
-      invoiceNumber: 'INV-2026-0001',
-      totalAmount: 180000,
-      invoiceStatus: 'unpaid',
-      createdAt: '2026-11-01T08:30:00Z',
-    },
-  ];
 }
 
 /**
@@ -1893,15 +1686,12 @@ export async function searchDatabaseTechnicians(
         verifiedStatus: r.verified_status,
       }));
     }
-  } catch {
-    // Fallback
+    // Tidak ada teknisi yang cocok: [] (tanpa fallback data hardcoded).
+    return [];
+  } catch (err) {
+    console.error('[data-service] searchDatabaseTechnicians gagal:', err);
+    return [];
   }
-
-  return [
-    { technicianId: 2, name: 'Budi Santoso', phone: '081298765432', email: 'budi.santoso@bantuin.id', experienceYears: 5, rating: 4.9, reviewsCount: 24, isAvailable: true, verifiedStatus: 'verified' },
-    { technicianId: 3, name: 'Agus Setiawan', phone: '081345678901', email: 'agus.setiawan@bantuin.id', experienceYears: 4, rating: 4.8, reviewsCount: 19, isAvailable: true, verifiedStatus: 'verified' },
-    { technicianId: 12, name: 'Hasan Teknisi Uji', phone: '6287788233891', email: 'tech_test_233898@bantuin.id', experienceYears: 4, rating: 4.85, reviewsCount: 18, isAvailable: true, verifiedStatus: 'verified' },
-  ];
 }
 
 /**
@@ -1963,26 +1753,12 @@ export async function searchDatabaseInvoices(
         paidAt: r.paid_at,
       }));
     }
-  } catch {
-    // Fallback
+    // Tidak ada invoice yang cocok: [] (tanpa fallback data hardcoded).
+    return [];
+  } catch (err) {
+    console.error('[data-service] searchDatabaseInvoices gagal:', err);
+    return [];
   }
-
-  return [
-    {
-      invoiceNumber: 'INV-2026-0001',
-      orderCode: 'REP-2026-0001',
-      category: 'Pendingin Ruangan (AC)',
-      customerName: 'Ahmad Fauzi',
-      customerPhone: '081234567890',
-      laborCost: 75000,
-      partsCost: 100000,
-      serviceFee: 5000,
-      totalAmount: 180000,
-      status: 'unpaid',
-      dueDate: '2026-11-08',
-      paidAt: null,
-    },
-  ];
 }
 
 
