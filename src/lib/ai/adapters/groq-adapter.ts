@@ -104,6 +104,21 @@ export class GroqProviderAdapter implements AIProviderAdapter {
     const endpointToTest = config.apiEndpoint || (this.providerName === 'groq' ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1');
     const modelToTest = config.selectedModel || config.defaultModel || (this.providerName === 'groq' ? 'openai/gpt-oss-120b' : 'default-model');
 
+    // L7: timeout probe memakai requestTimeoutMs dari konfigurasi (form) —
+    // sebelumnya hardcoded 10s (/models) dan 15s (chat), sehingga pengaturan
+    // timeout admin diabaikan saat tes koneksi. Dijepit 5s–120s; default 15s
+    // bila konfigurasi tidak membawa nilai yang valid.
+    const probeTimeoutMs = Number.isFinite(Number(config.requestTimeoutMs))
+      ? Math.max(5000, Math.min(120000, Number(config.requestTimeoutMs)))
+      : 15000;
+
+    // L2: model yang BENAR-BENAR diuji. Bila auto-heal berhasil (model yang
+    // diminta tidak tersedia, diganti model default), testedModel berubah ke
+    // model pengganti dan healedModel mengisinya agar UI bisa menawarkan
+    // untuk menyimpan model pengganti — model tersimpan TIDAK diubah di sini.
+    let testedModel = modelToTest;
+    let healedModel: string | null = null;
+
     try {
       // 1. Validasi SSRF & Pin DNS IP
       const endpointValidation = await validateAndPinEndpoint(
@@ -136,7 +151,7 @@ export class GroqProviderAdapter implements AIProviderAdapter {
           Authorization: `Bearer ${config.apiKey.trim()}`,
         },
         agent,
-        timeoutMs: 10000,
+        timeoutMs: probeTimeoutMs,
       });
 
       // Auto-heal path: jika 404 dan belum berakhiran /v1, coba /v1/models
@@ -148,7 +163,7 @@ export class GroqProviderAdapter implements AIProviderAdapter {
             Authorization: `Bearer ${config.apiKey.trim()}`,
           },
           agent,
-          timeoutMs: 10000,
+          timeoutMs: probeTimeoutMs,
         });
         if (v1Res.ok) {
           normalizedBase = `${normalizedBase}/v1`;
@@ -184,7 +199,7 @@ export class GroqProviderAdapter implements AIProviderAdapter {
           max_tokens: 1,
         }),
         agent,
-        timeoutMs: 15000,
+        timeoutMs: probeTimeoutMs,
       });
 
       const latencyMs = Date.now() - startTime;
@@ -209,11 +224,14 @@ export class GroqProviderAdapter implements AIProviderAdapter {
               max_tokens: 1,
             }),
             agent,
-            timeoutMs: 15000,
+            timeoutMs: probeTimeoutMs,
           });
 
           if (healRes.ok) {
             config.selectedModel = 'openai/gpt-oss-120b';
+            // L2: catat model pengganti sebagai model yang benar-benar diuji.
+            testedModel = 'openai/gpt-oss-120b';
+            healedModel = 'openai/gpt-oss-120b';
             chatRes = healRes;
           }
         } catch {}
@@ -224,7 +242,10 @@ export class GroqProviderAdapter implements AIProviderAdapter {
         return {
           provider: this.providerName,
           endpoint: endpointToTest,
-          modelTested: modelToTest,
+          // L2: laporkan model yang BENAR-BENAR diuji (bisa model hasil heal,
+          // bukan model asli yang diminta).
+          modelTested: testedModel,
+          healedModel,
           status: 'success',
           httpStatusCode: 200,
           responseTimeMs: latencyMs,
@@ -244,9 +265,10 @@ export class GroqProviderAdapter implements AIProviderAdapter {
       // Saldo/kuota habis (402): API key memang valid, tetapi provider TIDAK BISA
       // melayani chat sama sekali. JANGAN laporkan sebagai 'success' — status
       // 'connected' yang menutupi saldo 0 membuat admin mengira provider sehat
-      // padahal setiap percakapan gagal. Laporkan sebagai rate_limit_exceeded
-      // agar tersimpan sebagai 'connection_error' dan UI menampilkan badge
-      // "Saldo Habis (402)".
+      // padahal setiap percakapan gagal. L1: status disamakan dengan
+      // normalizeError ('provider_error' + pesan "Saldo Habis") — sebelumnya
+      // jalur ini memakai 'rate_limit_exceeded' sementara normalizeError
+      // memakai 'provider_error' untuk kondisi 402 yang sama.
       if (
         chatRes.status === 402 ||
         errorDetail.toLowerCase().includes('insufficient balance') ||
@@ -256,11 +278,29 @@ export class GroqProviderAdapter implements AIProviderAdapter {
           provider: this.providerName,
           endpoint: endpointToTest,
           modelTested: modelToTest,
-          status: 'rate_limit_exceeded',
+          status: 'provider_error',
           httpStatusCode: 402,
           responseTimeMs: latencyMs,
           testedAt: new Date().toISOString(),
           errorMessage: 'Saldo akun AI habis (402 Insufficient Balance). API key valid, tetapi provider tidak dapat melayani percakapan sampai saldo diisi ulang di console provider.',
+        };
+      }
+
+      // L15: bila /models DAN /chat/completions sama-sama 404, masalahnya
+      // adalah endpoint (salah total), bukan model — laporkan invalid_endpoint
+      // agar admin memeriksa URL endpoint. Sebelumnya kode jatuh ke
+      // normalizeError({ status: 404 }) → model_not_available, yang menyuruh
+      // admin memeriksa model padahal endpoint-lah yang salah.
+      if (chatRes.status === 404 && modelsRes.status === 404) {
+        return {
+          provider: this.providerName,
+          endpoint: endpointToTest,
+          modelTested: modelToTest,
+          status: 'invalid_endpoint',
+          httpStatusCode: 404,
+          responseTimeMs: latencyMs,
+          testedAt: new Date().toISOString(),
+          errorMessage: 'Endpoint tidak ditemukan (404 pada /models dan /chat/completions) — periksa URL endpoint.',
         };
       }
 

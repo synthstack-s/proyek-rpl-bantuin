@@ -88,6 +88,11 @@ export class AIProviderManager {
   private lastCacheCheckTime: number = 0;
   private readonly CACHE_TTL_MS = 5000; // 5 detik TTL untuk pengecekan version ke DB
 
+  // L11: promise sinkronisasi yang sedang berjalan (bila ada). Pemanggil
+  // konkuren berbagi satu sync yang sama alih-alih masing-masing membaca DB
+  // dan saling menimpa cache — dibersihkan saat settle (sukses/gagal).
+  private syncPromise: Promise<void> | null = null;
+
   private constructor() {
     this.adapters.set('gemini', new GeminiProviderAdapter());
     this.adapters.set('groq', new GroqProviderAdapter());
@@ -135,6 +140,17 @@ export class AIProviderManager {
 
   /**
    * Memastikan cache terverifikasi sinkron dengan database (Multi-Instance Cache Invalidation)
+   *
+   * L11: panggilan konkuren berbagi SATU sinkronisasi lewat `syncPromise` —
+   * sebelumnya dua panggilan bisa sama-sama lolos cek TTL, membaca version,
+   * lalu saling menimpa cache (panggilan yang membaca version lama bisa
+   * menimpa cache yang baru saja diperbarui panggilan lain dengan version
+   * lebih baru). Promise dibersihkan saat settle agar sync berikutnya tetap
+   * bisa berjalan. Catatan: pemanggil `force` yang bergabung dengan sync
+   * non-force yang sedang berjalan tetap mendapat cache segar — sync itu
+   * membaca version terkini dari DB dan me-refresh bila version berubah
+   * (satu-satunya yang dilewatkan adalah pembacaan ulang saat version SAMA,
+   * yang datanya identik).
    */
   public async syncWithDatabase(force = false): Promise<void> {
     const now = Date.now();
@@ -142,6 +158,29 @@ export class AIProviderManager {
       return;
     }
 
+    // Ada sync yang sedang berjalan — bergabung, jangan mulai yang baru.
+    if (this.syncPromise) {
+      return this.syncPromise;
+    }
+
+    const pending = this.doSyncWithDatabase(force);
+    this.syncPromise = pending;
+    try {
+      await pending;
+    } finally {
+      // Bersihkan hanya bila masih promise yang sama (bukan sync baru yang
+      // dimulai setelah promise ini settle).
+      if (this.syncPromise === pending) {
+        this.syncPromise = null;
+      }
+    }
+  }
+
+  /**
+   * Pekerja sinkronisasi sebenarnya — hanya dipanggil lewat syncWithDatabase.
+   */
+  private async doSyncWithDatabase(force: boolean): Promise<void> {
+    const now = Date.now();
     const currentGlobal = await getGlobalAISettings();
     // Jika version di DB lebih tinggi atau force reload, segarkan cache
     if (force || currentGlobal.version !== this.cachedVersion || !this.cachedGlobalSettings) {
@@ -463,6 +502,11 @@ export class AIProviderManager {
    * memakai kredensial tersimpan. Tes override dari form (key belum disimpan)
    * tetap dicatat ke ai_connection_test_logs tetapi TIDAK boleh menimpa
    * status tersimpan — flag ini diteruskan ke recordConnectionTestLog.
+   *
+   * L7: `configOverride.requestTimeoutMs` meneruskan timeout dari form ke
+   * probe adapter (dijepit 5s–120s) — sebelumnya route mengabaikannya dan
+   * adapter memakai timeout hardcoded, sehingga pengaturan timeout admin
+   * tidak berlaku untuk tes koneksi.
    */
   public async testProviderConnection(
     provider: AIProviderType,
@@ -470,6 +514,7 @@ export class AIProviderManager {
       apiEndpoint?: string;
       apiKey?: string;
       selectedModel?: string;
+      requestTimeoutMs?: number;
     },
     adminId?: number,
     opts?: { usesStoredCredentials?: boolean }
@@ -477,11 +522,17 @@ export class AIProviderManager {
     await this.syncWithDatabase();
 
     const baseConfig = await getProviderRuntimeConfig(provider);
+    const overrideTimeout = Number(configOverride?.requestTimeoutMs);
     const testConfig: ProviderRuntimeConfig = {
       ...baseConfig,
       apiEndpoint: configOverride?.apiEndpoint || baseConfig.apiEndpoint,
       apiKey: configOverride?.apiKey && configOverride.apiKey.trim().length > 0 ? configOverride.apiKey.trim() : baseConfig.apiKey,
       selectedModel: configOverride?.selectedModel || baseConfig.selectedModel,
+      // L7: override timeout dari form (dijepit 5s–120s); bila tidak ada /
+      // tidak valid, pakai timeout tersimpan dari konfigurasi.
+      requestTimeoutMs: Number.isFinite(overrideTimeout)
+        ? Math.max(5000, Math.min(120000, Math.floor(overrideTimeout)))
+        : baseConfig.requestTimeoutMs,
     };
 
     const adapter = this.getAdapter(provider);

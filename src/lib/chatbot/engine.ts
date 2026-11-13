@@ -35,7 +35,7 @@ import { getRoleFilteredSchemaSummary, getTableSchemaMetadata } from './schema-r
 import { AIProviderManager } from '@/lib/ai/provider-manager';
 import { UniversalToolDeclaration, UniversalChatMessage } from '@/lib/ai/types';
 import {
-  saveChatMessage,
+  saveChatMessageDetailed,
   updateSessionDiagnosis,
   getSessionMessages,
 } from './repository';
@@ -70,6 +70,50 @@ function detectTechnicianActionType(norm: string): 'accept' | 'on_the_way' | 'st
   if (/perbaikan/i.test(norm)) return 'start_repair';
   return 'on_the_way';
 }
+
+// ============================================================================
+// F6 — Lokasi penyimpanan pesan percakapan. Repository Batch 2 mengembalikan
+// storedIn 'database' | 'memory' via saveChatMessageDetailed; engine memetakan
+// 'database' -> 'db' sesuai kontrak hasil processChatMessage di bawah.
+// 'memory' berarti pesan hanya di fallback in-memory (hilang saat restart);
+// bila salah satu dari pesan pengguna/balasan hanya di memori, hasilnya
+// 'memory' (tidak tahan lama).
+// ============================================================================
+export type MessageStoreLocation = 'db' | 'memory';
+
+export interface ChatbotReply {
+  reply: string;
+  metadata: ChatMessageMetadata;
+  diagnosisCard?: DiagnosisCard | null;
+  /**
+   * F6 — Di mana pesan percakapan ini tersimpan: 'db' (MySQL, tahan lama)
+   * atau 'memory' (hanya fallback in-memory — hilang saat restart; salah
+   * satu dari pesan pengguna/balasan tidak mencapai database).
+   */
+  storedIn: 'db' | 'memory';
+}
+
+async function saveChatMessageTracked(
+  sessionId: number,
+  role: 'user' | 'assistant' | 'system',
+  message: string,
+  metadata?: ChatMessageMetadata | null,
+  tokensUsed?: number,
+  responseTimeMs?: number
+): Promise<MessageStoreLocation> {
+  const result = await saveChatMessageDetailed(sessionId, role, message, metadata, tokensUsed, responseTimeMs);
+  return result.storedIn === 'database' ? 'db' : 'memory';
+}
+
+function combineStoredIn(...locations: MessageStoreLocation[]): MessageStoreLocation {
+  return locations.includes('memory') ? 'memory' : 'db';
+}
+
+// F23 — Pesan generik untuk klien saat AI tidak tersedia. Detail error mentah
+// provider (nama model/endpoint, kuota, potongan respons API) HANYA dicatat
+// di log server dan TIDAK PERNAH dikembalikan ke klien — baik di teks
+// balasan maupun metadata.aiError.
+const AI_UNAVAILABLE_MESSAGE = 'Layanan AI sedang tidak tersedia, coba lagi nanti';
 
 /**
  * Intelligent Appliance Expert System untuk analisis diagnosis kerusakan
@@ -282,11 +326,7 @@ export async function processChatMessage(params: {
   userMessage: string;
   session: ConsultationSession;
   userContext: ChatUserContext;
-}): Promise<{
-  reply: string;
-  metadata: ChatMessageMetadata;
-  diagnosisCard?: DiagnosisCard | null;
-}> {
+}): Promise<ChatbotReply> {
   const startTime = Date.now();
   try {
     return await processChatMessageInternal(params);
@@ -299,6 +339,12 @@ export async function processChatMessage(params: {
       responseTimeMs: Date.now() - startTime,
       quickSuggestions: getRoleBasedSuggestedPrompts(userContext.role, userContext.pageContext?.pathname || '/'),
     };
+    // F6: bila penyimpanan gagal total (persistErr di bawah), storedIn tetap
+    // 'memory' — ketahanan di DB tidak terkonfirmasi. Bila pesan pengguna
+    // sudah tersimpan oleh percobaan sebelumnya (alreadySaved), hanya
+    // penyimpanan balasan yang dilacak (lokasi pesan lama tidak diketahui
+    // wrapper ini).
+    let storedIn: MessageStoreLocation = 'memory';
     // Best-effort: pastikan pesan pengguna + balasan error tersimpan agar
     // percakapan tidak berlubang. Cek duplikasi dulu: bila pesan pengguna
     // sudah tersimpan (error terjadi setelah penyimpanan), jangan simpan
@@ -306,16 +352,18 @@ export async function processChatMessage(params: {
     try {
       const recent = await getSessionMessages(session.id);
       const alreadySaved = recent.some((m: any) => m.role === 'user' && String(m.message || '').trim() === userMessage.trim());
+      const locations: MessageStoreLocation[] = [];
       if (!alreadySaved) {
-        await saveChatMessage(session.id, 'user', userMessage);
+        locations.push(await saveChatMessageTracked(session.id, 'user', userMessage));
       }
-      await saveChatMessage(session.id, 'assistant', errorReply, metadata, 0, metadata.responseTimeMs);
+      locations.push(await saveChatMessageTracked(session.id, 'assistant', errorReply, metadata, 0, metadata.responseTimeMs));
+      storedIn = combineStoredIn(...locations);
     } catch (persistErr) {
       // Penyimpanan pun gagal (mis. DB down total) — tetap kembalikan
       // balasan ramah; route tidak akan mengembalikan 500.
       console.error('[Chatbot Engine] F18 gagal menyimpan pesan error:', persistErr);
     }
-    return { reply: errorReply, metadata };
+    return { reply: errorReply, metadata, storedIn };
   }
 }
 
@@ -323,11 +371,7 @@ async function processChatMessageInternal(params: {
   userMessage: string;
   session: ConsultationSession;
   userContext: ChatUserContext;
-}): Promise<{
-  reply: string;
-  metadata: ChatMessageMetadata;
-  diagnosisCard?: DiagnosisCard | null;
-}> {
+}): Promise<ChatbotReply> {
   const { userMessage, session, userContext } = params;
   const startTime = Date.now();
   const currentPath = userContext.pageContext?.pathname || '/';
@@ -345,12 +389,13 @@ async function processChatMessageInternal(params: {
       quickSuggestions: getRoleBasedSuggestedPrompts(userContext.role, currentPath),
     };
 
-    await saveChatMessage(session.id, 'user', userMessage);
-    await saveChatMessage(session.id, 'assistant', refusalReply, metadata, 0, metadata.responseTimeMs);
+    const userStored = await saveChatMessageTracked(session.id, 'user', userMessage);
+    const replyStored = await saveChatMessageTracked(session.id, 'assistant', refusalReply, metadata, 0, metadata.responseTimeMs);
 
     return {
       reply: refusalReply,
       metadata,
+      storedIn: combineStoredIn(userStored, replyStored),
     };
   }
 
@@ -373,6 +418,12 @@ async function processChatMessageInternal(params: {
 
   // ==========================================================================
   // GLOBAL: DETEKSI PERTANYAAN MODEL & PROVIDER AI (SEMUA ROLE & ADMIN)
+  // N24: blok peran di bawah (guest/customer/technician/admin) adalah
+  // `else if` terhadap cabang ini — jawaban info model tidak boleh ditimpa
+  // cabang peran bila pesan juga cocok dengan pola lain (mis. admin bertanya
+  // "model apa yang dipakai untuk laporan operasional?" harus dijawab info
+  // model, bukan laporan operasional). Peran saling eksklusif sehingga
+  // rantai else-if tidak mengubah perilaku pesan non-model-info.
   // ==========================================================================
   if (
     /model\s+(?:apa|ai|llm)|provider\s+(?:apa|ai)|kamu\s+(?:pakai|menggunakan|ditenagai|berbasis)\s+(?:model|ai|gemini|groq|llm|teknologi)|siapa\s+(?:otak|mesin|model)\s+ai|apa\s+model\s+(?:yang\s+)?(?:dipakai|digunakan|aktif)|model\s+yang\s+(?:sedang\s+)?(?:dipakai|digunakan|aktif)|versi\s+ai|provider\s+aktif|ai\s+provider/i.test(norm)
@@ -408,16 +459,37 @@ ${userContext.role === 'admin' ? '💡 _Catatan Administrator: Anda dapat mengga
   // ==========================================================================
   // A. KATEGORI KHUSUS GUEST (TAMU PUBLIK)
   // ==========================================================================
-  if (userContext.role === 'guest') {
+  else if (userContext.role === 'guest') {
     if (/apa\s+itu\s+bantuin|tujuan\s+aplikasi|tentang\s+bantuin/i.test(norm)) {
       const guide = DataService.getAppGuide('tentang');
       directReply = `**${guide.title}**\n\n${guide.content}`;
+    } else if (/daftar\s+(harga|tarif|layanan)|harga|tarif|biaya/i.test(norm)) {
+      // N20: "daftar harga / tarif / layanan" adalah pertanyaan harga —
+      // jawab dari katalog layanan (dengan harga dasar), BUKAN panduan
+      // pendaftaran. Cabang ini HARUS sebelum cabang pendaftaran dan
+      // cabang katalog (pola katalog menangkap kata "katalog", sehingga
+      // "katalog harga" pun harus sampai ke sini).
+      const catalog = await DataService.getPublicCatalog();
+      const allServices = catalog.flatMap((c) => c.services.map((s) => ({ ...s, categoryName: c.categoryName })));
+      if (allServices.length === 0) {
+        directReply = 'Belum ada layanan aktif yang tercatat di katalog BANTUIN.';
+      } else {
+        const shown = allServices.slice(0, 20);
+        directReply = `💰 **Daftar Harga Layanan BANTUIN:**\n\n` +
+          shown.map((s, i) => `**${i + 1}. ${s.name}** (${s.categoryName})\n- Harga Dasar: **Rp ${s.basePrice.toLocaleString('id-ID')}**\n- Estimasi Durasi: ${s.estimatedDurationMin} menit`).join('\n') +
+          (allServices.length > shown.length ? `\n\n_...dan ${allServices.length - shown.length} layanan lainnya._` : '') +
+          `\n\n_Harga di atas adalah tarif dasar. Biaya akhir ditentukan setelah teknisi melakukan diagnosis dan disetujui oleh Anda._`;
+      }
     } else if (/layanan\s+(tersedia|apa\s+saja)|katalog|kategori\s+alat/i.test(norm)) {
       const categories = await DataService.getPublicApplianceCategories();
       directReply = `🏠 **Kategori Peralatan Rumah Tangga yang Dilayani BANTUIN:**\n\n` +
         categories.map((c, i) => `**${i + 1}. ${c.name}**\n${c.description ? `   _${c.description}_\n` : ''}`).join('\n') +
         `\nSemua perbaikan ditangani oleh mitra teknisi profesional tersertifikasi dan bergaransi 30 hari.`;
-    } else if (/daftar|register|cara\s+mendaftar|apakah.*otp/i.test(norm)) {
+    } else if (/cara\s+(mendaftar|daftar)|mendaftar|daftar\s+akun|pendaftaran|register|apakah.*otp/i.test(norm)) {
+      // N20: pola pendaftaran dipersempit — kata bare "daftar" DIHAPUS
+      // karena menangkap "daftar harga/tarif/layanan" (ditangani cabang
+      // harga di atas). Kata kerja "mendaftar" tetap diterima karena tidak
+      // ambigu ("saya mau mendaftar").
       const guide = DataService.getAppGuide('daftar');
       directReply = `**${guide.title}**\n\n${guide.content}`;
     } else if (/login|masuk|cara\s+login/i.test(norm)) {
@@ -445,7 +517,7 @@ ${userContext.role === 'admin' ? '💡 _Catatan Administrator: Anda dapat mengga
   // ==========================================================================
   // B. KATEGORI KHUSUS CUSTOMER (PELANGGAN)
   // ==========================================================================
-  if (userContext.role === 'customer' && userContext.userId) {
+  else if (userContext.role === 'customer' && userContext.userId) {
     const custId = userContext.userId;
 
     // Profil Pelanggan & Pembaruan
@@ -654,7 +726,7 @@ ${orderDetail.invoice ? `- **Status Tagihan:** Rp ${orderDetail.invoice.totalAmo
   // ==========================================================================
   // C. KATEGORI KHUSUS TECHNICIAN (TEKNISI)
   // ==========================================================================
-  if (userContext.role === 'technician' && userContext.userId) {
+  else if (userContext.role === 'technician' && userContext.userId) {
     const techId = userContext.userId;
 
     // F10 — Jawaban atas aksi tertunda (langkah ke-2 two-step verification).
@@ -808,7 +880,10 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
         ? contextEntities.activeOrderCode
         : null;
       if (!explicitOrderCode) {
-        directReply = 'Untuk memperbarui status tugas, sebutkan kode ordernya di pesan yang sama, contoh: "terima tugas REP-2026-0001".';
+        // N18: intent aksi tanpa kode order (dan tanpa kode yang disebut
+        // eksplisit di pesan ini) — jawab deterministik; jangan diam lalu
+        // melempar ke AI yang tidak punya tool aksi.
+        directReply = 'Tugas yang mana? Sebutkan kode pesanannya (mis. BAN-…)';
       } else {
         const actionType = detectTechnicianActionType(norm) || 'on_the_way';
 
@@ -850,7 +925,7 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
   // ==========================================================================
   // D. KATEGORI KHUSUS ADMINISTRATOR (ADMIN)
   // ==========================================================================
-  if (userContext.role === 'admin') {
+  else if (userContext.role === 'admin') {
     // 0. Metrik tunggal yang lugas (jawab hanya angka yang ditanya)
     const singleMetric = norm.replace(/[?!.]+$/g, '').trim();
     if (/^(berapa\s+)?total\s+pendapatan$/.test(singleMetric) || singleMetric === 'pendapatan') {
@@ -880,22 +955,31 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
     }
 
     // 0a. Daftar nama pengguna (mode list lugas: "siapa saja nama customer" -> list nama saja)
+    // N21: pola memakai (?:nama(?:-nama)?\s+)? agar reduplikasi "nama-nama"
+    // ("siapa aja nama-nama customer") ikut cocok — tanda hubung mematahkan
+    // filler \w+ sehingga frasa itu dulu lolos dari 0a maupun D#12.
     else if (
-      /siapa\s+(?:\w+\s+){0,2}(?:nama\s+)?(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|daftar\s+(?:nama\s+)?(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|list\s+(?:nama\s+)?(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)/i.test(norm) &&
+      /siapa\s+(?:\w+\s+){0,2}(?:nama(?:-nama)?\s+)?(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|daftar\s+(?:nama(?:-nama)?\s+)?(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|list\s+(?:nama(?:-nama)?\s+)?(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)/i.test(norm) &&
       !contextEntities.activePhoneNumber && !contextEntities.activeEmail && !contextEntities.activeUserUuid && !/\d{8,15}/.test(norm)
     ) {
-      const listRoleMatch = norm.match(/(?:siapa\s+(?:\w+\s+){0,2}(?:nama\s+)?|daftar\s+(?:nama\s+)?|list\s+(?:nama\s+)?)(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)/i);
+      const listRoleMatch = norm.match(/(?:siapa\s+(?:\w+\s+){0,2}(?:nama(?:-nama)?\s+)?|daftar\s+(?:nama(?:-nama)?\s+)?|list\s+(?:nama(?:-nama)?\s+)?)(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)/i);
       const roleWord = (listRoleMatch?.[1] || '').toLowerCase();
       const listRole = roleWord === 'customer' || roleWord === 'pelanggan' ? 'customer' : roleWord === 'teknisi' ? 'technician' : null;
       const roleLabel = listRole === 'customer' ? 'customer' : listRole === 'technician' ? 'teknisi' : 'pengguna';
       const wantsActiveOnly = /\baktif\b/i.test(norm) && !/tidak\s+aktif|nonaktif/i.test(norm);
-      const names = await DataService.getUserNameList(listRole, 50, wantsActiveOnly ? 'active' : undefined);
-      if (names === null) {
+      // N22: pakai getUserNameListWithTotal agar pemotongan di 50 nama
+      // terlihat ("menampilkan 50 terbaru dari N total") — jangan biarkan
+      // admin mengira 50 nama itu seluruh pengguna.
+      const nameList = await DataService.getUserNameListWithTotal(listRole, 50, wantsActiveOnly ? 'active' : undefined);
+      if (nameList === null) {
         directReply = 'Tidak dapat membaca daftar nama saat ini (database tidak dapat diakses). Coba lagi nanti.';
-      } else if (names.length === 0) {
+      } else if (nameList.names.length === 0) {
         directReply = wantsActiveOnly ? `Belum ada ${roleLabel} aktif terdaftar.` : `Belum ada ${roleLabel} terdaftar.`;
       } else {
-        directReply = names.map((n, i) => `${i + 1}. ${n}`).join('\n');
+        directReply = nameList.names.map((n, i) => `${i + 1}. ${n}`).join('\n');
+        if (nameList.total > nameList.names.length) {
+          directReply += `\n\n_(menampilkan ${nameList.names.length} terbaru dari ${nameList.total} total)_`;
+        }
       }
     }
 
@@ -915,10 +999,13 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
 - **Total Seluruh Pesanan:** **${overview.orders.total} pesanan**
 - **Pesanan Hari Ini:** **${overview.orders.today} pesanan**
 - **Pesanan Bulan Ini:** **${overview.orders.thisMonth} pesanan**
+- **Draf (Draft):** **${overview.orders.draft}**
 - **Menunggu Penugasan (Submitted):** **${overview.orders.submitted}**
 - **Penugasan Diterima (Assigned):** **${overview.orders.assigned}**
 - **Terjadwal Kunjungan (Scheduled):** **${overview.orders.scheduled}**
 - **Sedang Diagnosa (In Diagnosis):** **${overview.orders.inDiagnosis}**
+- **Estimasi Biaya (Estimated):** **${overview.orders.estimated}**
+- **Menunggu Persetujuan Pelanggan (Customer Approved):** **${overview.orders.customerApproved}**
 - **Dalam Pengerjaan (In Repair):** **${overview.orders.inRepair}**
 - **Selesai Tuntas (Completed):** **${overview.orders.completed}**
 - **Pesanan Dibatalkan (Cancelled):** **${overview.orders.cancelled}**
@@ -929,7 +1016,11 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
     }
 
     // 2. Analitik Customer / Pelanggan
-    else if (/customer|pelanggan/i.test(norm) && /daftar|terbaru|baru|sering|terbanyak|belum\s+selesai|riwayat|total/i.test(norm)) {
+    // N25: pesan berawalan "cari" adalah intent pencarian eksplisit — jangan
+    // biarkan D#2 (blok analitik) membayanginya; biarkan jatuh ke D#12.
+    // (D#12 tidak dipindah ke depan D#2 karena "data customer terbaru"
+    // lebih tepat dijawab blok analitik daripada pencarian.)
+    else if (!/^\s*cari\b/i.test(norm) && /customer|pelanggan/i.test(norm) && /daftar|terbaru|baru|sering|terbanyak|belum\s+selesai|riwayat|total/i.test(norm)) {
       const custData = await DataService.getAdminCustomerAnalytics();
       if (custData === null) {
         directReply = 'Analitik pelanggan tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
@@ -1064,15 +1155,17 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
       } else {
         directReply = `👥 **Statistik Pengguna Sistem BANTUIN:**
 - **Total Pengguna Terdaftar:** **${stats.totalUsers}**
-- **Pelanggan (Customer):** ${stats.customers.total} (${stats.customers.active} Aktif, ${stats.customers.pending} Menunggu OTP)
-- **Mitra Teknisi:** ${stats.technicians.total} (${stats.technicians.active} Aktif, ${stats.technicians.pending} Menunggu Verifikasi)
+- **Pelanggan (Customer):** ${stats.customers.total} (${stats.customers.active} Aktif, ${stats.customers.pending} Menunggu OTP, ${stats.customers.inactive} Tidak Aktif)
+- **Mitra Teknisi:** ${stats.technicians.total} (${stats.technicians.active} Aktif, ${stats.technicians.pending} Menunggu Verifikasi, ${stats.technicians.inactive} Tidak Aktif)
 - **Administrator:** ${stats.admins.total} Akun`;
       }
     }
 
     // 12. Pencarian Pengguna Berdasarkan Nomor Telepon, Email, UUID, atau Nama (Admin User Search)
+    // N21: pola memakai (?:nama(?:-nama)?\s+)? seperti 0a — "siapa aja
+    // nama-nama customer" harus mencapai D#12 bila guard 0a tidak lolos.
     else if (
-      /siapa\s+(?:\w+\s+){0,2}(?:nama\s+)?(?:pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|nama\s+pengguna|pemilik\s+(?:nomor|no|email|akun)|cari\s+(?:pengguna|user|customer|pelanggan|teknisi)|data\s+(?:pengguna|user|customer|pelanggan|teknisi)/i.test(norm) ||
+      /siapa\s+(?:\w+\s+){0,2}(?:nama(?:-nama)?\s+)?(?:pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|nama\s+pengguna|pemilik\s+(?:nomor|no|email|akun)|cari\s+(?:pengguna|user|customer|pelanggan|teknisi)|data\s+(?:pengguna|user|customer|pelanggan|teknisi)/i.test(norm) ||
       ((norm.includes('telepon') || norm.includes('phone') || norm.includes('no hp') || norm.includes('nomor') || norm.includes('email') || norm.includes('uuid')) &&
         Boolean(contextEntities.activePhoneNumber || contextEntities.activeEmail || contextEntities.activeUserUuid || /\d{8,15}/.test(norm)))
     ) {
@@ -1082,8 +1175,10 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
       // Budi" menjadi searchTerm "cari pelanggan Budi" (dicari harfiah,
       // selalu tidak ketemu) dan "data customer Budi" tidak di-strip sama
       // sekali. Satu regex berulang men-strip semua awalan tersebut.
+      // N21: "nama-nama" ikut di-strip (nama(?:-nama)?) agar "siapa aja
+      // nama-nama customer Budi" menghasilkan searchTerm "Budi".
       const strippedName = userMessage
-        .replace(/^\s*(?:siapa\s+(?:saja\s+|aja\s+)?|cari\s+|data\s+|tampilkan\s+|tunjukkan\s+|lihat\s+|nama\s+|pengguna\s+|user\s+|customer\s+|pelanggan\s+|teknisi\s+|pemilik\s+|akun\s+|dengan\s+|nomor\s+telepon\s+|email\s+|uuid\s+|yang\s+|bernama\s+)+/i, '')
+        .replace(/^\s*(?:siapa\s+(?:saja\s+|aja\s+)?|cari\s+|data\s+|tampilkan\s+|tunjukkan\s+|lihat\s+|nama(?:-nama)?\s+|pengguna\s+|user\s+|customer\s+|pelanggan\s+|teknisi\s+|pemilik\s+|akun\s+|dengan\s+|nomor\s+telepon\s+|email\s+|uuid\s+|yang\s+|bernama\s+)+/i, '')
         .replace(/[?!.]+$/g, '')
         .trim();
       const searchTerm = contextEntities.activePhoneNumber ||
@@ -1185,12 +1280,13 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
       quickSuggestions: dynamicSuggestions,
     };
 
-    await saveChatMessage(session.id, 'user', userMessage);
-    await saveChatMessage(session.id, 'assistant', finalReply, metadata, 0, metadata.responseTimeMs);
+    const userStored = await saveChatMessageTracked(session.id, 'user', userMessage);
+    const replyStored = await saveChatMessageTracked(session.id, 'assistant', finalReply, metadata, 0, metadata.responseTimeMs);
 
     return {
       reply: finalReply,
       metadata,
+      storedIn: combineStoredIn(userStored, replyStored),
     };
   }
 
@@ -1250,7 +1346,11 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
             dbContextSummary += 'Ringkasan admin tidak dapat dibaca saat ini (database tidak dapat diakses).\n';
           } else {
             const totalActiveUsers = userStats.customers.active + userStats.technicians.active + userStats.admins.active;
-            dbContextSummary += `Ringkasan Admin: Total Pesanan: ${overview.orders.total}, Menunggu: ${overview.orders.submitted}, Dikerjakan: ${overview.orders.inRepair}, Selesai: ${overview.orders.completed}, Mitra Teknisi Aktif: ${overview.technicians.active}, Pelanggan Aktif: ${overview.customers.active}, Total Pengguna Aktif: ${totalActiveUsers}, Total Pengguna Terdaftar: ${userStats.totalUsers}\n`;
+            // N26: sertakan status pesanan antara (assigned/scheduled/
+            // in_diagnosis/estimated/customer_approved) agar AI yang ditanya
+            // "berapa pesanan sedang diproses" tidak menjawab inRepair saja
+            // dan mengecilkan angka.
+            dbContextSummary += `Ringkasan Admin: Total Pesanan: ${overview.orders.total}, Menunggu: ${overview.orders.submitted}, Ditugaskan: ${overview.orders.assigned}, Terjadwal: ${overview.orders.scheduled}, Diagnosis: ${overview.orders.inDiagnosis}, Estimasi: ${overview.orders.estimated}, Menunggu Persetujuan: ${overview.orders.customerApproved}, Dikerjakan: ${overview.orders.inRepair}, Selesai: ${overview.orders.completed}, Mitra Teknisi Aktif: ${overview.technicians.active}, Pelanggan Aktif: ${overview.customers.active}, Total Pengguna Aktif: ${totalActiveUsers}, Total Pengguna Terdaftar: ${userStats.totalUsers}\n`;
             dbContextSummary += `Keuangan: Total Pendapatan: Rp ${finance.totalRevenuePaid.toLocaleString('id-ID')}, Piutang Tertunggak: Rp ${finance.totalUnpaidAmount.toLocaleString('id-ID')}, Total Invoice: ${finance.totalInvoices}\n`;
           }
           dbContextSummary += `Teknisi: ${(workload || []).length} mitra teknisi aktif terdaftar.\n`;
@@ -1334,7 +1434,7 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
               properties: {
                 table: { type: 'string', description: 'Nama tabel (misal: repair_requests, invoices, users, customer_profiles, technician_profiles, payments, services)' },
                 columns: { type: 'string', description: 'Kolom yang diambil, dipisah koma (misal: "full_name,email" atau "customer_profiles.full_name"). Kosongkan untuk semua kolom non-sensitif.' },
-                joins: { type: 'string', description: 'Tabel yang di-JOIN, dipisah koma (relasi harus ada di skema; misal: "customer_profiles" saat tabel dasar repair_requests)' },
+                joins: { type: 'string', description: 'Tabel yang di-JOIN, dipisah koma (relasi harus ada di skema; misal: "customer_profiles" saat tabel dasar repair_requests). Bila dua tabel punya lebih dari satu relasi, pilih FK-nya dengan sintaks "tabel:foreignKey" (misal: "users:technician_id" saat tabel dasar repair_reviews, agar JOIN memakai teknisi yang diulas, bukan pelanggan pemberi ulasan).' },
                 filterColumn: { type: 'string', description: 'Kolom filter pertama (misal: "current_status" atau "invoices.status")' },
                 filterOperator: { type: 'string', enum: ['=', '!=', '>', '>=', '<', '<=', 'LIKE', 'IN'], description: 'Operator filter pertama' },
                 filterValue: { type: 'string', description: 'Nilai filter pertama. Untuk LIKE: substring yang dicari. Untuk IN: beberapa nilai dipisah koma.' },
@@ -1432,40 +1532,50 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
           }
         }
 
-        const finalReply = `${safetyAlertPrefix}${cleanedText}`;
-        const metadata: ChatMessageMetadata = {
-          model: `${aiResponse.provider}:${aiResponse.model}${aiResponse.isFallback ? ' (fallback)' : ''}`,
-          responseTimeMs: aiResponse.latencyMs,
-          diagnosisCard: extractedCard,
-          quickSuggestions: dynamicSuggestions,
-        };
+        // N29: respons AI kosong (konten terpotong/difilter tanpa error) —
+        // anggap GAGAL dan jatuh ke fallback expert system berlabel offline
+        // di bawah (aiGatewayError terisi -> offlineNotice muncul); jangan
+        // pernah mengembalikan balasan kosong ke pengguna.
+        if (!cleanedText.trim()) {
+          aiGatewayError = 'Respons AI kosong';
+          console.warn('[Chatbot Engine] Respons AI kosong — memakai fallback expert system.');
+        } else {
+          const finalReply = `${safetyAlertPrefix}${cleanedText}`;
+          const metadata: ChatMessageMetadata = {
+            model: `${aiResponse.provider}:${aiResponse.model}${aiResponse.isFallback ? ' (fallback)' : ''}`,
+            responseTimeMs: aiResponse.latencyMs,
+            diagnosisCard: extractedCard,
+            quickSuggestions: dynamicSuggestions,
+          };
 
-        await saveChatMessage(session.id, 'user', userMessage);
-        await saveChatMessage(session.id, 'assistant', finalReply, metadata, 0, metadata.responseTimeMs);
+          const userStored = await saveChatMessageTracked(session.id, 'user', userMessage);
+          const replyStored = await saveChatMessageTracked(session.id, 'assistant', finalReply, metadata, 0, metadata.responseTimeMs);
 
-        if (extractedCard) {
-          let catId = session.categoryId;
-          if (!catId && extractedCard.categorySlug) {
-            const catRows = await query<any[]>(
-              `SELECT id FROM appliance_categories WHERE slug = ? LIMIT 1`,
-              [extractedCard.categorySlug]
-            );
-            if (catRows.length > 0) catId = Number(catRows[0].id);
+          if (extractedCard) {
+            let catId = session.categoryId;
+            if (!catId && extractedCard.categorySlug) {
+              const catRows = await query<any[]>(
+                `SELECT id FROM appliance_categories WHERE slug = ? LIMIT 1`,
+                [extractedCard.categorySlug]
+              );
+              if (catRows.length > 0) catId = Number(catRows[0].id);
+            }
+
+            await updateSessionDiagnosis(session.id, {
+              categoryId: catId,
+              initialSymptoms: extractedCard.symptomsSummary,
+              preliminaryDiagnosis: extractedCard.possibleCauses.join('; '),
+              recommendedAction: extractedCard.recommendedAction,
+            });
           }
 
-          await updateSessionDiagnosis(session.id, {
-            categoryId: catId,
-            initialSymptoms: extractedCard.symptomsSummary,
-            preliminaryDiagnosis: extractedCard.possibleCauses.join('; '),
-            recommendedAction: extractedCard.recommendedAction,
-          });
+          return {
+            reply: finalReply,
+            metadata,
+            diagnosisCard: extractedCard,
+            storedIn: combineStoredIn(userStored, replyStored),
+          };
         }
-
-        return {
-          reply: finalReply,
-          metadata,
-          diagnosisCard: extractedCard,
-        };
       } else {
         // N7 — Tidak ada API key sama sekali: blok AI dilewati tanpa
         // exception, jadi tanpa baris ini aiGatewayError tetap null dan
@@ -1496,8 +1606,12 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
   // Jika AI sempat dicoba tetapi gagal, JANGAN menyajikan jawaban expert system
   // seolah-olah berasal dari AI. Beri label yang jelas beserta alasannya, agar
   // admin dan pengguna tahu provider AI sedang tidak terhubung.
+  // F23: teks yang ditampilkan ke klien adalah pesan GENERIK — alasan mentah
+  // (aiGatewayError) hanya dipakai sebagai penanda bahwa AI gagal dan hanya
+  // tercatat di log server (lihat catch di atas); tidak pernah disisipkan
+  // ke balasan maupun metadata.
   const offlineNotice = aiGatewayError
-    ? `⚠️ *Mode offline:* layanan AI sedang tidak tersedia (${aiGatewayError}), jadi jawaban berikut berasal dari sistem pakar BANTUIN, bukan dari AI.\n\n`
+    ? `⚠️ *Mode offline:* ${AI_UNAVAILABLE_MESSAGE}. Jawaban berikut berasal dari sistem pakar BANTUIN, bukan dari AI.\n\n`
     : '';
   const finalReply = `${safetyAlertPrefix}${offlineNotice}${fallback.reply}`;
   const metadata: ChatMessageMetadata = {
@@ -1505,11 +1619,11 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
     responseTimeMs: Date.now() - startTime,
     diagnosisCard: fallback.card || null,
     quickSuggestions: fallback.quickSuggestions,
-    aiError: aiGatewayError,
+    aiError: aiGatewayError ? AI_UNAVAILABLE_MESSAGE : null,
   };
 
-  await saveChatMessage(session.id, 'user', userMessage);
-  await saveChatMessage(session.id, 'assistant', finalReply, metadata, 0, metadata.responseTimeMs);
+  const userStored = await saveChatMessageTracked(session.id, 'user', userMessage);
+  const replyStored = await saveChatMessageTracked(session.id, 'assistant', finalReply, metadata, 0, metadata.responseTimeMs);
 
   if (fallback.card) {
     const targetCatId = session.categoryId || fallback.detectedCategoryId;
@@ -1525,5 +1639,6 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
     reply: finalReply,
     metadata,
     diagnosisCard: fallback.card || null,
+    storedIn: combineStoredIn(userStored, replyStored),
   };
 }

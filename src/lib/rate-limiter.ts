@@ -107,15 +107,23 @@ export function clearLoginRateLimit(identifier: string): void {
 // In-memory sliding window rate limiter untuk API Chatbot+
 const chatRateLimitMap = new Map<string, { count: number; resetAt: number }>();
 
-export function checkChatRateLimit(identifier: string, maxRequestsPerMinute = 30): {
-  allowed: boolean;
-  retryAfterSeconds?: number;
-} {
+// L8: map terpisah untuk endpoint admin AI (tes koneksi & daftar model) —
+// pemakaian normal admin tidak boleh berbagi kuota dengan rate limit chat.
+const adminAiRateLimitMap = new Map<string, { count: number; resetAt: number }>();
+
+// Helper jendela geser per-menit yang dipakai checkChatRateLimit dan
+// checkAdminAiRateLimit (logika yang sama, map terpisah). Panggilan yang
+// lolos ikut dihitung; panggilan yang dibatasi TIDAK menambah hitungan.
+function checkWindowedRateLimit(
+  map: Map<string, { count: number; resetAt: number }>,
+  identifier: string,
+  maxRequestsPerMinute: number
+): { allowed: boolean; retryAfterSeconds?: number } {
   const now = Date.now();
-  const record = chatRateLimitMap.get(identifier);
+  const record = map.get(identifier);
 
   if (!record || now > record.resetAt) {
-    chatRateLimitMap.set(identifier, { count: 1, resetAt: now + 60 * 1000 });
+    map.set(identifier, { count: 1, resetAt: now + 60 * 1000 });
     return { allowed: true };
   }
 
@@ -128,5 +136,27 @@ export function checkChatRateLimit(identifier: string, maxRequestsPerMinute = 30
 
   record.count += 1;
   return { allowed: true };
+}
+
+export function checkChatRateLimit(identifier: string, maxRequestsPerMinute = 30): {
+  allowed: boolean;
+  retryAfterSeconds?: number;
+} {
+  return checkWindowedRateLimit(chatRateLimitMap, identifier, maxRequestsPerMinute);
+}
+
+/**
+ * L8: rate limit per-admin untuk endpoint admin AI yang mahal (tes koneksi
+ * melakukan lookup DNS + 2 request HTTPS ke provider dan menulis log ke DB;
+ * pengambilan model juga memanggil API provider). Default 10/menit per
+ * (admin, provider, aksi) — pemakaian normal admin jauh di bawah ini,
+ * sementara sesi admin yang dicuri / skrip berulang tidak bisa membakar
+ * kuota provider atau membanjiri ai_connection_test_logs.
+ */
+export function checkAdminAiRateLimit(identifier: string, maxRequestsPerMinute = 10): {
+  allowed: boolean;
+  retryAfterSeconds?: number;
+} {
+  return checkWindowedRateLimit(adminAiRateLimitMap, identifier, maxRequestsPerMinute);
 }
 

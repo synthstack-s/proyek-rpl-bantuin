@@ -370,10 +370,18 @@ export async function executeAdminCreateOperationalSnapshot(
     notes: payload.summaryNotes,
   };
 
+  // F21 — IP klien diteruskan dari route handler lewat userContext.clientIp
+  // (disetel di message/route.ts dari x-forwarded-for entri pertama).
+  // Jalur tanpa konteks request (pemanggilan langsung / job latar) mencatat
+  // NULL (kolom ip_address mengizinkan NULL) — jangan pernah hardcode
+  // '127.0.0.1' atau IP palsu lain. Sengaja TIDAK membaca payload: argumen
+  // tool berasal dari model AI dan tidak boleh memalsukan IP audit.
+  const clientIp = userContext.clientIp ?? null;
+
   await query(
     `INSERT INTO admin_audit_logs (admin_user_id, action, entity_name, entity_id, new_values, ip_address, created_at)
-     VALUES (?, 'CREATE_OPERATIONAL_SNAPSHOT', 'repair_requests', 0, ?, '127.0.0.1', NOW())`,
-    [userContext.userId, JSON.stringify(snapshotData)]
+     VALUES (?, 'CREATE_OPERATIONAL_SNAPSHOT', 'repair_requests', 0, ?, ?, NOW())`,
+    [userContext.userId, JSON.stringify(snapshotData), clientIp]
   );
 
   return {

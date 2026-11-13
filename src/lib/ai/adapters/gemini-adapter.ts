@@ -63,11 +63,19 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
         },
       });
 
+      // L7: timeout probe memakai requestTimeoutMs dari konfigurasi (form) —
+      // sebelumnya hardcoded 15 detik, sehingga pengaturan timeout admin
+      // diabaikan saat tes koneksi. Dijepit 5s–120s; default 15s bila
+      // konfigurasi tidak membawa nilai yang valid.
+      const probeTimeoutMs = Number.isFinite(Number(config.requestTimeoutMs))
+        ? Math.max(5000, Math.min(120000, Number(config.requestTimeoutMs)))
+        : 15000;
+
       // Panggil generateContent dengan prompt pendek untuk memverifikasi autentikasi dan model
       const probeResult = await Promise.race([
         model.generateContent('ping'),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('Koneksi timeout setelah 15 detik')), 15000)
+          setTimeout(() => reject(new Error(`Koneksi timeout setelah ${Math.round(probeTimeoutMs / 1000)} detik`)), probeTimeoutMs)
         ),
       ]);
 
@@ -399,6 +407,17 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
           isRetryable = false;
           isFallbackEligible = false;
           break;
+        case 402:
+          // L1: samakan dengan adapter Groq — 402 (saldo habis) selalu
+          // 'provider_error' dengan pesan "Saldo Habis", di semua jalur.
+          // (testConnection Gemini hanya memakai normalizeError, jadi tidak
+          // ada split seperti di Groq — cabang ini memastikan pesan dan
+          // statusnya konsisten dengan Groq.)
+          status = 'provider_error';
+          isRetryable = false;
+          isFallbackEligible = false;
+          sanitizedMsg = 'Saldo API Habis (Insufficient Balance). Silakan isi ulang kuota/kredit akun penyedia AI Anda.';
+          break;
         case 404:
           status = 'model_not_available';
           isRetryable = false;
@@ -453,6 +472,19 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
         httpStatusCode = null; // tidak ada respons HTTP yang diterima
         isRetryable = true;
         isFallbackEligible = true;
+      } else if (lower.includes('insufficient balance') || lower.includes('insufficient_balance') || lower.includes('payment required')) {
+        // L1: saldo habis tanpa status numerik — samakan dengan cabang 402
+        // numerik di atas ('provider_error' + pesan "Saldo Habis"). HARUS
+        // sebelum cabang kuota/429, karena pesan saldo bisa menyebut 'quota'.
+        // 'insufficient_quota' sendiri TIDAK masuk sini: di Gemini itu error
+        // kuota 429 (RESOURCE_EXHAUSTED — layak retry/fallback), bukan 402.
+        // Substring angka '402' sengaja TIDAK dipakai (lihat H3: nomor proyek
+        // Google bisa mengandung substring angka apa pun).
+        status = 'provider_error';
+        httpStatusCode = 402;
+        isRetryable = false;
+        isFallbackEligible = false;
+        sanitizedMsg = 'Saldo API Habis (Insufficient Balance). Silakan isi ulang kuota/kredit akun penyedia AI Anda.';
       } else if (lower.includes('resource_exhausted') || lower.includes('quota') || lower.includes('rate limit') || lower.includes('too many requests') || lower.includes('429')) {
         status = 'rate_limit_exceeded';
         httpStatusCode = 429;

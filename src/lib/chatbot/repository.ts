@@ -386,6 +386,42 @@ export async function getSessionByUuid(
   return memorySessions.get(sessionUuid) || null;
 }
 
+async function findSessionRowById(sessionId: number): Promise<any | null> {
+  const existing = await query<any[]>(
+    `SELECT ${SESSION_SELECT_COLUMNS}
+     FROM ai_consultation_sessions s
+     LEFT JOIN appliance_categories c ON s.category_id = c.id
+     WHERE s.id = ?
+     LIMIT 1`,
+    [sessionId]
+  );
+  return existing && existing.length > 0 ? existing[0] : null;
+}
+
+/**
+ * Lookup sesi read-only berdasarkan ID numerik — TIDAK PERNAH membuat sesi baru.
+ * Dipakai `GET /api/chat/session?id=...` (temuan F24: halaman booking memuat
+ * gejala awal lewat referensi server-side, bukan query string).
+ * Mengembalikan `null` bila ID tidak dikenal atau DB tidak dapat dijangkau.
+ * Fungsi ini TIDAK memeriksa kepemilikan — pemanggil wajib menegakkannya
+ * sebelum mengembalikan data sesi.
+ */
+export async function getSessionById(
+  sessionId: number
+): Promise<ConsultationSession | null> {
+  if (!Number.isInteger(sessionId) || sessionId <= 0) return null;
+  try {
+    const row = await findSessionRowById(sessionId);
+    if (row) return mapSessionRow(row);
+  } catch (err) {
+    // F6: DB tidak dapat dijangkau — catat dan kembalikan null.
+    // (Fallback in-memory memakai ID negatif, jadi tidak pernah cocok
+    // dengan ID numerik positif dari DB.)
+    logDbFailure('getSessionById', { sessionId }, err);
+  }
+  return null;
+}
+
 /**
  * Membuat atau mengambil sesi konsultasi AI berdasarkan UUID.
  *

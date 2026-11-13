@@ -62,7 +62,11 @@ interface GlobalAISettingsState {
   enableFallback: boolean;
   fallbackProvider: string;
   circuitBreakerFailureThreshold: number;
-  circuitBreakerCooldownSeconds: number;
+  // L6: nama field DISAMAKAN dengan server (repository.ts memakai
+  // `circuitBreakerCooldownSec`) — sebelumnya UI memakai
+  // `circuitBreakerCooldownSeconds`, sehingga nilai dari server tidak pernah
+  // terpetakan ke state ini dan panel memakai nilai awal yang salah (60).
+  circuitBreakerCooldownSec: number;
   version: number;
 }
 
@@ -344,7 +348,10 @@ export default function AIProviderSettingsSection() {
     enableFallback: true,
     fallbackProvider: 'groq',
     circuitBreakerFailureThreshold: 3,
-    circuitBreakerCooldownSeconds: 60,
+    // L6: nilai awal 30 (default server) — sebelumnya 60, padahal server
+    // memakai 30 detik secara default; nilai riil dari server dipetakan di
+    // loadData (fallback 30 bila tidak ada).
+    circuitBreakerCooldownSec: 30,
     version: 1,
   });
   const [metrics, setMetrics] = useState<AIMetricsState | null>(null);
@@ -395,9 +402,15 @@ export default function AIProviderSettingsSection() {
     responseTimeMs: number;
     testedAt: string;
     errorMessage: string | null;
+    // L2: model pengganti hasil auto-heal (bila tes memakai model lain dari
+    // yang diminta) — modal menawarkan untuk menyimpannya sebagai model
+    // terpilih; tidak pernah dipersist otomatis.
+    healedModel?: string | null;
   } | null>(null);
 
   const [isSavingConfig, setIsSavingConfig] = useState<Record<string, boolean>>({});
+  // L14: status penghapusan API key per provider.
+  const [isClearingKey, setIsClearingKey] = useState<Record<string, boolean>>({});
   const [isSwitchingActive, setIsSwitchingActive] = useState<boolean>(false);
   const [isSwitchingFallback, setIsSwitchingFallback] = useState<boolean>(false);
   const [pendingActiveProvider, setPendingActiveProvider] = useState<string | null>(null);
@@ -409,6 +422,9 @@ export default function AIProviderSettingsSection() {
   // Modal Tambah Provider Baru
   const [showAddModal, setShowAddModal] = useState<boolean>(false);
   const [isAddingProvider, setIsAddingProvider] = useState<boolean>(false);
+  // L10: visibilitas input API key di modal tambah provider — default
+  // tersembunyi (password), sama seperti form utama.
+  const [showNewProviderKey, setShowNewProviderKey] = useState<boolean>(false);
   const [newProviderForm, setNewProviderForm] = useState({
     name: '',
     slug: '',
@@ -450,7 +466,18 @@ export default function AIProviderSettingsSection() {
 
           setConfigs(configMap);
           if (rawGlobal) {
-            setGlobalSettings(rawGlobal);
+            // L6: petakan global settings secara eksplisit (bukan set mentah)
+            // agar nama field server (`circuitBreakerCooldownSec`) terpetakan
+            // benar ke state UI; fallback 30 detik bila server tidak mengirim
+            // nilai cooldown (bukan 60 seperti nilai awal lama).
+            setGlobalSettings({
+              activeProvider: rawGlobal.activeProvider ?? 'gemini',
+              enableFallback: Boolean(rawGlobal.enableFallback),
+              fallbackProvider: rawGlobal.fallbackProvider ?? 'groq',
+              circuitBreakerFailureThreshold: Number(rawGlobal.circuitBreakerFailureThreshold ?? 3),
+              circuitBreakerCooldownSec: Number(rawGlobal.circuitBreakerCooldownSec ?? 30),
+              version: Number(rawGlobal.version ?? 1),
+            });
           }
 
           // Sinkronisasikan state form per provider
@@ -478,11 +505,9 @@ export default function AIProviderSettingsSection() {
           setSelectedModels((prev) => ({ ...prev, ...nextModels }));
           setParams((prev) => ({ ...prev, ...nextParams }));
 
-          // Pastikan activeFormTab valid
-          if (!configMap[activeFormTab]) {
-            const firstKey = Object.keys(configMap)[0] || 'gemini';
-            setActiveFormTab(firstKey);
-          }
+          // L9: validasi activeFormTab TIDAK lagi di sini — dipisah ke
+          // useEffect tersendiri di bawah agar loadData tidak bergantung
+          // pada activeFormTab (lihat dependensi useCallback).
         }
       }
 
@@ -524,11 +549,27 @@ export default function AIProviderSettingsSection() {
     } finally {
       setIsLoading(false);
     }
-  }, [activeFormTab]);
+    // L9: dependensi KOSONG — loadData sengaja tidak bergantung pada
+    // activeFormTab. Sebelumnya setiap ganti tab form membuat useCallback
+    // baru, yang memicu useEffect di bawah untuk mengambil ulang seluruh
+    // config dari server tanpa kebutuhan. Validasi tab dipisah ke useEffect
+    // tersendiri (lihat di bawah); showToast stabil karena hanya memakai
+    // setToast + setTimeout (tidak ada stale closure).
+  }, []);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  // L9: validasi tab form terpisah dari pengambilan data — bila tab aktif
+  // tidak ada lagi di daftar provider (mis. provider dihapus), pindah ke
+  // provider pertama. Efek ini TIDAK mengambil ulang config dari server.
+  useEffect(() => {
+    const keys = Object.keys(configs);
+    if (keys.length > 0 && !configs[activeFormTab]) {
+      setActiveFormTab(keys[0] || 'gemini');
+    }
+  }, [configs, activeFormTab]);
 
   // Fetch available models for provider
   // T2: API key TIDAK PERNAH dikirim lewat query string. Bila admin mengetik
@@ -639,13 +680,16 @@ export default function AIProviderSettingsSection() {
   };
 
   // Save Provider Config
-  const handleSaveConfig = async (provider: string) => {
+  // L2: `modelOverride` dipakai penawaran simpan model hasil heal dari modal
+  // tes — selectedModels state belum tentu ter-update saat save dipanggil
+  // (setState asinkron), jadi model pengganti diteruskan langsung.
+  const handleSaveConfig = async (provider: string, modelOverride?: string) => {
     try {
       setIsSavingConfig((prev) => ({ ...prev, [provider]: true }));
       const payload: any = {
         provider,
         apiEndpoint: endpoints[provider],
-        selectedModel: selectedModels[provider],
+        selectedModel: modelOverride || selectedModels[provider],
         temperature: params[provider]?.temp ?? 0.7,
         maxOutputTokens: params[provider]?.maxTokens ?? 2048,
         requestTimeoutMs: params[provider]?.timeout ?? 30000,
@@ -684,6 +728,64 @@ export default function AIProviderSettingsSection() {
     }
   };
 
+  // L2: simpan model pengganti hasil auto-heal sebagai model terpilih.
+  // Dipanggil dari tombol penawaran di modal hasil tes — model tersimpan
+  // TIDAK pernah diubah otomatis oleh tes; admin yang memutuskan.
+  const handleSaveHealedModel = async () => {
+    if (!testResultModal?.healedModel) return;
+    const provider = testResultModal.provider;
+    const healedModel = testResultModal.healedModel;
+    setSelectedModels((prev) => ({ ...prev, [provider]: healedModel }));
+    setTestResultModal(null);
+    await handleSaveConfig(provider, healedModel);
+  };
+
+  // L14: hapus API key tersimpan (dengan konfirmasi). Konfigurasi lain
+  // (endpoint, model, parameter) TETAP tersimpan — hanya key yang dihapus
+  // dan status menjadi not_configured. Satu-satunya cara mencabut key
+  // provider bawaan (Gemini/Groq) tanpa mengedit DB langsung.
+  const handleClearApiKey = async (provider: string) => {
+    const conf = configs[provider];
+    const isActive = globalSettings.activeProvider === provider;
+    const confirmed = confirm(
+      `Hapus API key tersimpan untuk '${conf?.name || provider}'?\n\n` +
+        `Key akan dihapus dari database dan .env.local. ` +
+        `Konfigurasi lain (endpoint, model, parameter) tetap tersimpan.\n` +
+        (isActive
+          ? `PERINGATAN: provider ini sedang AKTIF — chat akan gagal sampai API key baru disimpan.\n`
+          : ``) +
+        `Lanjutkan?`
+    );
+    if (!confirmed) return;
+
+    try {
+      setIsClearingKey((prev) => ({ ...prev, [provider]: true }));
+      const res = await fetch('/api/admin/ai/configs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider, clearApiKey: true }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showToast('success', data.message || `API key ${conf?.name || provider} berhasil dihapus.`);
+        // Kosongkan field key yang sedang diketik (bila ada) agar tidak
+        // tertukar dengan key yang baru saja dihapus.
+        setInputKeys((prev) => {
+          const next = { ...prev };
+          delete next[provider];
+          return next;
+        });
+        await loadData();
+      } else {
+        showToast('error', data.message || 'Gagal menghapus API key');
+      }
+    } catch (err: any) {
+      showToast('error', 'Error saat menghapus API key: ' + err.message);
+    } finally {
+      setIsClearingKey((prev) => ({ ...prev, [provider]: false }));
+    }
+  };
+
   // Add Custom Provider
   const handleAddCustomProvider = async () => {
     if (!newProviderForm.slug.trim() || !newProviderForm.name.trim() || !newProviderForm.endpoint.trim()) {
@@ -718,7 +820,6 @@ export default function AIProviderSettingsSection() {
       if (res.ok && data.success) {
         showToast('success', `Provider '${newProviderForm.name}' berhasil ditambahkan ke sistem!`);
         setShowAddModal(false);
-        setActiveFormTab(sanitizedSlug);
         setNewProviderForm({
           name: '',
           slug: '',
@@ -728,7 +829,12 @@ export default function AIProviderSettingsSection() {
           temperature: 0.7,
           maxTokens: 2048,
         });
+        setShowNewProviderKey(false);
         await loadData();
+        // L9: pindah tab SETELAH loadData selesai — efek validasi tab
+        // (useEffect terpisah) akan me-reset tab ke provider pertama bila
+        // tab diset sebelum provider baru ada di state configs.
+        setActiveFormTab(sanitizedSlug);
       } else {
         showToast('error', data.message || 'Gagal menambahkan provider');
       }
@@ -1035,7 +1141,10 @@ export default function AIProviderSettingsSection() {
                 </div>
               </div>
               <button
-                onClick={() => setShowAddModal(false)}
+                onClick={() => {
+                  setShowAddModal(false);
+                  setShowNewProviderKey(false);
+                }}
                 className="text-gray-400 hover:text-gray-700 p-1.5 rounded-lg text-sm font-bold"
               >
                 ✕
@@ -1113,6 +1222,8 @@ export default function AIProviderSettingsSection() {
                       }))
                     }
                     placeholder="contoh: deepseek"
+                    // L13: slug dibatasi 50 karakter (kolom provider VARCHAR(50)).
+                    maxLength={50}
                     className="w-full px-3 py-2 bg-white border border-gray-300 rounded-xl text-gray-900 placeholder-gray-400 font-mono outline-none focus:border-amber-500 transition"
                   />
                 </div>
@@ -1135,13 +1246,30 @@ export default function AIProviderSettingsSection() {
                 <label className="text-[11px] font-semibold text-gray-800 block mb-1">
                   API Key (Disimpan dengan Enkripsi AES-256-GCM)
                 </label>
-                <input
-                  type="text"
-                  value={newProviderForm.apiKey}
-                  onChange={(e) => setNewProviderForm((p) => ({ ...p, apiKey: e.target.value }))}
-                  placeholder="sk-... atau API Key rahasia provider"
-                  className="w-full px-3 py-2 bg-white border border-gray-300 rounded-xl text-gray-900 placeholder-gray-400 font-mono outline-none focus:border-amber-500 transition"
-                />
+                {/* L10: input bertipe password + eye-toggle, sama seperti form
+                    utama — sebelumnya type="text" sehingga key selalu tampil
+                    plaintext (risiko shoulder-surfing / tangkapan layar). */}
+                <div className="relative">
+                  <input
+                    type={showNewProviderKey ? 'text' : 'password'}
+                    value={newProviderForm.apiKey}
+                    onChange={(e) => setNewProviderForm((p) => ({ ...p, apiKey: e.target.value }))}
+                    placeholder="sk-... atau API Key rahasia provider"
+                    className="w-full pl-3 pr-10 py-2 bg-white border border-gray-300 rounded-xl text-gray-900 placeholder-gray-400 font-mono outline-none focus:border-amber-500 transition"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewProviderKey((prev) => !prev)}
+                    title={showNewProviderKey ? 'Sembunyikan API Key' : 'Tampilkan API Key'}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700 transition p-1"
+                  >
+                    {showNewProviderKey ? (
+                      <EyeOff className="w-4 h-4 text-amber-500" />
+                    ) : (
+                      <Eye className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
               </div>
 
               <div>
@@ -1193,7 +1321,10 @@ export default function AIProviderSettingsSection() {
             <div className="flex items-center justify-end gap-3 pt-3 border-t border-gray-200">
               <button
                 type="button"
-                onClick={() => setShowAddModal(false)}
+                onClick={() => {
+                  setShowAddModal(false);
+                  setShowNewProviderKey(false);
+                }}
                 className="px-4 py-2 rounded-xl text-xs font-semibold text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition ai-btn-white"
               >
                 Batal
@@ -1276,6 +1407,32 @@ export default function AIProviderSettingsSection() {
                 </div>
               )}
             </div>
+
+            {/* L2: penawaran simpan model hasil auto-heal — tes memakai model
+                pengganti karena model yang diminta tidak tersedia; model
+                tersimpan belum berubah sampai admin menekan tombol ini. */}
+            {testResultModal.healedModel && (
+              <div className="p-3 rounded-xl border border-amber-200 bg-amber-50 text-xs text-amber-800 space-y-2">
+                <p className="leading-relaxed">
+                  Model yang diminta tidak tersedia, sehingga tes memakai model pengganti{' '}
+                  <span className="font-mono font-bold text-amber-900">{testResultModal.healedModel}</span>.
+                  Model tersimpan belum berubah.
+                </p>
+                <button
+                  type="button"
+                  onClick={handleSaveHealedModel}
+                  disabled={isSavingConfig[testResultModal.provider]}
+                  className="px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-neutral-950 transition shadow-sm disabled:opacity-50 flex items-center gap-1.5"
+                >
+                  {isSavingConfig[testResultModal.provider] ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Save className="w-3.5 h-3.5" />
+                  )}
+                  Simpan {testResultModal.healedModel} sebagai model terpilih
+                </button>
+              </div>
+            )}
 
             <div className="flex justify-end pt-2">
               <button
@@ -1543,7 +1700,10 @@ export default function AIProviderSettingsSection() {
           </div>
           <div className="text-[10px] text-gray-500 mt-2 flex items-center gap-1.5">
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-            Circuit Breaker aktif (Threshold: 3x kegagalan berturut-turut, Cooldown: 60 detik)
+            {/* L6: nilai threshold & cooldown dari server (fallback 3x / 30s)
+                — sebelumnya hardcoded "3x" dan "60 detik", padahal default
+                server adalah 30 detik. */}
+            Circuit Breaker aktif (Threshold: {globalSettings.circuitBreakerFailureThreshold ?? 3}x kegagalan berturut-turut, Cooldown: {globalSettings.circuitBreakerCooldownSec ?? 30} detik)
           </div>
           {/* M8: pemilih provider cadangan — sebelumnya toggle memilih
               provider non-aktif pertama secara arbitrer (bisa provider tanpa
@@ -1833,7 +1993,27 @@ export default function AIProviderSettingsSection() {
 
               {/* Action Buttons */}
               <div className="flex items-center justify-between gap-2 pt-3 border-t border-gray-200">
-                <div>
+                <div className="flex items-center gap-2">
+                  {/* L14: hapus API key tersimpan (dengan konfirmasi) —
+                      konfigurasi lain tetap tersimpan. Tampil hanya bila ada
+                      key tersimpan. Berlaku juga untuk Gemini/Groq (satu-satunya
+                      cara mencabut key provider bawaan tanpa edit DB). */}
+                  {(configs[activeFormTab].isConfigured || configs[activeFormTab].maskedKeyPreview) && (
+                    <button
+                      type="button"
+                      onClick={() => handleClearApiKey(activeFormTab)}
+                      disabled={isClearingKey[activeFormTab]}
+                      title="Hapus API key tersimpan (konfigurasi lain tetap tersimpan)"
+                      className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-white text-rose-700 hover:bg-rose-50 border border-rose-200 transition flex items-center gap-1.5 disabled:opacity-50"
+                    >
+                      {isClearingKey[activeFormTab] ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Key className="w-3.5 h-3.5 text-rose-500" />
+                      )}
+                      Hapus API Key
+                    </button>
+                  )}
                   {activeFormTab !== 'gemini' && activeFormTab !== 'groq' && (
                     <button
                       type="button"

@@ -586,7 +586,10 @@ export async function getCustomerInvoices(
         status: r.status,
         dueDate: r.due_date,
         paidAt: r.paid_at,
-        paymentMethod: r.payment_method || (r.status === 'paid' ? 'QRIS / VA' : 'Belum dipilih'),
+        // N30: jangan menebak metode pembayaran — bila tidak ada baris
+        // payment (LEFT JOIN menghasilkan NULL), laporkan "Tidak tercatat",
+        // termasuk untuk invoice berstatus 'paid' (dulu ditebak "QRIS / VA").
+        paymentMethod: r.payment_method || 'Tidak tercatat',
         paymentStatus: r.payment_status || r.status,
         createdAt: r.created_at,
       }));
@@ -877,10 +880,13 @@ export async function getAdminOperationalOverview() {
     const [counts]: any = await query<any[]>(
       `SELECT 
         COUNT(*) AS total_orders,
+        SUM(CASE WHEN current_status = 'draft' THEN 1 ELSE 0 END) AS draft_count,
         SUM(CASE WHEN current_status = 'submitted' THEN 1 ELSE 0 END) AS submitted_count,
         SUM(CASE WHEN current_status = 'assigned' THEN 1 ELSE 0 END) AS assigned_count,
         SUM(CASE WHEN current_status = 'scheduled' THEN 1 ELSE 0 END) AS scheduled_count,
         SUM(CASE WHEN current_status = 'in_diagnosis' THEN 1 ELSE 0 END) AS in_diagnosis_count,
+        SUM(CASE WHEN current_status = 'estimated' THEN 1 ELSE 0 END) AS estimated_count,
+        SUM(CASE WHEN current_status = 'customer_approved' THEN 1 ELSE 0 END) AS customer_approved_count,
         SUM(CASE WHEN current_status = 'in_repair' THEN 1 ELSE 0 END) AS in_repair_count,
         SUM(CASE WHEN current_status = 'completed' THEN 1 ELSE 0 END) AS completed_count,
         SUM(CASE WHEN current_status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_count,
@@ -918,13 +924,21 @@ export async function getAdminOperationalOverview() {
     );
 
     // Hitungan riil — termasuk 0 bila database kosong (bukan angka demo).
+    // N19: rincian mencakup SELURUH nilai ENUM repair_requests.current_status
+    // (draft, submitted, assigned, scheduled, in_diagnosis, estimated,
+    // customer_approved, in_repair, completed, cancelled, complained)
+    // sehingga jumlah rincian = total. Sebelumnya draft/estimated/
+    // customer_approved hilang sehingga rincian < total.
     return {
       orders: {
         total: Number(counts?.total_orders || 0),
+        draft: Number(counts?.draft_count || 0),
         submitted: Number(counts?.submitted_count || 0),
         assigned: Number(counts?.assigned_count || 0),
         scheduled: Number(counts?.scheduled_count || 0),
         inDiagnosis: Number(counts?.in_diagnosis_count || 0),
+        estimated: Number(counts?.estimated_count || 0),
+        customerApproved: Number(counts?.customer_approved_count || 0),
         inRepair: Number(counts?.in_repair_count || 0),
         completed: Number(counts?.completed_count || 0),
         cancelled: Number(counts?.cancelled_count || 0),
@@ -1074,10 +1088,26 @@ export async function getAdminFinancialAnalytics() {
     const [invoicesSummary]: any = await query<any[]>(
       `SELECT 
         COUNT(*) AS total_invoices,
-        SUM(CASE WHEN status = 'paid' THEN total_amount ELSE 0 END) AS total_revenue_paid,
         SUM(CASE WHEN status = 'unpaid' THEN total_amount ELSE 0 END) AS total_unpaid_amount,
         SUM(CASE WHEN status = 'paid' THEN service_fee ELSE 0 END) AS total_platform_fee
        FROM invoices`
+    );
+
+    // N31: pendapatan dihitung dari uang yang benar-benar masuk — pembayaran
+    // berstatus 'settlement' dikurangi refund (payment_status 'refunded') —
+    // BUKAN dari menjumlah invoice berstatus 'paid' saja. Invoice 'paid'
+    // tanpa pembayaran settlement terkait (atau yang sudah di-refund) tidak
+    // boleh dihitung sebagai pendapatan. Satu baris payments bertransisi
+    // settlement -> refunded saat dana dikembalikan, sehingga selisih kedua
+    // jumlah ini adalah pendapatan bersih yang diterima.
+    // (Fallback demo dengan metode 'bank_transfer' di luar ENUM yang
+    // disebut temuan sudah tidak ada — dihapus Batch 1 bersama seluruh
+    // fallback demo transaksional; diverifikasi dengan grep.)
+    const [revenueSummary]: any = await query<any[]>(
+      `SELECT
+        COALESCE(SUM(CASE WHEN payment_status = 'settlement' THEN amount ELSE 0 END), 0) AS settled_total,
+        COALESCE(SUM(CASE WHEN payment_status = 'refunded' THEN amount ELSE 0 END), 0) AS refunded_total
+       FROM payments`
     );
 
     const paymentMethods = await query<any[]>(
@@ -1090,7 +1120,7 @@ export async function getAdminFinancialAnalytics() {
     // Angka riil — termasuk 0 bila belum ada invoice (bukan angka demo).
     return {
       totalInvoices: Number(invoicesSummary?.total_invoices || 0),
-      totalRevenuePaid: Number(invoicesSummary?.total_revenue_paid || 0),
+      totalRevenuePaid: Number(revenueSummary?.settled_total || 0) - Number(revenueSummary?.refunded_total || 0),
       totalUnpaidAmount: Number(invoicesSummary?.total_unpaid_amount || 0),
       totalPlatformFee: Number(invoicesSummary?.total_platform_fee || 0),
       paymentMethodsBreakdown: (paymentMethods || []).map(p => ({
@@ -1217,11 +1247,15 @@ export async function getAdminUserStats() {
     );
 
     // Hitungan riil — 0 di semua bucket bila belum ada pengguna (bukan angka demo).
+    // N19: bucket mencakup SELURUH nilai ENUM users.status (active,
+    // inactive, suspended, pending_verification) sehingga jumlah bucket =
+    // total per peran. Sebelumnya akun 'inactive' tidak muncul di bucket
+    // mana pun.
     const stats = {
       totalUsers: 0,
-      customers: { total: 0, active: 0, pending: 0, suspended: 0 },
-      technicians: { total: 0, active: 0, pending: 0, suspended: 0 },
-      admins: { total: 0, active: 0 },
+      customers: { total: 0, active: 0, inactive: 0, pending: 0, suspended: 0 },
+      technicians: { total: 0, active: 0, inactive: 0, pending: 0, suspended: 0 },
+      admins: { total: 0, active: 0, inactive: 0 },
     };
 
     for (const r of rows || []) {
@@ -1230,16 +1264,19 @@ export async function getAdminUserStats() {
       if (r.role === 'customer') {
         stats.customers.total += count;
         if (r.status === 'active') stats.customers.active += count;
+        if (r.status === 'inactive') stats.customers.inactive += count;
         if (r.status === 'pending_verification') stats.customers.pending += count;
         if (r.status === 'suspended') stats.customers.suspended += count;
       } else if (r.role === 'technician') {
         stats.technicians.total += count;
         if (r.status === 'active') stats.technicians.active += count;
+        if (r.status === 'inactive') stats.technicians.inactive += count;
         if (r.status === 'pending_verification') stats.technicians.pending += count;
         if (r.status === 'suspended') stats.technicians.suspended += count;
       } else if (r.role === 'admin') {
         stats.admins.total += count;
         if (r.status === 'active') stats.admins.active += count;
+        if (r.status === 'inactive') stats.admins.inactive += count;
       }
     }
 
@@ -1257,9 +1294,12 @@ export async function getAdminUserStats() {
 export async function getAdminCustomerAnalytics() {
   try {
     const [counts]: any = await query<any[]>(
+      // N28: "Bulan Ini" = bulan kalender berjalan (sejak tanggal 1),
+      // BUKAN 30 hari bergulir — label D#2 ("Pelanggan Baru Bulan Ini")
+      // harus sesuai definisinya.
       `SELECT 
         COUNT(*) AS total_customers,
-        SUM(CASE WHEN created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) THEN 1 ELSE 0 END) AS new_this_month
+        SUM(CASE WHEN created_at >= DATE_FORMAT(NOW(), '%Y-%m-01') THEN 1 ELSE 0 END) AS new_this_month
        FROM users WHERE role = 'customer' AND deleted_at IS NULL`
     );
 
@@ -1590,6 +1630,15 @@ function escapeLikePattern(value: string): string {
   return value.replace(/!/g, '!!').replace(/%/g, '!%').replace(/_/g, '!_');
 }
 
+// N27 — Allowlist nilai status untuk filter pencarian (disalin dari ENUM di
+// schema-registry.ts; nilai di luar daftar diabaikan tanpa filter —
+// konsisten dengan pola options.role di searchDatabaseUsers).
+const REPAIR_ORDER_STATUSES = new Set([
+  'draft', 'submitted', 'assigned', 'scheduled', 'in_diagnosis', 'estimated',
+  'customer_approved', 'in_repair', 'completed', 'cancelled', 'complained',
+]);
+const INVOICE_STATUSES = new Set(['unpaid', 'paid', 'cancelled', 'refunded']);
+
 /**
  * Mencari data pengguna berdasarkan nomor telepon, email, nama, atau UUID
  */
@@ -1715,6 +1764,15 @@ export async function searchDatabaseOrders(
   const limit = Math.min(20, Math.max(1, options.limit || 5));
   const termPattern = `%${escapeLikePattern(cleanTerm)}%`;
 
+  // N27: hormati options.status (allowlist ENUM repair_requests.current_status;
+  // nilai lain diabaikan tanpa filter). Sebelumnya parameter diterima tetapi
+  // tidak pernah dipakai di SQL — pencarian dengan status 'completed' tetap
+  // mengembalikan semua status.
+  const statusFilter = options.status && REPAIR_ORDER_STATUSES.has(options.status)
+    ? 'AND rr.current_status = ?'
+    : '';
+  const statusParams: any[] = statusFilter ? [options.status] : [];
+
   try {
     const rows = await query<any[]>(
       `SELECT 
@@ -1745,6 +1803,7 @@ export async function searchDatabaseOrders(
        LEFT JOIN invoices inv ON inv.repair_request_id = rr.id
        LEFT JOIN repair_diagnoses diag ON diag.repair_request_id = rr.id
        WHERE rr.deleted_at IS NULL
+         ${statusFilter}
          AND (
            rr.order_code = ?
            OR rr.order_code LIKE ? ESCAPE '!'
@@ -1755,7 +1814,7 @@ export async function searchDatabaseOrders(
          )
        ORDER BY rr.created_at DESC
        LIMIT ?`,
-      [cleanTerm, termPattern, termPattern, termPattern, termPattern, termPattern, limit]
+      [...statusParams, cleanTerm, termPattern, termPattern, termPattern, termPattern, termPattern, limit]
     );
 
     if (rows && rows.length > 0) {
@@ -1816,6 +1875,21 @@ export async function searchDatabaseTechnicians(
     ? ''
     : `AND tp.verified_status = 'verified'`;
 
+  // N27: hormati options.categoryName — teknisi harus punya spesialisasi di
+  // kategori bernama itu (nama dicocokkan persis, diparameterisasi).
+  // Nama kategori bukan ENUM sehingga tidak ada allowlist statis; nama yang
+  // tidak ada di appliance_categories secara alami tidak cocok dengan
+  // teknisi mana pun (hasil []). Nilai kosong/blank diabaikan (tanpa filter).
+  const cleanCategory = (options.categoryName || '').trim();
+  const categoryFilter = cleanCategory
+    ? `AND EXISTS (
+         SELECT 1 FROM technician_specializations tsf
+         JOIN appliance_categories acf ON tsf.category_id = acf.id
+         WHERE tsf.technician_profile_id = tp.id AND acf.name = ?
+       )`
+    : '';
+  const categoryParams: any[] = cleanCategory ? [cleanCategory] : [];
+
   try {
     const rows = await query<any[]>(
       `SELECT
@@ -1837,6 +1911,7 @@ export async function searchDatabaseTechnicians(
        JOIN users u ON tp.user_id = u.id
        WHERE u.deleted_at IS NULL
          ${verifiedFilter}
+         ${categoryFilter}
          AND (
            tp.full_name LIKE ? ESCAPE '!'
            OR u.phone_number LIKE ? ESCAPE '!'
@@ -1844,7 +1919,7 @@ export async function searchDatabaseTechnicians(
          )
        ORDER BY tp.rating_avg DESC, tp.rating_count DESC
        LIMIT ?`,
-      [termPattern, termPattern, termPattern, limit]
+      [...categoryParams, termPattern, termPattern, termPattern, limit]
     );
 
     if (rows && rows.length > 0) {
@@ -1886,6 +1961,15 @@ export async function searchDatabaseInvoices(
   const limit = Math.min(20, Math.max(1, options.limit || 5));
   const termPattern = `%${escapeLikePattern(cleanTerm)}%`;
 
+  // N27: hormati options.status (allowlist ENUM invoices.status; nilai lain
+  // diabaikan tanpa filter). Kelompok OR dibungkus kurung — tanpa kurung,
+  // `AND inv.status = ?` hanya mengikat suku OR terakhir (presedensi AND
+  // lebih tinggi dari OR) dan filter menjadi salah.
+  const statusFilter = options.status && INVOICE_STATUSES.has(options.status)
+    ? 'AND inv.status = ?'
+    : '';
+  const statusParams: any[] = statusFilter ? [options.status] : [];
+
   try {
     const rows = await query<any[]>(
       `SELECT 
@@ -1907,15 +1991,16 @@ export async function searchDatabaseInvoices(
        JOIN appliance_categories ac ON rr.category_id = ac.id
        JOIN users u ON inv.customer_id = u.id
        LEFT JOIN customer_profiles cp ON u.id = cp.user_id
-       WHERE inv.invoice_number = ?
+       WHERE (inv.invoice_number = ?
           OR inv.invoice_number LIKE ? ESCAPE '!'
           OR rr.order_code = ?
           OR rr.order_code LIKE ? ESCAPE '!'
           OR cp.full_name LIKE ? ESCAPE '!'
-          OR u.phone_number LIKE ? ESCAPE '!'
+          OR u.phone_number LIKE ? ESCAPE '!')
+         ${statusFilter}
        ORDER BY inv.created_at DESC
        LIMIT ?`,
-      [cleanTerm, termPattern, cleanTerm, termPattern, termPattern, termPattern, limit]
+      [...statusParams, cleanTerm, termPattern, cleanTerm, termPattern, termPattern, termPattern, limit]
     );
 
     if (rows && rows.length > 0) {
@@ -1963,10 +2048,28 @@ export interface GovernedQueryFilter {
   value: string | number;
 }
 
+/**
+ * N23 — Spesifikasi satu JOIN. Bentuk string ('nama_tabel') mempertahankan
+ * perilaku lama: relasi pertama yang dideklarasikan di registry. Bentuk
+ * objek memungkinkan pemilihan relasi secara eksplisit lewat `via` (nama
+ * kolom FK, mis. 'technician_id', atau 'tabel.kolom') — wajib bila dua
+ * tabel punya lebih dari satu relasi (mis. repair_reviews -> users punya
+ * customer_id DAN technician_id; tanpa `via`, JOIN selalu memakai
+ * customer_id sehingga AI yang meminta data teknisi penilai diam-diam
+ * mendapat data pelanggan pemberi ulasan).
+ * Batasan: satu tabel target hanya bisa di-JOIN sekali per kueri (tidak ada
+ * aliasing) — `via` memilih relasi mana yang dipakai untuk JOIN tunggal
+ * itu, bukan menambahkan JOIN kedua ke tabel yang sama.
+ */
+export interface GovernedJoinSpec {
+  table: string;
+  via?: string;
+}
+
 export interface GovernedQuerySpec {
   table: string;
   columns?: string[]; // 'kolom' atau 'tabel.kolom'; kosong = semua kolom non-sensitif
-  joins?: string[]; // nama tabel; relasi diselesaikan server dari registry
+  joins?: Array<string | GovernedJoinSpec>; // nama tabel, atau { table, via }
   filters?: GovernedQueryFilter[];
   aggregate?: { function: 'count' | 'sum' | 'avg' | 'min' | 'max'; column?: string };
   groupBy?: string; // 'kolom' atau 'tabel.kolom'
@@ -2068,13 +2171,24 @@ function relationToOnClause(
 }
 
 // Cari relasi langsung antara dua tabel (satu hop); kembalikan klausa ON atau null.
-function resolveJoinOn(base: TableMetadata, target: TableMetadata): string | null {
-  const fromBase = base.relations.find((r) => r.targetTable === target.tableName);
+// N23: bila `via` diisi (nama kolom FK, mis. 'technician_id' atau
+// 'repair_reviews.technician_id'), HANYA relasi yang foreignKey-nya cocok
+// yang dipakai — divalidasi terhadap registry; bila tidak ada relasi yang
+// cocok, kembalikan null (pemanggil menolak kueri dengan error, tidak
+// pernah diam-diam memakai relasi lain). Bila `via` kosong, perilaku lama:
+// relasi pertama yang dideklarasikan.
+function resolveJoinOn(base: TableMetadata, target: TableMetadata, via?: string): string | null {
+  const viaCol = via ? via.trim().split('.').pop() : null;
+  const matchesVia = (rel: { foreignKey: string }): boolean => {
+    if (!viaCol) return true;
+    return rel.foreignKey.split('.').pop() === viaCol;
+  };
+  const fromBase = base.relations.find((r) => r.targetTable === target.tableName && matchesVia(r));
   if (fromBase) {
     const on = relationToOnClause(base, fromBase, base, target);
     if (on) return on;
   }
-  const fromTarget = target.relations.find((r) => r.targetTable === base.tableName);
+  const fromTarget = target.relations.find((r) => r.targetTable === base.tableName && matchesVia(r));
   if (fromTarget) {
     const on = relationToOnClause(target, fromTarget, base, target);
     if (on) return on;
@@ -2130,16 +2244,34 @@ export function buildGovernedQuerySQL(
   // JOIN (hanya lewat relasi registry, maksimal 2 hop)
   const joined = new Map<string, TableMetadata>();
   const joinClauses: string[] = [];
-  for (const joinName of spec.joins || []) {
-    const target = resolveTable(joinName);
+  for (const joinEntry of spec.joins || []) {
+    // N23: entri JOIN boleh berupa string ('tabel') atau objek
+    // ({ table, via }) — `via` memilih FK eksplisit (lihat GovernedJoinSpec).
+    const joinName = typeof joinEntry === 'string' ? joinEntry : (joinEntry as GovernedJoinSpec)?.table;
+    const via = typeof joinEntry === 'string' ? undefined : (joinEntry as GovernedJoinSpec)?.via;
+    const target = resolveTable(joinName as string);
     if (!target) return { error: `Tabel JOIN '${joinName}' tidak dikenal.` };
     if (target.tableName === base.tableName) return { error: 'Tidak dapat JOIN tabel ke dirinya sendiri.' };
     if (joined.has(target.tableName)) continue;
     if (!isTableAllowedForRole(target, role)) {
       return { error: `Akses ditolak: peran ${role} tidak diizinkan membaca tabel ${target.tableName}.` };
     }
-    const path = findJoinPath(base, target, role);
-    if (!path) return { error: `Tidak ada relasi antara ${base.tableName} dan ${target.tableName}.` };
+    let path: Array<{ table: TableMetadata; on: string }> | null;
+    if (via) {
+      // Relasi eksplisit: hanya hop langsung yang memakai FK itu yang sah.
+      // Jangan jatuh ke jalur 2-hop — itu akan diam-diam mengabaikan `via`.
+      if (!/^[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)?$/.test(via.trim())) {
+        return { error: `Relasi JOIN '${via}' tidak valid.` };
+      }
+      const directOn = resolveJoinOn(base, target, via);
+      if (!directOn) {
+        return { error: `Relasi '${via}' antara ${base.tableName} dan ${target.tableName} tidak ditemukan di skema.` };
+      }
+      path = [{ table: target, on: directOn }];
+    } else {
+      path = findJoinPath(base, target, role);
+      if (!path) return { error: `Tidak ada relasi antara ${base.tableName} dan ${target.tableName}.` };
+    }
     for (const step of path) {
       if (joined.has(step.table.tableName)) continue;
       if (!isTableAllowedForRole(step.table, role)) {
@@ -2266,11 +2398,21 @@ export async function executeGovernedDatabaseQuery(
 // Daftar nama pengguna berdasarkan peran (untuk jawaban list).
 // Mengembalikan null bila database tidak dapat diakses (berbeda dari [] = kosong).
 // Parameter status opsional: bila diisi, hanya pengguna dengan status itu yang diambil.
-export async function getUserNameList(
+//
+// N22 — Dua perbaikan atas perilaku lama:
+// 1. Pengguna tanpa profil (tanpa full_name) tidak lagi ditampilkan sebagai
+//    alamat email — melainkan "Tanpa nama (#id)" (id pengguna dicantumkan
+//    agar admin tetap bisa membedakan dan mencari akunnya).
+// 2. getUserNameListWithTotal mengembalikan total baris yang cocok agar
+//    pemanggil bisa memberi tahu bahwa daftar dipotong di LIMIT
+//    ("menampilkan 50 terbaru dari N total") — jangan biarkan admin
+//    mengira 50 nama itu seluruh pengguna. getUserNameList sendiri tetap
+//    mengembalikan array nama (kompatibilitas pemanggil lama).
+async function queryUserNameList(
   role: 'customer' | 'technician' | null,
-  limit: number = 50,
+  limit: number,
   status?: 'active' | 'pending_verification' | 'suspended'
-): Promise<string[] | null> {
+): Promise<{ names: string[]; total: number } | null> {
   const cleanLimit = Math.min(100, Math.max(1, Math.floor(limit) || 50));
   const cleanStatus = status === 'active' || status === 'pending_verification' || status === 'suspended' ? status : null;
   try {
@@ -2284,19 +2426,48 @@ export async function getUserNameList(
       whereParts.push('u.status = ?');
       params.push(cleanStatus);
     }
-    params.push(cleanLimit);
+    const whereSql = whereParts.join(' AND ');
+    const [countRow]: any = await query<any[]>(
+      `SELECT COUNT(*) AS total FROM users u WHERE ${whereSql}`,
+      params
+    );
+    const total = Number(countRow?.total || 0);
     const rows = await query<any[]>(
-      `SELECT COALESCE(cp.full_name, tp.full_name, u.email) AS full_name
+      `SELECT u.id, cp.full_name AS customer_name, tp.full_name AS technician_name
        FROM users u
        LEFT JOIN customer_profiles cp ON u.id = cp.user_id
        LEFT JOIN technician_profiles tp ON u.id = tp.user_id
-       WHERE ${whereParts.join(' AND ')}
+       WHERE ${whereSql}
        ORDER BY u.created_at DESC
        LIMIT ?`,
-      params
+      [...params, cleanLimit]
     );
-    return (rows || []).map((r) => String(r.full_name || '').trim()).filter(Boolean);
+    const names = (rows || []).map((r) => {
+      const name = String(r.customer_name || r.technician_name || '').trim();
+      return name || `Tanpa nama (#${r.id})`;
+    });
+    return { names, total };
   } catch {
     return null;
   }
+}
+
+export async function getUserNameList(
+  role: 'customer' | 'technician' | null,
+  limit: number = 50,
+  status?: 'active' | 'pending_verification' | 'suspended'
+): Promise<string[] | null> {
+  const result = await queryUserNameList(role, limit, status);
+  return result === null ? null : result.names;
+}
+
+// N22 — Varian getUserNameList yang juga mengembalikan total baris yang
+// cocok (tanpa LIMIT), agar pemanggil bisa memberi tahu pemotongan daftar.
+// Kontrak null tetap sama: null = DB error, { names: [], total: 0 } = kosong.
+export async function getUserNameListWithTotal(
+  role: 'customer' | 'technician' | null,
+  limit: number = 50,
+  status?: 'active' | 'pending_verification' | 'suspended'
+): Promise<{ names: string[]; total: number } | null> {
+  return queryUserNameList(role, limit, status);
 }

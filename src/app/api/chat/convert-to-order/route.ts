@@ -47,9 +47,17 @@ export async function POST(req: NextRequest) {
     const session = await getOrCreateSession(sessionUuid, userSession.userId);
     await markSessionConverted(session.id);
 
+    // F24 — Gejala awal (teks bebas pengguna) TIDAK LAGI dimasukkan ke query
+    // string: URL tersimpan di riwayat browser, log server/proxy, dan alat
+    // analitik. Gejala tetap tersedia di BODY respons POST ini
+    // (`session.initialSymptoms`) untuk handoff server-side, dan halaman
+    // tujuan dapat memuatnya dari sesi lewat `ai_session_id` (tindak lanjut
+    // di halaman /customer/repairs/new, di luar cakupan batch ini — halaman
+    // itu saat ini hanya pre-fill dari param `symptoms`, sehingga kolom
+    // deskripsi akan kosong sampai halaman diperbarui). Bentuk respons
+    // (success/message/bookingUrl/session) tidak berubah.
     const searchParams = new URLSearchParams();
     if (session.categoryId) searchParams.set('category_id', String(session.categoryId));
-    if (session.initialSymptoms) searchParams.set('symptoms', session.initialSymptoms);
     searchParams.set('ai_session_id', String(session.id));
 
     const bookingUrl = `/customer/repairs/new?${searchParams.toString()}`;

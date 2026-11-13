@@ -11,6 +11,13 @@ export interface ChatUserContext {
   name?: string;
   email?: string;
   phoneNumber?: string;
+  /**
+   * F21 — IP klien asal request, disetel oleh route handler dari header
+   * x-forwarded-for (entri pertama, tervalidasi). Hanya untuk log audit;
+   * TIDAK PERNAH dibaca dari argumen tool AI (bisa dipalsukan). Null bila
+   * tidak ada konteks request (pemanggilan langsung / job latar).
+   */
+  clientIp?: string | null;
   pageContext?: {
     pathname: string;
     pageTitle?: string;
