@@ -354,7 +354,7 @@ ${userContext.role === 'admin' ? '💡 _Catatan Administrator: Anda dapat mengga
       directReply = `**${guide.title}**\n\n${guide.content}`;
     } else if (/pesanan\s+saya|status\s+perbaikan|tagihan\s+saya|profil\s+saya/i.test(norm)) {
       directReply = `Untuk mengakses data pribadi, melacak status pesanan, atau melihat tagihan perbaikan Anda, silakan **Masuk (Login)** terlebih dahulu ke akun BANTUIN Anda.`;
-    } else if (/siapa\s+(?:nama\s+)?(?:pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|nama\s+pengguna|pemilik\s+(?:nomor|no|email|akun)/i.test(norm) || contextEntities.activePhoneNumber || contextEntities.activeEmail) {
+    } else if (/siapa\s+(?:\w+\s+){0,2}(?:nama\s+)?(?:pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|nama\s+pengguna|pemilik\s+(?:nomor|no|email|akun)/i.test(norm) || contextEntities.activePhoneNumber || contextEntities.activeEmail) {
       directReply = `Untuk mengakses informasi pengguna, melacak pesanan, atau melihat riwayat perbaikan di BANTUIN, silakan **Masuk (Login)** terlebih dahulu menggunakan akun terdaftar Anda.`;
     }
   }
@@ -603,8 +603,55 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
   // D. KATEGORI KHUSUS ADMINISTRATOR (ADMIN)
   // ==========================================================================
   if (userContext.role === 'admin') {
+    // 0. Metrik tunggal yang lugas (jawab hanya angka yang ditanya)
+    const singleMetric = norm.replace(/[?!.]+$/g, '').trim();
+    if (/^(berapa\s+)?total\s+pendapatan$/.test(singleMetric) || singleMetric === 'pendapatan') {
+      const finance = await DataService.getAdminFinancialAnalytics();
+      directReply = `Total Pendapatan Terkonfirmasi: Rp ${finance.totalRevenuePaid.toLocaleString('id-ID')}`;
+    } else if (/^(berapa\s+)?total\s+pengguna$/.test(singleMetric) || /^(berapa\s+)?jumlah\s+pengguna$/.test(singleMetric)) {
+      const stats = await DataService.getAdminUserStats();
+      directReply = `Total Pengguna Terdaftar: ${stats.totalUsers}`;
+    } else if (/^(berapa\s+)?total\s+pesanan$/.test(singleMetric) || /^(berapa\s+)?jumlah\s+pesanan$/.test(singleMetric)) {
+      const overview = await DataService.getAdminOperationalOverview();
+      directReply = `Total Seluruh Pesanan: ${overview.orders.total} pesanan`;
+    } else if (/^(berapa\s+)?total\s+(customer|pelanggan)$/.test(singleMetric) || /^(berapa\s+)?jumlah\s+(customer|pelanggan)$/.test(singleMetric)) {
+      const custData = await DataService.getAdminCustomerAnalytics();
+      directReply = `Total Pelanggan Terdaftar: ${custData.totalCustomers} akun`;
+    } else if (/^(berapa\s+)?total\s+teknisi$/.test(singleMetric) || /^(berapa\s+)?jumlah\s+teknisi$/.test(singleMetric)) {
+      const stats = await DataService.getAdminUserStats();
+      directReply = `Total Mitra Teknisi: ${stats.technicians.total}`;
+    } else if (/^(berapa\s+)?(total\s+|jumlah\s+)?pengguna\s+aktif$/.test(singleMetric)) {
+      const stats = await DataService.getAdminUserStats();
+      directReply = `Total Pengguna Aktif: ${stats.customers.active + stats.technicians.active + stats.admins.active}`;
+    } else if (/^(berapa\s+)?(total\s+|jumlah\s+)?(customer|pelanggan)\s+aktif$/.test(singleMetric)) {
+      const stats = await DataService.getAdminUserStats();
+      directReply = `Total Pelanggan Aktif: ${stats.customers.active}`;
+    } else if (/^(berapa\s+)?(total\s+|jumlah\s+)?teknisi\s+aktif$/.test(singleMetric)) {
+      const stats = await DataService.getAdminUserStats();
+      directReply = `Total Teknisi Aktif: ${stats.technicians.active}`;
+    }
+
+    // 0a. Daftar nama pengguna (mode list lugas: "siapa saja nama customer" -> list nama saja)
+    else if (
+      /siapa\s+(?:\w+\s+){0,2}(?:nama\s+)?(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|daftar\s+nama\s+(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|list\s+nama\s+(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)/i.test(norm) &&
+      !contextEntities.activePhoneNumber && !contextEntities.activeEmail && !contextEntities.activeUserUuid && !/\d{8,15}/.test(norm)
+    ) {
+      const listRoleMatch = norm.match(/(?:siapa\s+(?:\w+\s+){0,2}(?:nama\s+)?|daftar\s+nama\s+|list\s+nama\s+)(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)/i);
+      const roleWord = (listRoleMatch?.[1] || '').toLowerCase();
+      const listRole = roleWord === 'customer' || roleWord === 'pelanggan' ? 'customer' : roleWord === 'teknisi' ? 'technician' : null;
+      const roleLabel = listRole === 'customer' ? 'customer' : listRole === 'technician' ? 'teknisi' : 'pengguna';
+      const names = await DataService.getUserNameList(listRole, 50);
+      if (names === null) {
+        directReply = 'Tidak dapat membaca daftar nama saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else if (names.length === 0) {
+        directReply = `Belum ada ${roleLabel} terdaftar.`;
+      } else {
+        directReply = names.map((n, i) => `${i + 1}. ${n}`).join('\n');
+      }
+    }
+
     // 1. Dashboard, Total Pesanan & Status Perbaikan
-    if (/total\s+pesanan|pesanan\s+bulan\s+ini|pesanan\s+hari\s+ini|pesanan\s+yang\s+dibatalkan|pesanan\s+dibatalkan|perbaikan\s+berdasarkan\s+status|ringkasan\s+operasional|dashboard|operasional\s+hari\s+ini/i.test(norm)) {
+    else if (/total\s+pesanan|pesanan\s+bulan\s+ini|pesanan\s+hari\s+ini|pesanan\s+yang\s+dibatalkan|pesanan\s+dibatalkan|perbaikan\s+berdasarkan\s+status|ringkasan\s+operasional|dashboard|operasional\s+hari\s+ini/i.test(norm)) {
       const overview = await DataService.getAdminOperationalOverview();
       directReply = `📊 **Ringkasan Operasional & Total Pesanan BANTUIN (Admin Dashboard):**
 - **Total Seluruh Pesanan:** **${overview.orders.total} pesanan**
@@ -728,7 +775,7 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
 
     // 12. Pencarian Pengguna Berdasarkan Nomor Telepon, Email, UUID, atau Nama (Admin User Search)
     else if (
-      /siapa\s+(?:nama\s+)?(?:pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|nama\s+pengguna|pemilik\s+(?:nomor|no|email|akun)|cari\s+(?:pengguna|user|customer|pelanggan|teknisi)|data\s+(?:pengguna|user|customer|pelanggan|teknisi)/i.test(norm) ||
+      /siapa\s+(?:\w+\s+){0,2}(?:nama\s+)?(?:pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|nama\s+pengguna|pemilik\s+(?:nomor|no|email|akun)|cari\s+(?:pengguna|user|customer|pelanggan|teknisi)|data\s+(?:pengguna|user|customer|pelanggan|teknisi)/i.test(norm) ||
       ((norm.includes('telepon') || norm.includes('phone') || norm.includes('no hp') || norm.includes('nomor') || norm.includes('email') || norm.includes('uuid')) &&
         Boolean(contextEntities.activePhoneNumber || contextEntities.activeEmail || contextEntities.activeUserUuid || /\d{8,15}/.test(norm)))
     ) {
@@ -859,12 +906,14 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
             dbContextSummary += `  - Order #${t.orderCode}: Pelanggan: ${t.customerName}, Status: ${t.assignmentStatus}, Alamat: ${t.address}\n`;
           });
         } else if (userContext.role === 'admin') {
-          const [overview, workload, finance] = await Promise.all([
+          const [overview, workload, finance, userStats] = await Promise.all([
             DataService.getAdminOperationalOverview(),
             DataService.getAdminTechnicianWorkload(),
             DataService.getAdminFinancialAnalytics(),
+            DataService.getAdminUserStats(),
           ]);
-          dbContextSummary += `Ringkasan Admin: Total Pesanan: ${overview.orders.total}, Menunggu: ${overview.orders.submitted}, Dikerjakan: ${overview.orders.inRepair}, Selesai: ${overview.orders.completed}, Mitra Teknisi Aktif: ${overview.technicians.active}, Pelanggan: ${overview.customers.active}\n`;
+          const totalActiveUsers = userStats.customers.active + userStats.technicians.active + userStats.admins.active;
+          dbContextSummary += `Ringkasan Admin: Total Pesanan: ${overview.orders.total}, Menunggu: ${overview.orders.submitted}, Dikerjakan: ${overview.orders.inRepair}, Selesai: ${overview.orders.completed}, Mitra Teknisi Aktif: ${overview.technicians.active}, Pelanggan Aktif: ${overview.customers.active}, Total Pengguna Aktif: ${totalActiveUsers}, Total Pengguna Terdaftar: ${userStats.totalUsers}\n`;
           dbContextSummary += `Keuangan: Total Pendapatan: Rp ${finance.totalRevenuePaid.toLocaleString('id-ID')}, Piutang Tertunggak: Rp ${finance.totalUnpaidAmount.toLocaleString('id-ID')}, Total Invoice: ${finance.totalInvoices}\n`;
           dbContextSummary += `Teknisi: ${workload.length} mitra teknisi aktif terdaftar.\n`;
 
@@ -937,6 +986,31 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
                 query: { type: 'string', description: 'Nama teknisi atau kata kunci spesialisasi' },
               },
               required: ['query'],
+            },
+          },
+          {
+            name: 'queryDatabase',
+            description: 'Kueri BACA data dari tabel database BANTUIN mana pun yang diizinkan untuk peran pengguna. Gunakan untuk pertanyaan data apa pun yang tidak terjawab alat pencarian lain: total, jumlah, daftar, rekap, dan perbandingan. Hanya SELECT; server yang membangun SQL-nya dan menegakkan izin peran, kolom sensitif tidak pernah dikembalikan. Satu putaran tool saja: bila perlu beberapa kueri, panggil queryDatabase beberapa kali sekaligus.',
+            parameters: {
+              type: 'object',
+              properties: {
+                table: { type: 'string', description: 'Nama tabel (misal: repair_requests, invoices, users, customer_profiles, technician_profiles, payments, services)' },
+                columns: { type: 'string', description: 'Kolom yang diambil, dipisah koma (misal: "full_name,email" atau "customer_profiles.full_name"). Kosongkan untuk semua kolom non-sensitif.' },
+                joins: { type: 'string', description: 'Tabel yang di-JOIN, dipisah koma (relasi harus ada di skema; misal: "customer_profiles" saat tabel dasar repair_requests)' },
+                filterColumn: { type: 'string', description: 'Kolom filter pertama (misal: "current_status" atau "invoices.status")' },
+                filterOperator: { type: 'string', enum: ['=', '!=', '>', '>=', '<', '<=', 'LIKE', 'IN'], description: 'Operator filter pertama' },
+                filterValue: { type: 'string', description: 'Nilai filter pertama. Untuk LIKE: substring yang dicari. Untuk IN: beberapa nilai dipisah koma.' },
+                filterColumn2: { type: 'string', description: 'Kolom filter kedua (opsional)' },
+                filterOperator2: { type: 'string', enum: ['=', '!=', '>', '>=', '<', '<=', 'LIKE', 'IN'], description: 'Operator filter kedua' },
+                filterValue2: { type: 'string', description: 'Nilai filter kedua' },
+                aggregateFunction: { type: 'string', enum: ['count', 'sum', 'avg', 'min', 'max'], description: 'Fungsi agregasi (misal: "sum" untuk total, "count" untuk jumlah)' },
+                aggregateColumn: { type: 'string', description: 'Kolom yang diagregasi (misal: "total_amount"; kosongkan untuk count semua baris)' },
+                groupBy: { type: 'string', description: 'Kolom GROUP BY (misal: "current_status" untuk rekap per status)' },
+                orderByColumn: { type: 'string', description: 'Kolom pengurutan' },
+                orderByDirection: { type: 'string', enum: ['ASC', 'DESC'], description: 'Arah pengurutan' },
+                limit: { type: 'number', description: 'Maksimal baris (default 20, maks 100)' },
+              },
+              required: ['table'],
             },
           },
         ];

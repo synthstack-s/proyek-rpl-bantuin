@@ -1112,7 +1112,7 @@ export default function AIProviderSettingsSection() {
                 <span className="text-gray-500">Model Diuji:</span>
                 <span className="font-mono text-gray-700 font-semibold">{testResultModal.modelTested}</span>
               </div>
-              {testResultModal.errorMessage && (
+              {testResultModal.errorMessage && testResultModal.status !== 'success' && (
                 <div className="pt-2">
                   <span className="text-rose-600 font-semibold block mb-1">Rincian Error:</span>
                   <p className="font-mono text-[11px] text-rose-700 bg-rose-50 p-2.5 rounded-lg border border-rose-200 break-words">
