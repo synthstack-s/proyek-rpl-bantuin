@@ -633,18 +633,19 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
 
     // 0a. Daftar nama pengguna (mode list lugas: "siapa saja nama customer" -> list nama saja)
     else if (
-      /siapa\s+(?:\w+\s+){0,2}(?:nama\s+)?(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|daftar\s+nama\s+(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|list\s+nama\s+(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)/i.test(norm) &&
+      /siapa\s+(?:\w+\s+){0,2}(?:nama\s+)?(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|daftar\s+(?:nama\s+)?(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|list\s+(?:nama\s+)?(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)/i.test(norm) &&
       !contextEntities.activePhoneNumber && !contextEntities.activeEmail && !contextEntities.activeUserUuid && !/\d{8,15}/.test(norm)
     ) {
-      const listRoleMatch = norm.match(/(?:siapa\s+(?:\w+\s+){0,2}(?:nama\s+)?|daftar\s+nama\s+|list\s+nama\s+)(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)/i);
+      const listRoleMatch = norm.match(/(?:siapa\s+(?:\w+\s+){0,2}(?:nama\s+)?|daftar\s+(?:nama\s+)?|list\s+(?:nama\s+)?)(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)/i);
       const roleWord = (listRoleMatch?.[1] || '').toLowerCase();
       const listRole = roleWord === 'customer' || roleWord === 'pelanggan' ? 'customer' : roleWord === 'teknisi' ? 'technician' : null;
       const roleLabel = listRole === 'customer' ? 'customer' : listRole === 'technician' ? 'teknisi' : 'pengguna';
-      const names = await DataService.getUserNameList(listRole, 50);
+      const wantsActiveOnly = /\baktif\b/i.test(norm) && !/tidak\s+aktif|nonaktif/i.test(norm);
+      const names = await DataService.getUserNameList(listRole, 50, wantsActiveOnly ? 'active' : undefined);
       if (names === null) {
         directReply = 'Tidak dapat membaca daftar nama saat ini (database tidak dapat diakses). Coba lagi nanti.';
       } else if (names.length === 0) {
-        directReply = `Belum ada ${roleLabel} terdaftar.`;
+        directReply = wantsActiveOnly ? `Belum ada ${roleLabel} aktif terdaftar.` : `Belum ada ${roleLabel} terdaftar.`;
       } else {
         directReply = names.map((n, i) => `${i + 1}. ${n}`).join('\n');
       }
