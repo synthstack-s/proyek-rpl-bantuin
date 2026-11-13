@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS `users` (
   `role` ENUM('admin', 'customer', 'technician') NOT NULL COMMENT 'Role utama sistem',
   `status` ENUM('active', 'inactive', 'suspended', 'pending_verification') NOT NULL DEFAULT 'pending_verification',
   `is_verified` BOOLEAN NOT NULL DEFAULT FALSE COMMENT 'Verifikasi kontak email/phone',
+  `token_version` INT NOT NULL DEFAULT 1 COMMENT 'T5 — Versi token JWT; dinaikkan saat reset password untuk mencabut sesi lama',
   `deleted_at` DATETIME NULL DEFAULT NULL COMMENT 'Soft delete timestamp',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

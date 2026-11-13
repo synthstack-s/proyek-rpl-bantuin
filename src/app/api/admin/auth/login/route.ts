@@ -11,6 +11,7 @@ import {
   DEFAULT_TOKEN_EXPIRY,
   REMEMBER_ME_TOKEN_EXPIRY,
 } from '@/lib/auth';
+import { getUserTokenVersion } from '@/lib/token-revocation';
 import {
   checkLoginRateLimit,
   recordFailedLoginAttempt,
@@ -143,12 +144,16 @@ export async function POST(request: NextRequest) {
     const tokenExpiry = rememberMe ? REMEMBER_ME_TOKEN_EXPIRY : DEFAULT_TOKEN_EXPIRY;
     const cookieMaxAge = rememberMe ? REMEMBER_ME_COOKIE_MAX_AGE : DEFAULT_COOKIE_MAX_AGE;
 
+    // T5: sematkan tokenVersion terkini agar token yang diterbitkan sesudah
+    // reset password tidak langsung ditolak oleh pemeriksaan pencabutan.
+    const tokenVersion = await getUserTokenVersion(user.id);
     const token = await createAdminToken(
       {
         userId: user.id,
         uuid: user.uuid,
         email: user.email,
         role: 'admin',
+        tokenVersion,
       },
       tokenExpiry
     );

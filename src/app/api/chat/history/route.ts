@@ -1,9 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getUserSession, getAdminSession } from '@/lib/auth';
+import { checkChatRateLimit } from '@/lib/rate-limiter';
 import { getSessionByUuid, getSessionMessages } from '@/lib/chatbot/repository';
 
 export async function GET(req: NextRequest) {
   try {
+    // F9: batasi pembacaan riwayat per IP (30/menit, sama dengan route
+    // message) — tanpa ini, endpoint bisa dipakai untuk enumerasi/brute
+    // force UUID sesi tanpa batas.
+    const ip = req.headers.get('x-forwarded-for') || '127.0.0.1';
+    const rateLimit = checkChatRateLimit(`history:${ip}`, 30);
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: `Terlalu banyak permintaan riwayat. Silakan tunggu ${rateLimit.retryAfterSeconds} detik sebelum mencoba lagi.`,
+        },
+        { status: 429 }
+      );
+    }
+
     const { searchParams } = new URL(req.url);
     const sessionUuid = searchParams.get('uuid');
 

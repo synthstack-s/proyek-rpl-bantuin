@@ -1,11 +1,28 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getUserSession, getAdminSession } from '@/lib/auth';
+import { checkChatRateLimit } from '@/lib/rate-limiter';
 import { getOrCreateSession, isSessionForbiddenError } from '@/lib/chatbot/repository';
 import { ChatUserContext } from '@/lib/chatbot/types';
 import { getPageContextSuggestions } from '@/lib/chatbot/engine';
 
 export async function POST(req: NextRequest) {
   try {
+    // F9: batasi pembuatan sesi per IP — tanpa ini, penyerang bisa
+    // membanjiri tabel ai_consultation_sessions (satu baris baru per
+    // panggilan tanpa sessionUuid). 10 sesi/menit/IP sudah longgar untuk
+    // pemakaian normal.
+    const ip = req.headers.get('x-forwarded-for') || '127.0.0.1';
+    const rateLimit = checkChatRateLimit(`session:${ip}`, 10);
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: `Terlalu banyak pembuatan sesi. Silakan tunggu ${rateLimit.retryAfterSeconds} detik sebelum mencoba lagi.`,
+        },
+        { status: 429 }
+      );
+    }
+
     let body: any = {};
     try {
       body = await req.json();

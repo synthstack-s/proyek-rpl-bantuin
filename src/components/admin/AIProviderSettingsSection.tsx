@@ -75,15 +75,18 @@ interface ModelItem {
 }
 
 interface ConnectionTestLogItem {
-  id: number;
+  // M7: bentuk ini MENYAMAKAN respons server
+  // (GET /api/admin/ai/metrics -> data.recentConnectionLogs, camelCase).
+  // Sebelumnya interface memakai snake_case + id yang tidak pernah dikirim
+  // server, dan state ini tidak pernah dirender di mana pun (state mati).
   provider: string;
   endpoint: string;
-  model_tested: string;
+  modelTested: string;
   status: string;
-  http_status_code: number | null;
-  response_time_ms: number;
-  tested_at: string;
-  error_message: string | null;
+  httpStatusCode: number | null;
+  responseTimeMs: number;
+  testedAt: string;
+  errorMessage: string | null;
 }
 
 interface AIMetricsState {
@@ -92,7 +95,8 @@ interface AIMetricsState {
   failedRequests: number;
   fallbackRequests: number;
   successRatePercent: number;
-  avgLatencyMs: number;
+  // M6/M7: null bila tidak ada data latensi (server tidak lagi mengarang angka).
+  avgLatencyMs: number | null;
   totalPromptTokens: number;
   totalCompletionTokens: number;
   totalTokens: number;
@@ -100,7 +104,7 @@ interface AIMetricsState {
     provider: string;
     requests: number;
     tokens: number;
-    avgLatencyMs: number;
+    avgLatencyMs: number | null;
   }>;
 }
 
@@ -484,9 +488,35 @@ export default function AIProviderSettingsSection() {
 
       if (metricsRes.ok) {
         const mData = await metricsRes.json();
-        if (mData.success) {
-          setMetrics(mData.metrics);
-          setTestLogs(mData.recentConnectionTests || []);
+        // M7: route mengembalikan { success, data: { summary,
+        // providerBreakdown, recentConnectionLogs } } — sebelumnya UI membaca
+        // mData.metrics (tidak ada) sehingga strip telemetri tidak pernah
+        // tampil. Petakan nama field server ke AIMetricsState di sini.
+        if (mData.success && mData.data) {
+          const summary = mData.data.summary || {};
+          const total = Number(summary.totalRequests || 0);
+          const success = Number(summary.successfulRequests || 0);
+          setMetrics({
+            totalRequests: total,
+            successRequests: success,
+            failedRequests: Number(summary.failedRequests || 0),
+            fallbackRequests: Number(summary.fallbackCount || 0),
+            successRatePercent: total > 0 ? Math.round((success / total) * 100) : 0,
+            avgLatencyMs: summary.averageResponseTimeMs != null ? Number(summary.averageResponseTimeMs) : null,
+            // Server tidak melacak split prompt/completion — isi 0 (bukan angka karangan).
+            totalPromptTokens: 0,
+            totalCompletionTokens: 0,
+            totalTokens: Number(summary.totalTokensUsed || 0),
+            providerBreakdown: Array.isArray(mData.data.providerBreakdown)
+              ? mData.data.providerBreakdown.map((p: any) => ({
+                  provider: String(p.provider),
+                  requests: Number(p.requests || 0),
+                  tokens: Number(p.tokens || 0),
+                  avgLatencyMs: p.avgLatencyMs != null ? Number(p.avgLatencyMs) : null,
+                }))
+              : [],
+          });
+          setTestLogs(Array.isArray(mData.data.recentConnectionLogs) ? mData.data.recentConnectionLogs : []);
         }
       }
     } catch (err: any) {
@@ -1865,7 +1895,7 @@ export default function AIProviderSettingsSection() {
           </div>
           <div>
             <span className="text-gray-500 text-[10px] block">Rerata Latency</span>
-            <span className="font-bold text-gray-900 font-mono text-sm">{metrics.avgLatencyMs} ms</span>
+            <span className="font-bold text-gray-900 font-mono text-sm">{metrics.avgLatencyMs != null ? `${metrics.avgLatencyMs} ms` : '—'}</span>
           </div>
           <div>
             <span className="text-gray-500 text-[10px] block">Akumulasi Token</span>
@@ -1873,6 +1903,30 @@ export default function AIProviderSettingsSection() {
               {metrics.totalTokens.toLocaleString('id-ID')}
             </span>
           </div>
+        </div>
+      )}
+
+      {/* M7: Riwayat tes koneksi — sebelumnya state testLogs tidak pernah
+          dirender di mana pun (state mati). Sekarang ditampilkan ringkas. */}
+      {testLogs.length > 0 && (
+        <div className="bg-gray-50 p-3 rounded-2xl border border-gray-200 text-xs ai-subcard">
+          <div className="font-semibold text-gray-700 mb-2">Riwayat Tes Koneksi Terakhir</div>
+          <ul className="space-y-1.5">
+            {testLogs.slice(0, 5).map((log, i) => (
+              <li key={`${log.provider}-${log.testedAt}-${i}`} className="flex flex-wrap items-center gap-x-2 text-gray-600">
+                <span className="font-mono font-semibold text-gray-900">{log.provider}</span>
+                <span className="font-mono">{log.modelTested}</span>
+                <span className={log.status === 'success' ? 'text-emerald-600 font-semibold' : 'text-red-600 font-semibold'}>
+                  {log.status}{log.httpStatusCode != null ? ` (${log.httpStatusCode})` : ''}
+                </span>
+                <span>{log.responseTimeMs} ms</span>
+                <span className="text-gray-400">{log.testedAt ? new Date(log.testedAt).toLocaleString('id-ID') : ''}</span>
+                {log.errorMessage && log.status !== 'success' && (
+                  <span className="text-red-500 w-full truncate">{log.errorMessage}</span>
+                )}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
     </div>

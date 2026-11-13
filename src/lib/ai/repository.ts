@@ -47,8 +47,13 @@ const IN_MEMORY_CONFIGS: Record<string, ProviderRuntimeConfig> = {
     maxOutputTokens: 2048,
     requestTimeoutMs: 30000,
     retryLimit: 2,
-    lastConnectionStatus: process.env.GEMINI_API_KEY ? 'connected' : 'not_configured',
-    lastTestedAt: new Date().toISOString(),
+    // M11: JANGAN pernah mengklaim 'connected' hanya karena env key ada —
+    // belum ada tes live yang membuktikannya. Key yang ada hanya berarti
+    // provider terkonfigurasi ('disconnected' = terkonfigurasi, belum pernah
+    // dites); tanpa key berarti 'not_configured'. Status 'connected' hanya
+    // boleh ditulis oleh hasil tes live (recordConnectionTestLog).
+    lastConnectionStatus: process.env.GEMINI_API_KEY ? 'disconnected' : 'not_configured',
+    lastTestedAt: null,
   },
   groq: {
     provider: 'groq',
@@ -63,8 +68,10 @@ const IN_MEMORY_CONFIGS: Record<string, ProviderRuntimeConfig> = {
     maxOutputTokens: 2048,
     requestTimeoutMs: 30000,
     retryLimit: 2,
-    lastConnectionStatus: process.env.GROQ_API_KEY ? 'connected' : 'not_configured',
-    lastTestedAt: new Date().toISOString(),
+    // M11: lihat catatan di entri gemini di atas — 'disconnected' bila key
+    // env ada (terkonfigurasi, belum dites), 'not_configured' bila tidak ada.
+    lastConnectionStatus: process.env.GROQ_API_KEY ? 'disconnected' : 'not_configured',
+    lastTestedAt: null,
   },
 };
 
@@ -1062,13 +1069,15 @@ export async function getAIMonitoringMetrics(): Promise<{
     successfulRequests: number;
     failedRequests: number;
     fallbackCount: number;
-    averageResponseTimeMs: number;
+    // M6: null bila tidak ada data latensi — JANGAN mengarang angka.
+    averageResponseTimeMs: number | null;
     totalTokensUsed: number;
   };
   providerBreakdown: Array<{
     provider: AIProviderType;
     requests: number;
-    avgLatencyMs: number;
+    // M6: null bila provider itu tidak punya data latensi.
+    avgLatencyMs: number | null;
     tokens: number;
   }>;
   recentConnectionLogs: AIConnectionTestResult[];
@@ -1104,27 +1113,29 @@ export async function getAIMonitoringMetrics(): Promise<{
        LIMIT 10`
     );
 
+    // M6: bila query DB berhasil, laporkan ANGKA DB APA ADANYA. Jangan
+    // mencampur hitungan DB dengan hitungan in-memory dalam satu angka
+    // (pola lama `s.total_requests || inMemoryUsageLogs.length` membuat DB
+    // kosong dilaporkan seolah punya request), dan jangan mengarang latensi
+    // (konstanta 320/310/180/285 sudah dihapus — tidak ada data = null).
     const s = statsRows?.[0] || {};
     return {
       summary: {
-        totalRequests: Number(s.total_requests || inMemoryUsageLogs.length),
-        successfulRequests: Number(s.successful_requests || inMemoryUsageLogs.filter(u => u.status === 'success').length),
-        failedRequests: Number(s.failed_requests || inMemoryUsageLogs.filter(u => u.status === 'failed').length),
-        fallbackCount: Number(s.fallback_count || inMemoryUsageLogs.filter(u => u.isFallback).length),
-        averageResponseTimeMs: Math.round(Number(s.avg_latency_ms || 320)),
+        totalRequests: Number(s.total_requests || 0),
+        successfulRequests: Number(s.successful_requests || 0),
+        failedRequests: Number(s.failed_requests || 0),
+        fallbackCount: Number(s.fallback_count || 0),
+        averageResponseTimeMs: s.avg_latency_ms != null ? Math.round(Number(s.avg_latency_ms)) : null,
         totalTokensUsed: Number(s.total_tokens || 0),
       },
       providerBreakdown: (breakdownRows && breakdownRows.length > 0)
         ? breakdownRows.map(r => ({
           provider: r.provider as AIProviderType,
           requests: Number(r.requests),
-          avgLatencyMs: Math.round(Number(r.avg_latency_ms)),
+          avgLatencyMs: r.avg_latency_ms != null ? Math.round(Number(r.avg_latency_ms)) : null,
           tokens: Number(r.tokens),
         }))
-        : [
-          { provider: 'gemini', requests: inMemoryUsageLogs.filter(u => u.provider === 'gemini').length, avgLatencyMs: 310, tokens: 0 },
-          { provider: 'groq', requests: inMemoryUsageLogs.filter(u => u.provider === 'groq').length, avgLatencyMs: 180, tokens: 0 },
-        ],
+        : [],
       recentConnectionLogs: (testLogsRows && testLogsRows.length > 0)
         ? testLogsRows.map(r => ({
           provider: r.provider as AIProviderType,
@@ -1139,8 +1150,33 @@ export async function getAIMonitoringMetrics(): Promise<{
         : inMemoryConnectionLogs.slice(0, 10),
     };
   } catch {
-    // Fallback
+    // Fallback: DB tidak dapat diakses — laporkan HANYA data in-memory
+    // proses ini, dihitung dari log yang benar-benar ada (bukan konstanta).
   }
+
+  // M6: breakdown dari log in-memory — rata-rata latensi riil per provider,
+  // null bila provider itu tidak punya satu pun sampel latensi.
+  const byProvider = new Map<string, { count: number; latencySum: number; latencyCount: number; tokens: number }>();
+  for (const u of inMemoryUsageLogs) {
+    const p = String(u.provider || 'unknown');
+    const entry = byProvider.get(p) || { count: 0, latencySum: 0, latencyCount: 0, tokens: 0 };
+    entry.count += 1;
+    if (typeof u.latencyMs === 'number' && Number.isFinite(u.latencyMs)) {
+      entry.latencySum += u.latencyMs;
+      entry.latencyCount += 1;
+    }
+    entry.tokens += Number(u.totalTokens || 0);
+    byProvider.set(p, entry);
+  }
+  const memoryBreakdown = Array.from(byProvider.entries()).map(([provider, e]) => ({
+    provider: provider as AIProviderType,
+    requests: e.count,
+    avgLatencyMs: e.latencyCount > 0 ? Math.round(e.latencySum / e.latencyCount) : null,
+    tokens: e.tokens,
+  }));
+  const memoryLatencySamples = inMemoryUsageLogs.filter(
+    (u) => typeof u.latencyMs === 'number' && Number.isFinite(u.latencyMs)
+  );
 
   return {
     summary: {
@@ -1148,15 +1184,12 @@ export async function getAIMonitoringMetrics(): Promise<{
       successfulRequests: inMemoryUsageLogs.filter(u => u.status === 'success').length,
       failedRequests: inMemoryUsageLogs.filter(u => u.status === 'failed').length,
       fallbackCount: inMemoryUsageLogs.filter(u => u.isFallback).length,
-      averageResponseTimeMs: inMemoryUsageLogs.length > 0
-        ? Math.round(inMemoryUsageLogs.reduce((acc, u) => acc + (u.latencyMs || 0), 0) / inMemoryUsageLogs.length)
-        : 285,
+      averageResponseTimeMs: memoryLatencySamples.length > 0
+        ? Math.round(memoryLatencySamples.reduce((acc, u) => acc + (u.latencyMs || 0), 0) / memoryLatencySamples.length)
+        : null,
       totalTokensUsed: inMemoryUsageLogs.reduce((acc, u) => acc + (u.totalTokens || 0), 0),
     },
-    providerBreakdown: [
-      { provider: 'gemini', requests: inMemoryUsageLogs.filter(u => u.provider === 'gemini').length, avgLatencyMs: 310, tokens: 0 },
-      { provider: 'groq', requests: inMemoryUsageLogs.filter(u => u.provider === 'groq').length, avgLatencyMs: 180, tokens: 0 },
-    ],
+    providerBreakdown: memoryBreakdown,
     recentConnectionLogs: inMemoryConnectionLogs.slice(0, 10),
   };
 }

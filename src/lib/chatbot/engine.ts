@@ -267,7 +267,59 @@ Silakan ceritakan kendala yang dialami perangkat Anda, atau tanyakan informasi s
 /**
  * PIPELINE UTAMA PEMROSESAN PESAN CHATBOT+
  */
+/**
+ * F18 — Pembungkus processChatMessage dengan try/catch luar. Sebelumnya
+ * exception di luar blok AI (muat riwayat, kueri deterministik, eksekusi
+ * aksi teknisi) merambat ke route sebagai 500 dan pesan pengguna hilang,
+ * karena pesan baru disimpan setelah pipeline selesai. Sekarang: error apa
+ * pun ditangkap, pesan pengguna dipastikan tersimpan (bila belum), balasan
+ * error yang ramah disimpan sebagai pesan asisten, dan respons sukses
+ * dikembalikan agar pengguna mendapat penjelasan, bukan 500 kosong.
+ * Kegagalan panggilan AI sendiri TIDAK sampai ke sini — sudah ditangani di
+ * dalam dengan fallback expert system berlabel "Mode offline".
+ */
 export async function processChatMessage(params: {
+  userMessage: string;
+  session: ConsultationSession;
+  userContext: ChatUserContext;
+}): Promise<{
+  reply: string;
+  metadata: ChatMessageMetadata;
+  diagnosisCard?: DiagnosisCard | null;
+}> {
+  const startTime = Date.now();
+  try {
+    return await processChatMessageInternal(params);
+  } catch (err: any) {
+    console.error('[Chatbot Engine] processChatMessage gagal (ditangkap F18):', err);
+    const { userMessage, session, userContext } = params;
+    const errorReply = 'Maaf, terjadi kesalahan sistem saat memproses pesan Anda. Pesan Anda sudah tersimpan — silakan coba kirim ulang sesaat lagi, atau hubungi dukungan BANTUIN bila masalah berlanjut.';
+    const metadata: ChatMessageMetadata = {
+      model: 'bantuin-error-handler-v1',
+      responseTimeMs: Date.now() - startTime,
+      quickSuggestions: getRoleBasedSuggestedPrompts(userContext.role, userContext.pageContext?.pathname || '/'),
+    };
+    // Best-effort: pastikan pesan pengguna + balasan error tersimpan agar
+    // percakapan tidak berlubang. Cek duplikasi dulu: bila pesan pengguna
+    // sudah tersimpan (error terjadi setelah penyimpanan), jangan simpan
+    // dua kali.
+    try {
+      const recent = await getSessionMessages(session.id);
+      const alreadySaved = recent.some((m: any) => m.role === 'user' && String(m.message || '').trim() === userMessage.trim());
+      if (!alreadySaved) {
+        await saveChatMessage(session.id, 'user', userMessage);
+      }
+      await saveChatMessage(session.id, 'assistant', errorReply, metadata, 0, metadata.responseTimeMs);
+    } catch (persistErr) {
+      // Penyimpanan pun gagal (mis. DB down total) — tetap kembalikan
+      // balasan ramah; route tidak akan mengembalikan 500.
+      console.error('[Chatbot Engine] F18 gagal menyimpan pesan error:', persistErr);
+    }
+    return { reply: errorReply, metadata };
+  }
+}
+
+async function processChatMessageInternal(params: {
   userMessage: string;
   session: ConsultationSession;
   userContext: ChatUserContext;
@@ -447,8 +499,59 @@ ${userContext.role === 'admin' ? '💡 _Catatan Administrator: Anda dapat mengga
       directReply = `🛡️ **${guide.title}**\n\n${guide.content}`;
     }
 
+    // Harga Layanan dari Katalog (N10) — pertanyaan harga umum ("berapa
+    // biaya perbaikan AC?") dijawab dari katalog layanan, BUKAN dari daftar
+    // invoice milik customer. Cabang ini HARUS sebelum cabang tagihan karena
+    // pola tagihan lama menangkap frasa "biaya perbaikan". Dikecualikan bila
+    // pertanyaan menyangkut tagihan/pesanan milik sendiri (mengandung
+    // "saya"/"tagihan"/"invoice") — itu urusan cabang tagihan/status.
+    else if (
+      /biaya|harga|tarif/i.test(norm) &&
+      !/saya|tagihan|invoice|pesanan\s+saya|order\s+saya/i.test(norm) &&
+      /perbaikan|servis|service|layanan|cuci|pasang|instalasi|ac\b|kulkas|freezer|mesin\s+cuci|kipas|televisi|\btv\b|pompa|kompor|dispenser|vacuum/i.test(norm)
+    ) {
+      const prices = await DataService.getPublicServicePrices();
+      if (prices === null) {
+        directReply = 'Daftar harga layanan tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else if (prices.length === 0) {
+        directReply = 'Belum ada layanan aktif yang tercatat di katalog BANTUIN.';
+      } else {
+        // Cocokkan kata kunci pertanyaan dengan nama layanan/kategori.
+        const stopwords = new Set(['berapa', 'biaya', 'harga', 'tarif', 'perbaikan', 'servis', 'service', 'layanan', 'untuk', 'yang', 'dan', 'atau', 'apa', 'saya', 'di', 'ke', 'dari', 'dengan', 'adalah', 'itu', 'ini', 'ya', 'kak', 'min', 'mau', 'tanya', 'dong', 'sih', 'aja', 'saja', 'kisaran', 'sekitar', 'kira', 'ongkos', 'berapa', 'kalo', 'kalau']);
+        const keywords = norm.split(/[^a-z0-9]+/i).filter((w) => w.length >= 2 && !stopwords.has(w));
+        const matched = prices.filter((p) => {
+          const hay = `${p.name} ${p.categoryName} ${p.slug} ${p.categorySlug}`.toLowerCase();
+          return keywords.some((k) => hay.includes(k));
+        });
+        if (matched.length > 0) {
+          const list = matched.slice(0, 10);
+          directReply = `💰 **Harga Layanan yang Sesuai:**\n\n` +
+            list.map((p, i) => `**${i + 1}. ${p.name}** (${p.categoryName})\n- Harga Dasar: **Rp ${p.basePrice.toLocaleString('id-ID')}**\n- Estimasi Durasi: ${p.estimatedDurationMin} menit`).join('\n') +
+            (matched.length > 10 ? `\n\n_...dan ${matched.length - 10} layanan lainnya yang cocok._` : '') +
+            `\n\n_Harga di atas adalah tarif dasar. Biaya akhir ditentukan setelah teknisi melakukan diagnosis dan disetujui oleh Anda._`;
+        } else {
+          // Tidak ada layanan yang cocok kata kuncinya — tampilkan kisaran
+          // harga per kategori (ringkas) agar pengguna bisa mempersempit.
+          const byCat = new Map<string, { min: number; max: number; count: number }>();
+          for (const p of prices) {
+            const e = byCat.get(p.categoryName) || { min: p.basePrice, max: p.basePrice, count: 0 };
+            e.min = Math.min(e.min, p.basePrice);
+            e.max = Math.max(e.max, p.basePrice);
+            e.count += 1;
+            byCat.set(p.categoryName, e);
+          }
+          directReply = `💰 **Kisaran Harga Layanan BANTUIN:**\n\n` +
+            Array.from(byCat.entries()).map(([cat, r]) => `- **${cat}**: Rp ${r.min.toLocaleString('id-ID')} – Rp ${r.max.toLocaleString('id-ID')} (${r.count} layanan)`).join('\n') +
+            `\n\nTanyakan perangkat yang spesifik (mis. "berapa biaya perbaikan AC?") untuk melihat harga pastinya.`;
+        }
+      }
+    }
+
     // Tagihan & Invoice & Pembayaran
-    else if (/tagihan|invoice|belum\s+dibayar|biaya\s+perbaikan|pembayaran\s+berhasil|riwayat\s+transaksi/i.test(norm)) {
+    // N10: pola "biaya perbaikan" DIHAPUS dari cabang ini — pertanyaan harga
+    // umum ditangani cabang harga di atas; cabang ini hanya untuk tagihan
+    // milik customer sendiri.
+    else if (/tagihan|invoice|belum\s+dibayar|pembayaran\s+berhasil|riwayat\s+transaksi/i.test(norm)) {
       const invoices = await DataService.getCustomerInvoices(custId);
       if (invoices === null) {
         directReply = 'Tagihan Anda tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
@@ -463,15 +566,31 @@ ${userContext.role === 'admin' ? '💡 _Catatan Administrator: Anda dapat mengga
 
     // Komunikasi & Pesan dari Teknisi
     else if (/pesan\s+terbaru\s+dari\s+teknisi|catatan\s+terbaru|pesan\s+teknisi|hubungi\s+teknisi/i.test(norm)) {
-      const messages = await DataService.getCustomerMessages(custId, contextEntities.activeOrderCode || 1);
-      if (messages === null) {
-        directReply = 'Pesan teknisi tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
-      } else if (messages.length === 0) {
-        directReply = `Belum ada pesan chat terbaru dari teknisi untuk pesanan Anda. Anda dapat mengirim pesan langsung melalui fitur **Chat Pesanan** di aplikasi BANTUIN.`;
-      } else {
-        directReply = `💬 **Pesan Koordinasi Teknisi Terbaru:**\n\n` +
-          messages.map((m, i) => `**${i + 1}. ${m.senderName}:**\n"${m.content}"\n_Waktu: ${new Date(m.createdAt).toLocaleString('id-ID')}_\n`).join('\n') +
-          `\nAnda dapat membalas chat langsung melalui panel chat pesanan di aplikasi.`;
+      // N11: jangan hardcode order id 1 bila tidak ada konteks order — pakai
+      // pesanan terbaru customer; bila belum ada pesanan, katakan terus
+      // terang (bukan menampilkan pesan order yang salah).
+      let orderRef: string | null = contextEntities.activeOrderCode || null;
+      if (!orderRef) {
+        const latest = await DataService.getCustomerRepairs(custId, { limit: 1 });
+        if (latest === null) {
+          directReply = 'Pesan teknisi tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+        } else if (latest.length === 0) {
+          directReply = 'Anda belum memiliki pesanan perbaikan, jadi belum ada pesan dari teknisi. Silakan ajukan pesanan terlebih dahulu.';
+        } else {
+          orderRef = latest[0].orderCode;
+        }
+      }
+      if (orderRef) {
+        const messages = await DataService.getCustomerMessages(custId, orderRef);
+        if (messages === null) {
+          directReply = 'Pesan teknisi tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+        } else if (messages.length === 0) {
+          directReply = `Belum ada pesan chat terbaru dari teknisi untuk pesanan #${orderRef}. Anda dapat mengirim pesan langsung melalui fitur **Chat Pesanan** di aplikasi BANTUIN.`;
+        } else {
+          directReply = `💬 **Pesan Koordinasi Teknisi Terbaru (Pesanan #${orderRef}):**\n\n` +
+            messages.map((m, i) => `**${i + 1}. ${m.senderName}:**\n"${m.content}"\n_Waktu: ${new Date(m.createdAt).toLocaleString('id-ID')}_\n`).join('\n') +
+            `\nAnda dapat membalas chat langsung melalui panel chat pesanan di aplikasi.`;
+        }
       }
     }
 
@@ -785,9 +904,17 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
       const overview = await DataService.getAdminOperationalOverview();
       if (overview === null) {
         directReply = 'Ringkasan operasional tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else if (/pesanan\s+hari\s+ini/i.test(norm)) {
+        // N6: jawab dengan hitungan berfilter tanggal — bukan total all-time.
+        directReply = `Pesanan Hari Ini: ${overview.orders.today} pesanan`;
+      } else if (/pesanan\s+bulan\s+ini/i.test(norm)) {
+        // N6: jawab dengan hitungan bulan kalender berjalan.
+        directReply = `Pesanan Bulan Ini: ${overview.orders.thisMonth} pesanan`;
       } else {
         directReply = `📊 **Ringkasan Operasional & Total Pesanan BANTUIN (Admin Dashboard):**
 - **Total Seluruh Pesanan:** **${overview.orders.total} pesanan**
+- **Pesanan Hari Ini:** **${overview.orders.today} pesanan**
+- **Pesanan Bulan Ini:** **${overview.orders.thisMonth} pesanan**
 - **Menunggu Penugasan (Submitted):** **${overview.orders.submitted}**
 - **Penugasan Diterima (Assigned):** **${overview.orders.assigned}**
 - **Terjadwal Kunjungan (Scheduled):** **${overview.orders.scheduled}**
@@ -949,14 +1076,27 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
       ((norm.includes('telepon') || norm.includes('phone') || norm.includes('no hp') || norm.includes('nomor') || norm.includes('email') || norm.includes('uuid')) &&
         Boolean(contextEntities.activePhoneNumber || contextEntities.activeEmail || contextEntities.activeUserUuid || /\d{8,15}/.test(norm)))
     ) {
+      // N9: strip awalan perintah + kata peran + kata pengisi secara seragam
+      // sebelum dipakai sebagai searchTerm. Pola lama hanya men-strip "siapa
+      // nama pengguna" dan "cari <peran tanpa pelanggan>" — "cari pelanggan
+      // Budi" menjadi searchTerm "cari pelanggan Budi" (dicari harfiah,
+      // selalu tidak ketemu) dan "data customer Budi" tidak di-strip sama
+      // sekali. Satu regex berulang men-strip semua awalan tersebut.
+      const strippedName = userMessage
+        .replace(/^\s*(?:siapa\s+(?:saja\s+|aja\s+)?|cari\s+|data\s+|tampilkan\s+|tunjukkan\s+|lihat\s+|nama\s+|pengguna\s+|user\s+|customer\s+|pelanggan\s+|teknisi\s+|pemilik\s+|akun\s+|dengan\s+|nomor\s+telepon\s+|email\s+|uuid\s+|yang\s+|bernama\s+)+/i, '')
+        .replace(/[?!.]+$/g, '')
+        .trim();
       const searchTerm = contextEntities.activePhoneNumber ||
         contextEntities.activeEmail ||
         contextEntities.activeUserUuid ||
         norm.match(/\b\d{8,15}\b/)?.[0] ||
-        userMessage.replace(/siapa\s+nama\s+pengguna\s+(?:dengan\s+)?(?:nomor\s+telepon|email|uuid|nama)?/i, '').replace(/cari\s+(?:pengguna|user|customer|teknisi)/i, '').trim();
+        strippedName;
 
-      const matchedUsers = await DataService.searchDatabaseUsers(searchTerm, { limit: 5 });
-      if (matchedUsers.length === 0) {
+      if (!searchTerm) {
+        directReply = 'Sebutkan nama, nomor telepon, email, atau UUID pengguna yang ingin dicari (mis. "cari pelanggan Budi").';
+      } else {
+        const matchedUsers = await DataService.searchDatabaseUsers(searchTerm, { limit: 5 });
+        if (matchedUsers.length === 0) {
         directReply = `🔍 **Hasil Pencarian Basis Data Pengguna:**\n\nBerdasarkan pencarian pada sistem BANTUIN, data pengguna dengan kata kunci \`${searchTerm}\` **tidak ditemukan** dalam database pengguna aktif maupun arsip.\n\nPastikan nomor telepon, alamat email, atau UUID yang dimasukkan sudah benar dan terdaftar di BANTUIN.`;
       } else {
         directReply = `👤 **Hasil Pencarian Basis Data Pengguna (Admin Console):**\n\n` +
@@ -975,6 +1115,7 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
 - **Terdaftar Pada:** ${new Date(u.registeredAt).toLocaleDateString('id-ID', { dateStyle: 'long' })}`;
           }).join('\n\n') +
           `\n\n💡 _Catatan Admin: Untuk mengelola status akun, verifikasi, atau riwayat transaksi pengguna ini, silakan buka menu **Manajemen Pengguna** di Admin Console._`;
+        }
       }
     }
 
@@ -994,7 +1135,14 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
 - **Teknisi Bertugas:** **${o.technicianName}** ${o.technicianRating ? `(⭐ ${o.technicianRating.toFixed(1)})` : ''}
 - **Tagihan Invoice:** ${o.invoiceNumber ? `\`${o.invoiceNumber}\` - Rp ${o.totalAmount?.toLocaleString('id-ID')} [${o.invoiceStatus.toUpperCase()}]` : 'Belum Diterbitkan'}
 - **Waktu Diajukan:** ${new Date(o.createdAt).toLocaleString('id-ID')}`).join('\n\n');
+        } else {
+          // N13: jawab eksplisit bila tidak ditemukan — jangan diam lalu
+          // melempar ke AI yang tidak punya data order tersebut (AI dapat
+          // berhalusinasi menjawab seolah order itu ada).
+          directReply = `Pesanan dengan kode \`${orderSearchTerm}\` tidak ditemukan di database BANTUIN. Pastikan kode pesanan sudah benar (format: BAN-YYYYMMDD-XXXXX).`;
         }
+      } else {
+        directReply = 'Sebutkan kode pesanan yang ingin dicari (mis. "detail pesanan BAN-20261113-00001").';
       }
     }
 
@@ -1012,7 +1160,12 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
 - **Total Pembayaran:** **Rp ${inv.totalAmount.toLocaleString('id-ID')}**
 - **Status Tagihan:** **${inv.status.toUpperCase()}**
 - **Jatuh Tempo:** ${new Date(inv.dueDate).toLocaleDateString('id-ID')}`).join('\n\n');
+        } else {
+          // N13: jawab eksplisit bila tidak ditemukan (lihat D#13).
+          directReply = `Invoice dengan nomor \`${invSearchTerm}\` tidak ditemukan di database BANTUIN. Pastikan nomor invoice sudah benar (format: INV-YYYYMMDD-XXXXX).`;
         }
+      } else {
+        directReply = 'Sebutkan nomor invoice yang ingin dicari (mis. "cek invoice INV-20261113-00001").';
       }
     }
 

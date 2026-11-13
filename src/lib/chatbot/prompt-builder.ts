@@ -102,7 +102,7 @@ PRINSIP KERJA UTAMA:
 - Hindari template salam pembuka yang kaku atau berulang-ulang ketika pengguna sedang mencari data faktual.
 - Gunakan bullet points atau daftar bernomor jika menyajikan rincian data.
 - Gunakan format tabel Markdown jika membandingkan metrik data atau rekapitulasi banyak kolom.
-- Selalu cantumkan kode pesanan (#BAN-...), tanggal jadwal, atau nominal Rupiah (Rp ...) sesuai data riil database.
+- Cantumkan kode pesanan (#BAN-...), tanggal jadwal, atau nominal Rupiah (Rp ...) HANYA bila relevan dengan yang ditanyakan pengguna dan tidak melanggar aturan LUGAS di atas — jangan pernah menambahkannya pada jawaban satu angka atau daftar nama yang tidak memintanya.
 - Bila percakapan menghasilkan diagnosis kerusakan unit, sertakan blok JSON \`\`\`json { "diagnosisCard": { ... } } \`\`\` di bagian akhir respons.`;
 
   return [

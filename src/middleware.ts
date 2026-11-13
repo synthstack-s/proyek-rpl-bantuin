@@ -1,10 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
+// T5: middleware (Edge runtime) WAJIB mengimpor dari auth-edge, BUKAN
+// @/lib/auth — auth.ts menarik mysql2 (via token-revocation) dan akan
+// mematahkan build produksi. Middleware hanya memverifikasi tanda tangan
+// JWT; pencabutan token ditegakkan di route handler/server component
+// melalui getAdminSession/getUserSession.
 import {
   verifyAdminToken,
   verifyUserToken,
   ADMIN_COOKIE_NAME,
   USER_COOKIE_NAME,
-} from '@/lib/auth';
+} from '@/lib/auth-edge';
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;

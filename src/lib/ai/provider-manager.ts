@@ -192,6 +192,71 @@ export class AIProviderManager {
   }
 
   /**
+   * M14 — Retry untuk error transient (menghormati `retryLimit` per provider).
+   *
+   * Sebelum perbaikan ini `retryLimit` adalah config mati: tersimpan di DB
+   * dan bisa diubah lewat slider "Retries" di UI, tetapi tidak pernah dibaca
+   * logika apa pun — setiap chat hanya mencoba sekali. Sekarang:
+   * - Hanya error dengan `isRetryable = true` yang di-retry (429, 5xx,
+   *   timeout, network error per M5). Error non-retryable (401/402/403/404,
+   *   invalid_endpoint) langsung dilempar tanpa retry.
+   * - `retryLimit` = JUMLAH MAKSIMUM PERCOBAAN total (1 = tanpa retry),
+   *   dijepit 1..6, default 3 bila tidak diset/tidak valid.
+   * - Backoff eksponensial antar percobaan: 500ms -> 1s -> 2s, dibatasi 4s.
+   * - Setiap percobaan yang gagal dicatat ke log (provider, percobaan
+   *   ke-N, status error, jeda berikutnya).
+   * - Setelah retry habis, error terakhir (sudah dinormalisasi) dilempar ke
+   *   pemanggil — pemanggil lalu menjalankan fallback seperti biasa
+   *   (generateChatCompletion) atau melempar error gabungan (executeFallback).
+   *
+   * Desain: retry diimplementasikan DI MANAGER (bukan di adapter) agar satu
+   * implementasi melayani semua provider (Gemini, Groq, kustom) dan agar
+   * circuit breaker tetap dicatat SEKALI per request oleh pemanggil — satu
+   * request yang me-retry tidak boleh langsung membuka breaker (threshold 3).
+   * `testConnection` sengaja TIDAK memakai retry: tes koneksi harus
+   * mencerminkan satu probe, bukan ketahanan hasil retry.
+   */
+  private async callWithRetry(
+    adapter: AIProviderAdapter,
+    request: AIChatRequest,
+    config: ProviderRuntimeConfig
+  ): Promise<AIChatResponse> {
+    const rawLimit = Number(config.retryLimit);
+    const maxAttempts = Number.isFinite(rawLimit)
+      ? Math.max(1, Math.min(6, Math.floor(rawLimit)))
+      : 3;
+    let lastError: NormalizedAIError | null = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await adapter.generateChatCompletion(request, config);
+      } catch (err: any) {
+        const normalized: NormalizedAIError = err.sanitizedMessage
+          ? err
+          : adapter.normalizeError(err, config.apiKey);
+        lastError = normalized;
+
+        const canRetry = normalized.isRetryable && attempt < maxAttempts;
+        if (!canRetry) {
+          // Lempar error yang sudah dinormalisasi agar pemanggil tidak perlu
+          // menormalisasi ulang (dan isFallbackEligible tidak hilang).
+          throw normalized;
+        }
+
+        const delayMs = Math.min(500 * Math.pow(2, attempt - 1), 4000);
+        console.warn(
+          `[AI Retry] ${config.provider}: percobaan ${attempt}/${maxAttempts} gagal (${normalized.status}: ${normalized.sanitizedMessage}). Retry dalam ${delayMs} ms.`
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+
+    // Tidak dapat dicapai secara normal (loop selalu return/throw), tetapi
+    // TypeScript membutuhkan throw eksplisit di sini.
+    throw lastError || new Error(`[${config.provider}] Gagal setelah ${maxAttempts} percobaan.`);
+  }
+
+  /**
    * GATEWAY UTAMA CHATBOT: Menghasilkan Chat Completion dengan Automatic Fallback & Circuit Breaker
    */
   public async generateChatCompletion(request: AIChatRequest): Promise<AIChatResponse> {
@@ -239,8 +304,9 @@ export class AIProviderManager {
     }
 
     try {
-      // 3. Jalankan pemanggilan provider utama
-      const response = await adapter.generateChatCompletion(request, activeConfig);
+      // 3. Jalankan pemanggilan provider utama (M14: dengan retry transient —
+      // lihat callWithRetry; breaker dicatat sekali di catch di bawah).
+      const response = await this.callWithRetry(adapter, request, activeConfig);
 
       // Reset circuit breaker jika berhasil
       this.recordCircuitSuccess(primaryProvider);
@@ -337,7 +403,9 @@ export class AIProviderManager {
     console.info(`[AI Fallback Engine] Mengalihkan request ke ${fallbackConfig.name} (Penyebab: ${causeReason})`);
 
     try {
-      const response = await fallbackAdapter.generateChatCompletion(request, fallbackConfig);
+      // M14: panggilan cadangan juga memakai retry transient (dengan
+      // retryLimit milik provider cadangan).
+      const response = await this.callWithRetry(fallbackAdapter, request, fallbackConfig);
 
       // M10: sukses fallback me-reset breaker cadangan.
       this.recordCircuitSuccess(fallbackProvider);
