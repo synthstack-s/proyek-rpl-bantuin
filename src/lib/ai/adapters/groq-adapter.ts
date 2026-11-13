@@ -240,23 +240,26 @@ export class GroqProviderAdapter implements AIProviderAdapter {
       }
       const errorDetail = parsedErr?.error?.message || `HTTP ${chatRes.status}: ${chatRes.statusText}`;
 
-      // Kasus Khusus: Jika autentikasi GET /models berhasil (200), namun /chat/completions mengembalikan 402 (Insufficient Balance)
-      // Ini berarti API Key dan Endpoint 100% valid dan terhubung, hanya kuota/saldo akun pihak ketiga yang 0.
+      // Saldo/kuota habis (402): API key memang valid, tetapi provider TIDAK BISA
+      // melayani chat sama sekali. JANGAN laporkan sebagai 'success' — status
+      // 'connected' yang menutupi saldo 0 membuat admin mengira provider sehat
+      // padahal setiap percakapan gagal. Laporkan sebagai rate_limit_exceeded
+      // agar tersimpan sebagai 'connection_error' dan UI menampilkan badge
+      // "Saldo Habis (402)".
       if (
         chatRes.status === 402 ||
         errorDetail.toLowerCase().includes('insufficient balance') ||
-        errorDetail.toLowerCase().includes('insufficient_quota') ||
-        errorDetail.toLowerCase().includes('quota')
+        errorDetail.toLowerCase().includes('insufficient_quota')
       ) {
         return {
           provider: this.providerName,
           endpoint: endpointToTest,
           modelTested: modelToTest,
-          status: 'success',
-          httpStatusCode: 200,
+          status: 'rate_limit_exceeded',
+          httpStatusCode: 402,
           responseTimeMs: latencyMs,
           testedAt: new Date().toISOString(),
-          errorMessage: 'Koneksi & API Key Berhasil Diverifikasi (Catatan: Saldo akun AI saat ini 0, silakan top up saldo di console provider untuk mulai percakapan).',
+          errorMessage: 'Saldo akun AI habis (402 Insufficient Balance). API key valid, tetapi provider tidak dapat melayani percakapan sampai saldo diisi ulang di console provider.',
         };
       }
 
@@ -510,20 +513,26 @@ export class GroqProviderAdapter implements AIProviderAdapter {
    * Mengambil daftar model yang tersedia melalui endpoint /models
    */
   async fetchAvailableModels(config: ProviderRuntimeConfig): Promise<AIModelInfo[]> {
-    const fallbackGroqModels: AIModelInfo[] = [
-      { id: 'openai/gpt-oss-120b', name: 'OpenAI GPT-OSS 120B', description: 'Model penalaran performa tinggi untuk Chatbot+ BANTUIN', isDefault: true },
-      { id: 'openai/gpt-oss-20b', name: 'OpenAI GPT-OSS 20B', description: 'Model inferensi cepat dan responsif' },
-      { id: 'qwen/qwen3.8-27b', name: 'Qwen 3.8 27B', description: 'Model multibahasa cerdas dan efisien' },
-      { id: 'llama-3.3-70b-versatile', name: 'Llama 3.3 70B Versatile', description: 'Model alternatif penalaran' },
-    ];
+    // Daftar model fallback hanya berlaku untuk Groq. Provider kustom TIDAK BOLEH
+    // menerima daftar model Groq — model yang salah membuat admin memilih model
+    // yang tidak ada di provider tersebut, lalu chat gagal 404 ("tidak terkoneksi").
+    const fallbackModels: AIModelInfo[] =
+      this.providerName === 'groq'
+        ? [
+            { id: 'openai/gpt-oss-120b', name: 'OpenAI GPT-OSS 120B', description: 'Model penalaran performa tinggi untuk Chatbot+ BANTUIN', isDefault: true },
+            { id: 'openai/gpt-oss-20b', name: 'OpenAI GPT-OSS 20B', description: 'Model inferensi cepat dan responsif' },
+            { id: 'qwen/qwen3.8-27b', name: 'Qwen 3.8 27B', description: 'Model multibahasa cerdas dan efisien' },
+            { id: 'llama-3.3-70b-versatile', name: 'Llama 3.3 70B Versatile', description: 'Model alternatif penalaran' },
+          ]
+        : [];
 
     if (!config.apiKey || !config.apiKey.trim()) {
-      return fallbackGroqModels;
+      return fallbackModels;
     }
 
     try {
       const endpointUrl = config.apiEndpoint || (this.providerName === 'groq' ? 'https://api.groq.com/openai/v1' : '');
-      if (!endpointUrl) return fallbackGroqModels;
+      if (!endpointUrl) return fallbackModels;
       const endpointValidation = await validateAndPinEndpoint(endpointUrl, this.providerName === 'groq' ? 'groq' : undefined);
       const agent = createPinnedHttpsAgent(endpointValidation.hostname, endpointValidation.pinnedIp);
       const url = `${endpointValidation.normalizedUrl}/models`;
@@ -538,7 +547,7 @@ export class GroqProviderAdapter implements AIProviderAdapter {
       });
 
       if (!res.ok) {
-        return fallbackGroqModels;
+        return fallbackModels;
       }
 
       const data = await res.json();
@@ -552,13 +561,13 @@ export class GroqProviderAdapter implements AIProviderAdapter {
             isDefault: m.id === (config.selectedModel || 'llama-3.3-70b-versatile'),
           }));
 
-        return models.length > 0 ? models : fallbackGroqModels;
+        return models.length > 0 ? models : fallbackModels;
       }
     } catch {
       // Fallback
     }
 
-    return fallbackGroqModels;
+    return fallbackModels;
   }
 
   /**
@@ -622,7 +631,7 @@ export class GroqProviderAdapter implements AIProviderAdapter {
     }
 
     return {
-      provider: 'groq',
+      provider: this.providerName,
       status,
       httpStatusCode,
       isRetryable,
