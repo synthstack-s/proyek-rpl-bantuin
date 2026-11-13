@@ -714,7 +714,13 @@ export async function getTechnicianAssignedTasks(
   const limit = Math.min(20, Math.max(1, options.limit || 10));
   const params: any[] = [userId];
 
-  let statusFilter = "AND ta.status IN ('offered', 'accepted', 'in_repair')";
+  // R7 — 'in_repair' BUKAN status technician_assignments (itu status
+  // repair_requests.current_status) dan tidak pernah cocok dengan baris
+  // apa pun. ENUM penugasan: offered, accepted, rejected, reassigned,
+  // completed, cancelled. Tugas aktif teknisi = offered + accepted
+  // (tugas berjalan tetap berstatus penugasan 'accepted' selama pesanan
+  // berstatus in_repair — status pesanan dibaca terpisah di orderStatus).
+  let statusFilter = "AND ta.status IN ('offered', 'accepted')";
   if (options.status) {
     statusFilter = 'AND ta.status = ?';
     params.push(options.status);
@@ -1201,7 +1207,12 @@ export async function getAdminRecentAuditLogs(limitCount = 5) {
         entityName: r.entity_name,
         entityId: r.entity_id,
         adminEmail: r.admin_email,
-        ipAddress: r.ip_address || '127.0.0.1',
+        // S6/F21 (sisi baca) — IP NULL berarti "tidak diketahui" (aksi dari
+        // jalur tanpa konteks request); jangan samarkan sebagai '127.0.0.1'
+        // karena itu menyesatkan forensik (seolah aksi berasal dari server
+        // sendiri). Sisi tulis sudah mencatat IP klien asli (lihat
+        // action-service.ts executeAdminCreateOperationalSnapshot).
+        ipAddress: r.ip_address || null,
         createdAt: r.created_at,
       }));
     }
@@ -1213,12 +1224,39 @@ export async function getAdminRecentAuditLogs(limitCount = 5) {
   }
 }
 
+/**
+ * R3 — Allowlist key `system_settings` yang boleh masuk konteks chatbot
+ * (dan dengan demikian berpotensi sampai ke provider AI eksternal maupun
+ * jawaban chat admin D#9). Daftar ini sama dengan seluruh key seed saat ini
+ * (lihat seed.sql): biaya platform, radius dispatch, timeout penugasan,
+ * masa garansi, kuota AI, nama model, dan eskalasi keluhan — semuanya
+ * nilai operasional publik-internal yang aman. Key APA PUN yang ditambahkan
+ * di masa depan (termasuk yang sensitif, mis. token/secret layanan) TIDAK
+ * akan keluar lewat fungsi ini sampai seseorang secara sadar menambahkannya
+ * ke allowlist ini. Jangan pernah SELECT * pengaturan ke prompt.
+ */
+export const CHATBOT_SAFE_SYSTEM_SETTING_KEYS: readonly string[] = [
+  'platform_fee_fixed',
+  'platform_fee_percent',
+  'max_search_radius_km',
+  'technician_assignment_timeout_min',
+  'warranty_period_days',
+  'ai_daily_free_quota',
+  'ai_model_name',
+  'complaint_auto_escalate_hours',
+];
+
 export async function getAdminSystemSettings() {
   try {
+    // R3 — filter di SQL (bukan di JS): key di luar allowlist tidak pernah
+    // meninggalkan database. Placeholder diparameterisasi per key.
+    const placeholders = CHATBOT_SAFE_SYSTEM_SETTING_KEYS.map(() => '?').join(', ');
     const rows = await query<any[]>(
       `SELECT setting_key, setting_value, value_type, group_name, description
        FROM system_settings
-       ORDER BY group_name, setting_key ASC`
+       WHERE setting_key IN (${placeholders})
+       ORDER BY group_name, setting_key ASC`,
+      [...CHATBOT_SAFE_SYSTEM_SETTING_KEYS]
     );
     if (rows && rows.length > 0) {
       return rows.map(r => ({

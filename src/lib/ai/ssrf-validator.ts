@@ -26,16 +26,12 @@ export const OFFICIAL_PROVIDER_HOSTNAMES: Record<string, string[]> = {
   mistral: ['api.mistral.ai'],
 };
 
-// Pemetaan IP publik fallback untuk host AI populer dalam environment sandbox/offline
-export const KNOWN_AI_PROVIDER_HOSTS: Record<string, string> = {
-  'generativelanguage.googleapis.com': '142.250.190.42',
-  'api.groq.com': '104.18.2.161',
-  'api.deepseek.com': '104.18.0.1',
-  'api.openai.com': '104.18.7.192',
-  'openrouter.ai': '104.18.24.23',
-  'api.mistral.ai': '104.18.10.15',
-  'api.anthropic.com': '104.18.3.1',
-};
+// S8b: TIDAK ADA lagi pemetaan IP fallback. Versi sebelumnya memakai
+// KNOWN_AI_PROVIDER_HOSTS / IP generik 104.18.0.1 saat DNS gagal sehingga
+// validasi lolos dengan IP FABRIKASI (fail-open). Sekarang kegagalan DNS
+// selalu melempar SSRFValidationError (fail-closed) — lihat
+// validateAndPinEndpoint. Konstanta itu dihapus total (tidak ada pengimpor
+// lain di repo — hanya dipakai di dalam file ini).
 
 export class SSRFValidationError extends Error {
   constructor(message: string, public readonly code: string = 'ERR_SSRF_VALIDATION') {
@@ -215,6 +211,73 @@ export interface ValidatedEndpointResult {
 }
 
 /**
+ * S8a — Cache hasil validasi endpoint + hasil resolusi DNS, TTL 5 menit.
+ *
+ * Sebelumnya setiap request chat memanggil `validateAndPinEndpoint` yang
+ * selalu melakukan lookup DNS (latensi tambahan; kegagalan DNS transien =
+ * chatbot down). Sekarang:
+ * - Hasil validasi penuh di-cache per endpoint ternormalisasi (origin +
+ *   path — BUKAN per hostname saja, karena dua konfigurasi bisa berbagi
+ *   hostname dengan path berbeda dan `normalizedUrl`-nya tidak boleh
+ *   tertukar).
+ * - Hasil resolusi DNS di-cache per hostname, sehingga endpoint berbeda
+ *   yang berbagi hostname tetap tidak mengulang lookup.
+ * - Hanya hasil SUKSES yang di-cache. Kegagalan (termasuk DNS gagal) TIDAK
+ *   PERNAH di-cache sebagai valid — setiap percobaan berikutnya melakukan
+ *   validasi ulang penuh (fail-closed S8b tetap berlaku).
+ *
+ * S8c — cache inilah tempat IP yang di-pin DIPERTAHANKAN (bukan dibuang):
+ * `saveProviderConfig` memanggil `validateAndPinEndpoint` saat menyimpan,
+ * dan hasil itu (termasuk `pinnedIp`) tersimpan di sini; request chat /
+ * tes / daftar model berikutnya dalam jendela TTL memakai pin yang sama
+ * lewat `createPinnedHttpsAgent`, tanpa lookup DNS ulang. Setelah TTL
+ * habis, pin di-validasi ulang (DNS bisa berubah — pin abadi justru
+ * berbahaya). Pin sengaja TIDAK dipersist ke database: pin adalah fakta
+ * DNS sesaat, dan cache proses ini sudah cukup karena adapter dan
+ * repository berjalan dalam proses server yang sama.
+ */
+export const ENDPOINT_VALIDATION_CACHE_TTL_MS = 5 * 60 * 1000;
+
+interface CachedValidation {
+  result: ValidatedEndpointResult;
+  expiresAt: number;
+}
+
+interface CachedDnsResolution {
+  addresses: dns.LookupAddress[];
+  expiresAt: number;
+}
+
+const endpointValidationCache = new Map<string, CachedValidation>();
+const dnsResolutionCache = new Map<string, CachedDnsResolution>();
+
+/**
+ * Mengosongkan cache validasi endpoint + DNS (hook pemeliharaan/pengujian).
+ * Pemakaian normal tidak perlu memanggil ini — entri kedaluwarsa sendiri
+ * setelah TTL.
+ */
+export function clearEndpointValidationCache(): void {
+  endpointValidationCache.clear();
+  dnsResolutionCache.clear();
+}
+
+async function resolveHostname(hostname: string): Promise<dns.LookupAddress[]> {
+  const now = Date.now();
+  const cached = dnsResolutionCache.get(hostname);
+  if (cached && cached.expiresAt > now) {
+    return cached.addresses;
+  }
+  // S8b: kegagalan DNS dilempar apa adanya (fail-closed) — TIDAK ADA
+  // fallback IP fabrikasi, dan kegagalan TIDAK di-cache.
+  const addresses = await dns.promises.lookup(hostname, { all: true });
+  dnsResolutionCache.set(hostname, {
+    addresses,
+    expiresAt: now + ENDPOINT_VALIDATION_CACHE_TTL_MS,
+  });
+  return addresses;
+}
+
+/**
  * Melakukan validasi komprehensif pada endpoint URL:
  * - Wajib HTTPS
  * - Resolusi DNS seluruh record IP
@@ -234,6 +297,20 @@ export async function validateAndPinEndpoint(
     parsed = new URL(endpointUrl.trim());
   } catch {
     throw new SSRFValidationError('Format URL endpoint tidak valid.', 'ERR_INVALID_URL');
+  }
+
+  // S8a: kembalikan hasil validasi yang masih segar (TTL 5 menit) tanpa
+  // lookup DNS ulang. Kunci adalah URL ternormalisasi (origin + path):
+  // entri cache hanya pernah dibuat untuk URL yang lolos SEMUA pemeriksaan
+  // di bawah, jadi mengembalikan cache berarti mengembalikan putusan yang
+  // sudah tervalidasi penuh — termasuk pinnedIp-nya (S8c).
+  const normalizedUrl = parsed.origin + parsed.pathname.replace(/\/+$/, '');
+  const cachedValidation = endpointValidationCache.get(normalizedUrl);
+  if (cachedValidation && cachedValidation.expiresAt > Date.now()) {
+    return cachedValidation.result;
+  }
+  if (cachedValidation) {
+    endpointValidationCache.delete(normalizedUrl);
   }
 
   // 1. Wajib Protokol HTTPS
@@ -262,36 +339,19 @@ export async function validateAndPinEndpoint(
   const officialHosts = expectedProvider ? (OFFICIAL_PROVIDER_HOSTNAMES[expectedProvider] || []) : [];
   const isOfficial = officialHosts.includes(hostname);
 
-  // 4. DNS Resolution Validation (Ambil seluruh alamat IPv4 dan IPv6)
-  let records: dns.LookupAddress[] = [];
+  // 4. DNS Resolution Validation (Ambil seluruh alamat IPv4 dan IPv6).
+  // S8b (fail-closed): kegagalan DNS MENOLAK endpoint — tidak ada lagi IP
+  // fabrikasi dari pemetaan hardcoded. S8a: resolusi sukses di-cache per
+  // hostname (TTL 5 menit) di dalam resolveHostname; kegagalan tidak
+  // di-cache sehingga percobaan berikutnya memvalidasi ulang.
+  let records: dns.LookupAddress[];
   try {
-    records = await dns.promises.lookup(hostname, { all: true });
+    records = await resolveHostname(hostname);
   } catch (err: any) {
-    // Jika berada dalam environment terisolasi/sandbox tanpa DNS outbound,
-    // gunakan pemetaan IP publik terdaftar atau fallback aman untuk domain publik standar
-    const knownPublicIp = KNOWN_AI_PROVIDER_HOSTS[hostname];
-    if (knownPublicIp || isOfficial) {
-      records = [
-        {
-          address:
-            knownPublicIp ||
-            (hostname.includes('googleapis') ? '142.250.190.42' : '104.18.2.161'),
-          family: 4,
-        },
-      ];
-    } else if (
-      !hostname.includes('localhost') &&
-      !hostname.endsWith('.internal') &&
-      !hostname.endsWith('.corp') &&
-      /\.[a-z]{2,}$/i.test(hostname)
-    ) {
-      records = [{ address: '104.18.0.1', family: 4 }];
-    } else {
-      throw new SSRFValidationError(
-        `Gagal melakukan resolusi DNS untuk host '${hostname}': ${err.message}`,
-        'ERR_DNS_FAILED'
-      );
-    }
+    throw new SSRFValidationError(
+      `Gagal melakukan resolusi DNS untuk host '${hostname}': ${err.message}. Endpoint ditolak (fail-closed) — periksa koneksi DNS server dan ejaan hostname.`,
+      'ERR_DNS_FAILED'
+    );
   }
 
   if (!records || records.length === 0) {
@@ -313,15 +373,24 @@ export async function validateAndPinEndpoint(
   // Pilih IP publik pertama untuk socket pinning
   const pinnedIp = resolvedIps[0];
 
-  return {
+  const result: ValidatedEndpointResult = {
     isValid: true,
-    normalizedUrl: parsed.origin + parsed.pathname.replace(/\/+$/, ''),
+    normalizedUrl,
     hostname,
     port,
     resolvedIps,
     pinnedIp,
     isOfficialHostname: isOfficial,
   };
+
+  // S8a/S8c: simpan hasil validasi (termasuk pinnedIp) agar request
+  // berikutnya memakai pin yang sama tanpa lookup DNS ulang.
+  endpointValidationCache.set(normalizedUrl, {
+    result,
+    expiresAt: Date.now() + ENDPOINT_VALIDATION_CACHE_TTL_MS,
+  });
+
+  return result;
 }
 
 /**

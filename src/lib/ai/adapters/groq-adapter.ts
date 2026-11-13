@@ -34,6 +34,38 @@ interface PinnedHttpResponse {
   json: () => Promise<any>;
 }
 
+/**
+ * S8g: batas maksimum ukuran body respons provider (10 MB). Tanpa batas,
+ * chunk respons diakumulasi tanpa henti sebelum Buffer.concat — satu
+ * respons raksasa (atau server jahat) bisa menghabiskan memori proses.
+ */
+export const MAX_PROVIDER_RESPONSE_BYTES = 10 * 1024 * 1024;
+
+/**
+ * S8e: ekstrak tool calls format OpenAI ke bentuk universal. Dipakai
+ * BERSAMA oleh jalur normal dan jalur auto-heal — sebelumnya jalur heal
+ * mengembalikan `toolCalls: undefined` sehingga tool call yang diminta
+ * model hasil heal dibuang diam-diam (model "memanggil tool" tetapi
+ * tidak ada yang dieksekusi dan tidak ada error).
+ */
+function extractOpenAIToolCalls(message: any): UniversalToolCall[] | undefined {
+  const rawCalls = message?.tool_calls;
+  if (!Array.isArray(rawCalls) || rawCalls.length === 0) return undefined;
+  return rawCalls.map((tc: any) => {
+    let args: Record<string, any> = {};
+    try {
+      args = typeof tc.function.arguments === 'string' ? JSON.parse(tc.function.arguments) : tc.function.arguments;
+    } catch {
+      args = {};
+    }
+    return {
+      id: tc.id,
+      name: tc.function.name,
+      arguments: args,
+    };
+  });
+}
+
 function makeHttpsRequest(
   urlStr: string,
   options: {
@@ -59,8 +91,31 @@ function makeHttpsRequest(
       },
       (res) => {
         const chunks: Buffer[] = [];
-        res.on('data', (c) => chunks.push(c));
+        let totalBytes = 0;
+        let aborted = false;
+        const failOnce = (err: Error) => {
+          if (aborted) return;
+          aborted = true;
+          reject(err);
+        };
+        res.on('data', (c: Buffer) => {
+          if (aborted) return;
+          totalBytes += c.length;
+          // S8g: batalkan request begitu akumulasi melewati batas — jangan
+          // menunggu seluruh body selesai diunduh.
+          if (totalBytes > MAX_PROVIDER_RESPONSE_BYTES) {
+            failOnce(
+              new Error(
+                `Respons provider melebihi batas ukuran maksimum ${MAX_PROVIDER_RESPONSE_BYTES / 1024 / 1024} MB (${totalBytes} byte diterima) — request dibatalkan untuk melindungi memori server.`
+              )
+            );
+            req.destroy();
+            return;
+          }
+          chunks.push(c);
+        });
         res.on('end', () => {
+          if (aborted) return;
           const bodyText = Buffer.concat(chunks).toString('utf8');
           const status = res.statusCode || 200;
           resolve({
@@ -68,9 +123,21 @@ function makeHttpsRequest(
             ok: status >= 200 && status < 300,
             statusText: res.statusMessage || '',
             text: async () => bodyText,
-            json: async () => JSON.parse(bodyText),
+            // S8e: JSON.parse atas respons provider WAJIB berpenjaga —
+            // SyntaxError mentah ("Unexpected token...") tidak menjelaskan
+            // apa-apa; lempar pesan yang menyebut provider-nya.
+            json: async () => {
+              try {
+                return JSON.parse(bodyText);
+              } catch {
+                throw new Error(
+                  `Respons provider bukan JSON yang valid (HTTP ${status}) — tidak dapat membaca body respons.`
+                );
+              }
+            },
           });
         });
+        res.on('error', (err) => failOnce(err));
       }
     );
 
@@ -509,12 +576,25 @@ export class GroqProviderAdapter implements AIProviderAdapter {
 
           if (healRes.ok) {
             const healText = await healRes.text();
-            const healData = JSON.parse(healText);
+            // S8e: JSON.parse atas respons heal WAJIB berpenjaga — bila
+            // provider mengembalikan 200 non-JSON, lempar error yang jelas
+            // (bukan SyntaxError mentah yang menjadi unknown_error).
+            let healData: any;
+            try {
+              healData = JSON.parse(healText);
+            } catch {
+              throw new Error(
+                'Respons auto-heal provider bukan JSON yang valid — tidak dapat membaca hasil percobaan model pengganti.'
+              );
+            }
             const healChoice = healData.choices?.[0];
             const healMsg = healChoice?.message;
             return {
               content: healMsg?.content || '',
-              toolCalls: undefined,
+              // S8e: JANGAN buang tool calls hasil heal — ekstrak dengan
+              // helper yang sama seperti jalur normal, agar tool yang
+              // diminta model pengganti tetap dieksekusi.
+              toolCalls: extractOpenAIToolCalls(healMsg),
               usage: {
                 promptTokens: Number(healData.usage?.prompt_tokens || 0),
                 completionTokens: Number(healData.usage?.completion_tokens || 0),
@@ -535,27 +615,24 @@ export class GroqProviderAdapter implements AIProviderAdapter {
         }, config.apiKey);
       }
 
-      const data = JSON.parse(resText);
+      // S8e: JSON.parse atas respons chat WAJIB berpenjaga — provider yang
+      // mengembalikan 200 non-JSON sebelumnya menghasilkan SyntaxError
+      // mentah (unknown_error). Lempar pesan yang jelas; catch di bawah
+      // menormalkannya.
+      let data: any;
+      try {
+        data = JSON.parse(resText);
+      } catch {
+        throw new Error(
+          'Respons provider bukan JSON yang valid — tidak dapat membaca hasil chat completion.'
+        );
+      }
       const choice = data.choices?.[0];
       const message = choice?.message;
 
-      // Ekstrak function/tool calling jika ada
-      let normalizedToolCalls: UniversalToolCall[] | undefined = undefined;
-      if (message?.tool_calls && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
-        normalizedToolCalls = message.tool_calls.map((tc: any) => {
-          let args: Record<string, any> = {};
-          try {
-            args = typeof tc.function.arguments === 'string' ? JSON.parse(tc.function.arguments) : tc.function.arguments;
-          } catch {
-            args = {};
-          }
-          return {
-            id: tc.id,
-            name: tc.function.name,
-            arguments: args,
-          };
-        });
-      }
+      // Ekstrak function/tool calling jika ada (helper yang sama dipakai
+      // jalur auto-heal — S8e).
+      const normalizedToolCalls = extractOpenAIToolCalls(message);
 
       // Normalisasi Token Usage
       const promptTokens = Number(data.usage?.prompt_tokens || 0);
