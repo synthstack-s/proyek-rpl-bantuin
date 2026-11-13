@@ -404,6 +404,23 @@ export async function saveProviderConfig(
     console.warn(`[AI Repository] DB simpan gagal, menggunakan in-memory state: ${err.message}`);
   }
 
+  // Bump version global agar AIProviderManager mendeteksi perubahan konfigurasi
+  // dan me-refresh cachedConfigs. Tanpa ini, manager terus memakai API key lama
+  // dari cache (syncWithDatabase hanya me-refresh jika version berubah),
+  // sehingga request gagal 401 berulang dan circuit breaker terus trip.
+  try {
+    await query(
+      `UPDATE ai_global_settings SET version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = 1`
+    );
+  } catch (err: any) {
+    console.warn(`[AI Repository] Gagal bump version global settings: ${err.message}`);
+  }
+  inMemoryGlobalSettings = {
+    ...inMemoryGlobalSettings,
+    version: inMemoryGlobalSettings.version + 1,
+    updatedAt: new Date().toISOString(),
+  };
+
   // Update in-memory state
   const updatedConfig: ProviderRuntimeConfig = {
     ...current,
@@ -446,7 +463,10 @@ export async function saveProviderConfig(
     try {
       const { AIProviderManager } = await import('./provider-manager');
       const manager = AIProviderManager.getInstance();
-      manager.invalidateCache();
+      // Paksa refresh cache manager agar API key baru langsung dipakai request
+      // berikutnya. invalidateCache() saja tidak cukup karena syncWithDatabase
+      // hanya me-refresh cachedConfigs jika version berubah atau force=true.
+      await manager.syncWithDatabase(true);
       const probeResult = await manager.testProviderConnection(
         provider,
         {
