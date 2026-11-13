@@ -280,6 +280,39 @@ export async function executeRoleBasedTool(
       // ----------------------------------------------------------------------
       // TOOL DATABASE INTELLIGENCE LINTAS TABEL (Role-Governed)
       // ----------------------------------------------------------------------
+      case 'queryDatabase': {
+        // Menerjemahkan argumen datar dari AI menjadi spesifikasi kueri terjaga.
+        // Validasi keamanan (allowlist tabel/kolom, kolom sensitif, row-level
+        // scoping) ditegakkan di dalam executeGovernedDatabaseQuery.
+        const splitList = (v: any): string[] | undefined => {
+          if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
+          if (typeof v === 'string' && v.trim()) return v.split(',').map((x) => x.trim()).filter(Boolean);
+          return undefined;
+        };
+        const filters: DataService.GovernedQueryFilter[] = [];
+        if (args?.filterColumn && args?.filterOperator) {
+          filters.push({ column: args.filterColumn, operator: args.filterOperator, value: args.filterValue ?? '' });
+        }
+        if (args?.filterColumn2 && args?.filterOperator2) {
+          filters.push({ column: args.filterColumn2, operator: args.filterOperator2, value: args.filterValue2 ?? '' });
+        }
+        const spec: DataService.GovernedQuerySpec = {
+          table: args?.table,
+          columns: splitList(args?.columns),
+          joins: splitList(args?.joins),
+          filters: filters.length > 0 ? filters : undefined,
+          aggregate: args?.aggregateFunction
+            ? { function: args.aggregateFunction, column: args?.aggregateColumn }
+            : undefined,
+          groupBy: args?.groupBy || undefined,
+          orderBy: args?.orderByColumn
+            ? { column: args.orderByColumn, direction: args?.orderByDirection }
+            : undefined,
+          limit: args?.limit,
+        };
+        return await DataService.executeGovernedDatabaseQuery(spec, userContext);
+      }
+
       case 'searchUsers':
       case 'searchDatabaseUsers':
         if (userContext.role !== 'admin') {

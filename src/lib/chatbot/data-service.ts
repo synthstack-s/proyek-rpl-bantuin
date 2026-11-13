@@ -10,6 +10,7 @@
 
 import { query, checkDatabaseConnection } from '@/lib/db';
 import { ChatUserContext } from './types';
+import { BANTUIN_SCHEMA_REGISTRY, TableMetadata } from './schema-registry';
 
 // ============================================================================
 // 1. DATA SERVICES UNTUK GUEST & PUBLIK
@@ -1984,3 +1985,353 @@ export async function searchDatabaseInvoices(
   ];
 }
 
+
+// ============================================================================
+// 12. KUERI TERJAGA UNTUK AI (GOVERNED DATABASE QUERY)
+// ============================================================================
+// Satu-satunya jalur bagi AI untuk membaca tabel mana pun secara umum.
+// Keamanan ditegakkan di SERVER (bukan di prompt):
+// 1. Tabel & kolom HARUS ada di BANTUIN_SCHEMA_REGISTRY (allowlist).
+// 2. Kolom isSensitive TIDAK PERNAH dikembalikan (password_hash, otp_hash,
+//    token_hash, gateway_response_json).
+// 3. Hanya SELECT. Tidak ada INSERT/UPDATE/DELETE, tidak ada SQL mentah dari AI.
+// 4. Row-level scoping: peran non-admin dipaksa filter owner
+//    (user_id / customer_id / technician_id / complainant_user_id).
+// 5. Semua nilai diparameterisasi (?); semua identifier dikutip dari registry.
+// 6. JOIN hanya lewat relasi yang dideklarasikan di registry.
+
+export interface GovernedQueryFilter {
+  column: string; // 'kolom' atau 'tabel.kolom'
+  operator: '=' | '!=' | '>' | '>=' | '<' | '<=' | 'LIKE' | 'IN';
+  value: string | number;
+}
+
+export interface GovernedQuerySpec {
+  table: string;
+  columns?: string[]; // 'kolom' atau 'tabel.kolom'; kosong = semua kolom non-sensitif
+  joins?: string[]; // nama tabel; relasi diselesaikan server dari registry
+  filters?: GovernedQueryFilter[];
+  aggregate?: { function: 'count' | 'sum' | 'avg' | 'min' | 'max'; column?: string };
+  groupBy?: string; // 'kolom' atau 'tabel.kolom'
+  orderBy?: { column: string; direction?: 'ASC' | 'DESC' };
+  limit?: number; // default 20, maks 100
+}
+
+export interface GovernedQueryResult {
+  success: boolean;
+  data?: { table: string; rows: any[]; rowCount: number };
+  error?: string;
+}
+
+// Tabel yang boleh dibaca tamu (publik).
+const PUBLIC_TABLES = new Set(['appliance_categories', 'services']);
+
+const ALLOWED_OPERATORS = new Set(['=', '!=', '>', '>=', '<', '<=', 'LIKE', 'IN']);
+const ALLOWED_AGGREGATES = new Set(['count', 'sum', 'avg', 'min', 'max']);
+
+function resolveTable(name: string): TableMetadata | null {
+  if (typeof name !== 'string') return null;
+  const clean = name.trim();
+  if (!/^[a-z_][a-z0-9_]*$/.test(clean)) return null;
+  return BANTUIN_SCHEMA_REGISTRY[clean] || null;
+}
+
+function resolveColumn(table: TableMetadata, col: string): { name: string; sensitive: boolean } | null {
+  if (typeof col !== 'string') return null;
+  const clean = col.trim();
+  if (!/^[a-z_][a-z0-9_]*$/.test(clean)) return null;
+  const meta = table.columns.find((c) => c.name === clean);
+  if (!meta) return null;
+  return { name: meta.name, sensitive: Boolean(meta.isSensitive) };
+}
+
+// 'kolom' atau 'tabel.kolom' -> { table, column }. Menolak kolom sensitif.
+function parseQualifiedColumn(
+  ref: string,
+  base: TableMetadata,
+  joined: Map<string, TableMetadata>
+): { table: TableMetadata; column: string } | null {
+  if (typeof ref !== 'string') return null;
+  const parts = ref.trim().split('.');
+  if (parts.length === 1) {
+    const col = resolveColumn(base, parts[0]);
+    if (!col || col.sensitive) return null;
+    return { table: base, column: col.name };
+  }
+  if (parts.length === 2) {
+    const tbl = parts[0] === base.tableName ? base : joined.get(parts[0]);
+    if (!tbl) return null;
+    const col = resolveColumn(tbl, parts[1]);
+    if (!col || col.sensitive) return null;
+    return { table: tbl, column: col.name };
+  }
+  return null;
+}
+
+function isTableAllowedForRole(table: TableMetadata, role: string): boolean {
+  if (role === 'admin') return true;
+  if (role === 'guest') return PUBLIC_TABLES.has(table.tableName);
+  if (PUBLIC_TABLES.has(table.tableName)) return true;
+  const owner = table.ownerForeignKey;
+  if (!owner) return false;
+  if (role === 'customer') return owner === 'user_id' || owner === 'customer_id' || owner === 'complainant_user_id';
+  if (role === 'technician') return owner === 'technician_id' || owner === 'user_id';
+  return false;
+}
+
+// Mengubah satu deklarasi relasi menjadi klausa ON (dengan backtick).
+// Menangani dua format foreignKey di registry: 'tabel.kolom' dan 'kolom' saja
+// (kolom tanpa tabel: one-to-many -> FK ada di target; selain itu di declaring table).
+function relationToOnClause(
+  declaring: TableMetadata,
+  rel: { targetTable: string; relationshipType: string; foreignKey: string },
+  base: TableMetadata,
+  target: TableMetadata
+): string | null {
+  const relTarget = BANTUIN_SCHEMA_REGISTRY[rel.targetTable];
+  if (!relTarget) return null;
+  const parts = rel.foreignKey.split('.');
+  let fkTable: TableMetadata | null = null;
+  let fkCol = '';
+  if (parts.length === 2) {
+    fkCol = parts[1];
+    if (parts[0] === base.tableName) fkTable = base;
+    else if (parts[0] === target.tableName) fkTable = target;
+    else return null;
+  } else if (parts.length === 1) {
+    fkCol = parts[0];
+    fkTable = rel.relationshipType === 'one-to-many' ? relTarget : declaring;
+    if (fkTable.tableName !== base.tableName && fkTable.tableName !== target.tableName) return null;
+  } else {
+    return null;
+  }
+  if (!fkTable.columns.some((c) => c.name === fkCol)) return null;
+  const pkTable = fkTable.tableName === base.tableName ? target : base;
+  return `\`${fkTable.tableName}\`.\`${fkCol}\` = \`${pkTable.tableName}\`.\`${pkTable.primaryKey}\``;
+}
+
+// Cari relasi langsung antara dua tabel (satu hop); kembalikan klausa ON atau null.
+function resolveJoinOn(base: TableMetadata, target: TableMetadata): string | null {
+  const fromBase = base.relations.find((r) => r.targetTable === target.tableName);
+  if (fromBase) {
+    const on = relationToOnClause(base, fromBase, base, target);
+    if (on) return on;
+  }
+  const fromTarget = target.relations.find((r) => r.targetTable === base.tableName);
+  if (fromTarget) {
+    const on = relationToOnClause(target, fromTarget, base, target);
+    if (on) return on;
+  }
+  return null;
+}
+
+// Cari jalur JOIN base -> target, maksimal 2 hop lewat satu tabel perantara.
+// Mengembalikan daftar langkah { table, on } atau null bila tidak ada jalur.
+function findJoinPath(
+  base: TableMetadata,
+  target: TableMetadata,
+  role: string
+): Array<{ table: TableMetadata; on: string }> | null {
+  const direct = resolveJoinOn(base, target);
+  if (direct) return [{ table: target, on: direct }];
+  const candidates = new Set<string>();
+  for (const rel of base.relations) candidates.add(rel.targetTable);
+  for (const [name, tbl] of Object.entries(BANTUIN_SCHEMA_REGISTRY)) {
+    if (tbl.relations.some((r) => r.targetTable === base.tableName)) candidates.add(name);
+  }
+  for (const midName of candidates) {
+    if (midName === base.tableName || midName === target.tableName) continue;
+    const mid = BANTUIN_SCHEMA_REGISTRY[midName];
+    if (!mid || !isTableAllowedForRole(mid, role)) continue;
+    const on1 = resolveJoinOn(base, mid);
+    if (!on1) continue;
+    const on2 = resolveJoinOn(mid, target);
+    if (!on2) continue;
+    return [
+      { table: mid, on: on1 },
+      { table: target, on: on2 },
+    ];
+  }
+  return null;
+}
+
+// Membangun SQL SELECT dari spesifikasi (fungsi murni — tidak menyentuh DB).
+// Mengembalikan { sql, params } atau { error }.
+export function buildGovernedQuerySQL(
+  spec: GovernedQuerySpec,
+  userContext: ChatUserContext
+): { sql: string; params: any[] } | { error: string } {
+  const role = userContext.role || 'guest';
+
+  if (!spec || typeof spec !== 'object') return { error: 'Spesifikasi kueri tidak valid.' };
+  const base = resolveTable(spec.table);
+  if (!base) return { error: `Tabel '${spec.table}' tidak dikenal.` };
+  if (!isTableAllowedForRole(base, role)) {
+    return { error: `Akses ditolak: peran ${role} tidak diizinkan membaca tabel ${base.tableName}.` };
+  }
+
+  // JOIN (hanya lewat relasi registry, maksimal 2 hop)
+  const joined = new Map<string, TableMetadata>();
+  const joinClauses: string[] = [];
+  for (const joinName of spec.joins || []) {
+    const target = resolveTable(joinName);
+    if (!target) return { error: `Tabel JOIN '${joinName}' tidak dikenal.` };
+    if (target.tableName === base.tableName) return { error: 'Tidak dapat JOIN tabel ke dirinya sendiri.' };
+    if (joined.has(target.tableName)) continue;
+    if (!isTableAllowedForRole(target, role)) {
+      return { error: `Akses ditolak: peran ${role} tidak diizinkan membaca tabel ${target.tableName}.` };
+    }
+    const path = findJoinPath(base, target, role);
+    if (!path) return { error: `Tidak ada relasi antara ${base.tableName} dan ${target.tableName}.` };
+    for (const step of path) {
+      if (joined.has(step.table.tableName)) continue;
+      if (!isTableAllowedForRole(step.table, role)) {
+        return { error: `Akses ditolak: peran ${role} tidak diizinkan membaca tabel ${step.table.tableName}.` };
+      }
+      joined.set(step.table.tableName, step.table);
+      joinClauses.push(`LEFT JOIN \`${step.table.tableName}\` ON ${step.on}`);
+    }
+  }
+
+  // Validasi GROUP BY lebih dulu (dipakai SELECT dan klausa GROUP BY)
+  let groupCol: { table: TableMetadata; column: string } | null = null;
+  if (spec.groupBy) {
+    groupCol = parseQualifiedColumn(spec.groupBy, base, joined);
+    if (!groupCol) return { error: `Kolom GROUP BY '${spec.groupBy}' tidak valid atau sensitif.` };
+  }
+
+  // SELECT
+  const params: any[] = [];
+  let selectClause: string;
+  if (spec.aggregate) {
+    const fn = String(spec.aggregate.function || '').toLowerCase();
+    if (!ALLOWED_AGGREGATES.has(fn)) return { error: `Fungsi agregasi '${spec.aggregate.function}' tidak diizinkan.` };
+    if (fn === 'count' && !spec.aggregate.column) {
+      selectClause = 'COUNT(*) AS `value`';
+    } else {
+      if (!spec.aggregate.column) return { error: `Agregasi ${fn} membutuhkan kolom.` };
+      const col = parseQualifiedColumn(spec.aggregate.column, base, joined);
+      if (!col) return { error: `Kolom agregasi '${spec.aggregate.column}' tidak valid atau sensitif.` };
+      selectClause = `${fn.toUpperCase()}(\`${col.table.tableName}\`.\`${col.column}\`) AS \`value\``;
+    }
+    if (groupCol) {
+      selectClause = `\`${groupCol.table.tableName}\`.\`${groupCol.column}\` AS \`group_value\`, ${selectClause}`;
+    }
+  } else {
+    const cols = spec.columns && spec.columns.length > 0
+      ? spec.columns
+      : base.columns.filter((c) => !c.isSensitive).map((c) => c.name);
+    const selectParts: string[] = [];
+    for (const ref of cols) {
+      const col = parseQualifiedColumn(ref, base, joined);
+      if (!col) return { error: `Kolom '${ref}' tidak valid atau sensitif.` };
+      const alias = col.table.tableName === base.tableName ? col.column : `${col.table.tableName}_${col.column}`;
+      selectParts.push(`\`${col.table.tableName}\`.\`${col.column}\` AS \`${alias}\``);
+    }
+    selectClause = selectParts.join(', ');
+  }
+
+  // WHERE (filter + row-level scoping)
+  const whereParts: string[] = [];
+  for (const f of spec.filters || []) {
+    if (!f || typeof f !== 'object') return { error: 'Filter tidak valid.' };
+    const col = parseQualifiedColumn(f.column, base, joined);
+    if (!col) return { error: `Kolom filter '${f.column}' tidak valid atau sensitif.` };
+    const op = String(f.operator || '').toUpperCase();
+    if (!ALLOWED_OPERATORS.has(op)) return { error: `Operator '${f.operator}' tidak diizinkan.` };
+    const qcol = `\`${col.table.tableName}\`.\`${col.column}\``;
+    if (op === 'IN') {
+      const raw = String(f.value ?? '');
+      const items = raw.split(',').map((s) => s.trim()).filter((s) => s !== '').slice(0, 50);
+      if (items.length === 0) return { error: 'Operator IN membutuhkan minimal satu nilai.' };
+      whereParts.push(`${qcol} IN (${items.map(() => '?').join(', ')})`);
+      params.push(...items);
+    } else if (op === 'LIKE') {
+      whereParts.push(`${qcol} LIKE ?`);
+      params.push(`%${String(f.value ?? '')}%`);
+    } else {
+      whereParts.push(`${qcol} ${op} ?`);
+      params.push(f.value);
+    }
+  }
+
+  // Row-level scoping untuk peran non-admin (wajib; gagal bila userId tidak ada).
+  if (role !== 'admin' && role !== 'guest' && base.ownerForeignKey) {
+    if (!userContext.userId) return { error: 'Konteks pengguna tidak valid: userId tidak tersedia.' };
+    whereParts.push(`\`${base.tableName}\`.\`${base.ownerForeignKey}\` = ?`);
+    params.push(userContext.userId);
+  }
+
+  let sql = `SELECT ${selectClause} FROM \`${base.tableName}\``;
+  if (joinClauses.length > 0) sql += ' ' + joinClauses.join(' ');
+  if (whereParts.length > 0) sql += ' WHERE ' + whereParts.join(' AND ');
+
+  if (spec.aggregate && groupCol) {
+    sql += ` GROUP BY \`${groupCol.table.tableName}\`.\`${groupCol.column}\``;
+  }
+
+  if (spec.orderBy) {
+    const ocol = parseQualifiedColumn(spec.orderBy.column, base, joined);
+    if (!ocol) return { error: `Kolom ORDER BY '${spec.orderBy.column}' tidak valid atau sensitif.` };
+    const dir = String(spec.orderBy.direction || 'ASC').toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+    sql += ` ORDER BY \`${ocol.table.tableName}\`.\`${ocol.column}\` ${dir}`;
+  } else if (spec.aggregate && groupCol) {
+    sql += ' ORDER BY `value` DESC';
+  }
+
+  const limit = Math.min(100, Math.max(1, Math.floor(Number(spec.limit) || 20)));
+  sql += ' LIMIT ?';
+  params.push(limit);
+
+  return { sql, params };
+}
+
+export async function executeGovernedDatabaseQuery(
+  spec: GovernedQuerySpec,
+  userContext: ChatUserContext
+): Promise<GovernedQueryResult> {
+  try {
+    const built = buildGovernedQuerySQL(spec, userContext);
+    if ('error' in built) return { success: false, error: built.error };
+    const rows = await query<any[]>(built.sql, built.params);
+    const list = Array.isArray(rows) ? rows : [];
+    return {
+      success: true,
+      data: { table: spec.table, rows: list, rowCount: list.length },
+    };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Kueri database gagal.' };
+  }
+}
+
+// Daftar nama pengguna berdasarkan peran (untuk jawaban list).
+// Mengembalikan null bila database tidak dapat diakses (berbeda dari [] = kosong).
+export async function getUserNameList(
+  role: 'customer' | 'technician' | null,
+  limit: number = 50
+): Promise<string[] | null> {
+  const cleanLimit = Math.min(100, Math.max(1, Math.floor(limit) || 50));
+  try {
+    const rows = await query<any[]>(
+      role
+        ? `SELECT COALESCE(cp.full_name, tp.full_name, u.email) AS full_name
+           FROM users u
+           LEFT JOIN customer_profiles cp ON u.id = cp.user_id
+           LEFT JOIN technician_profiles tp ON u.id = tp.user_id
+           WHERE u.deleted_at IS NULL AND u.role = ?
+           ORDER BY u.created_at DESC
+           LIMIT ?`
+        : `SELECT COALESCE(cp.full_name, tp.full_name, u.email) AS full_name
+           FROM users u
+           LEFT JOIN customer_profiles cp ON u.id = cp.user_id
+           LEFT JOIN technician_profiles tp ON u.id = tp.user_id
+           WHERE u.deleted_at IS NULL
+           ORDER BY u.created_at DESC
+           LIMIT ?`,
+      role ? [role, cleanLimit] : [cleanLimit]
+    );
+    return (rows || []).map((r) => String(r.full_name || '').trim()).filter(Boolean);
+  } catch {
+    return null;
+  }
+}
