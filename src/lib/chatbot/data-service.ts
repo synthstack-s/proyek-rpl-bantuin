@@ -1638,18 +1638,40 @@ export async function searchDatabaseOrders(
 }
 
 /**
- * Mencari data teknisi spesialis berdasarkan kategori dan kesiapan
+ * Mencari data teknisi spesialis berdasarkan kategori dan kesiapan.
+ *
+ * N16 — Dua perbaikan atas perilaku lama:
+ * 1. searchTerm kosong/blank mengembalikan [] (seperti searchDatabaseUsers),
+ *    bukan 5 teknisi rating tertinggi (pola LIKE `%%` lama).
+ * 2. Hanya teknisi `verified_status = 'verified'` yang dikembalikan, kecuali
+ *    pemanggil secara eksplisit meminta semua lewat `includeUnverified`.
+ *    Opsi itu HANYA boleh diisi tools.ts untuk peran admin (lihat
+ *    executeRoleBasedTool) — argumen mentah dari AI tidak pernah
+ *    diteruskan langsung, agar tamu tidak bisa meminta daftar teknisi
+ *    pending/rejected/suspended.
+ * Hasil menyertakan `specializations` (nama kategori keahlian) agar tools.ts
+ * dapat menyusun tampilan publik yang aman (nama/rating/spesialisasi) tanpa
+ * telepon/email untuk peran non-admin (T8).
  */
 export async function searchDatabaseTechnicians(
   searchTerm?: string,
-  options: { categoryName?: string; limit?: number } = {}
+  options: { categoryName?: string; limit?: number; includeUnverified?: boolean } = {}
 ) {
+  const cleanTerm = (searchTerm || '').trim();
+  // N16: istilah kosong -> [] (jangan kembalikan teknisi apa pun).
+  if (!cleanTerm) return [];
+
   const limit = Math.min(20, Math.max(1, options.limit || 5));
-  const termPattern = `%${(searchTerm || '').trim()}%`;
+  const termPattern = `%${cleanTerm}%`;
+  // N16: filter verifikasi default; hanya admin eksplisit yang boleh
+  // melihat teknisi belum terverifikasi/ditolak/ditangguhkan.
+  const verifiedFilter = options.includeUnverified === true
+    ? ''
+    : `AND tp.verified_status = 'verified'`;
 
   try {
     const rows = await query<any[]>(
-      `SELECT 
+      `SELECT
         tp.id,
         tp.user_id,
         tp.full_name,
@@ -1659,10 +1681,15 @@ export async function searchDatabaseTechnicians(
         tp.is_available,
         tp.verified_status,
         u.phone_number,
-        u.email
+        u.email,
+        (SELECT GROUP_CONCAT(ac2.name SEPARATOR ', ')
+         FROM technician_specializations ts2
+         JOIN appliance_categories ac2 ON ts2.category_id = ac2.id
+         WHERE ts2.technician_profile_id = tp.id) AS specializations
        FROM technician_profiles tp
        JOIN users u ON tp.user_id = u.id
        WHERE u.deleted_at IS NULL
+         ${verifiedFilter}
          AND (
            tp.full_name LIKE ?
            OR u.phone_number LIKE ?
@@ -1684,6 +1711,9 @@ export async function searchDatabaseTechnicians(
         reviewsCount: Number(r.rating_count || 0),
         isAvailable: Boolean(r.is_available),
         verifiedStatus: r.verified_status,
+        specializations: r.specializations
+          ? String(r.specializations).split(',').map((s: string) => s.trim()).filter(Boolean)
+          : [],
       }));
     }
     // Tidak ada teknisi yang cocok: [] (tanpa fallback data hardcoded).

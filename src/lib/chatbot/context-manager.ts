@@ -45,6 +45,47 @@ interface SessionMemoryEntry {
 
 const sessionMemoryCache = new Map<number, SessionMemoryEntry>();
 
+// ============================================================================
+// F10 — Aksi teknisi tertunda (pending action) untuk two-step verification.
+// Disimpan terpisah dari entitas sesi: satu sesi hanya punya satu aksi
+// tertunda (aksi terbaru menimpa yang lama), terikat ke userId teknisi yang
+// memintanya, dan kedaluwarsa setelah TTL agar konfirmasi basi tidak bisa
+// mengeksekusi aksi berjam-jam kemudian. State machine di action-service
+// tetap memvalidasi ulang status saat eksekusi, sehingga konfirmasi yang
+// kedaluwarsa secara status pun ditolak dengan aman.
+// Union aksi ini menyalin TechnicianTaskAction di action-service.ts
+// (sumber kebenaran matriks transisi) agar modul ini tidak bergantung
+// pada action-service.
+// ============================================================================
+export interface PendingTechnicianAction {
+  orderCode: string;
+  action: 'accept' | 'on_the_way' | 'start_diagnosis' | 'start_repair';
+  userId: number;
+  createdAt: number;
+}
+
+export const PENDING_TECHNICIAN_ACTION_TTL_MS = 10 * 60 * 1000;
+
+const pendingTechnicianActions = new Map<number, PendingTechnicianAction>();
+
+export function setPendingTechnicianAction(sessionId: number, action: PendingTechnicianAction): void {
+  pendingTechnicianActions.set(sessionId, action);
+}
+
+export function getPendingTechnicianAction(sessionId: number): PendingTechnicianAction | undefined {
+  const pending = pendingTechnicianActions.get(sessionId);
+  if (!pending) return undefined;
+  if (Date.now() - pending.createdAt > PENDING_TECHNICIAN_ACTION_TTL_MS) {
+    pendingTechnicianActions.delete(sessionId);
+    return undefined;
+  }
+  return pending;
+}
+
+export function clearPendingTechnicianAction(sessionId: number): void {
+  pendingTechnicianActions.delete(sessionId);
+}
+
 // Bersihkan entri sesi yang lebih dari 6 jam tidak aktif
 setInterval(() => {
   const now = Date.now();
@@ -52,6 +93,12 @@ setInterval(() => {
   for (const [sessionId, entry] of sessionMemoryCache.entries()) {
     if (now - entry.lastInteractionTime > maxAge) {
       sessionMemoryCache.delete(sessionId);
+    }
+  }
+  // F10: bersihkan juga aksi tertunda yang kedaluwarsa.
+  for (const [sessionId, pending] of pendingTechnicianActions.entries()) {
+    if (now - pending.createdAt > PENDING_TECHNICIAN_ACTION_TTL_MS) {
+      pendingTechnicianActions.delete(sessionId);
     }
   }
 }, 30 * 60 * 1000);

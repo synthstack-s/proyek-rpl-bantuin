@@ -20,7 +20,7 @@ import {
 } from './types';
 import { encryptApiKey, decryptApiKey, maskApiKey } from './encryption';
 import { validateAndPinEndpoint } from './ssrf-validator';
-import { syncProviderToEnvLocal, syncActiveProviderToEnvLocal } from './env-sync';
+import { syncProviderToEnvLocal, syncActiveProviderToEnvLocal, removeProviderFromEnvLocal } from './env-sync';
 
 export interface GlobalAISettings {
   activeProvider: AIProviderType;
@@ -113,6 +113,38 @@ export async function getGlobalAISettings(): Promise<GlobalAISettings> {
 }
 
 /**
+ * T1: versi publik satu konfigurasi provider — TANPA apiKey plaintext.
+ * Satu-satunya bentuk konfigurasi yang boleh dikirim ke browser: key hanya
+ * diwakili `maskedKeyPreview` + `isConfigured`. Kunci adalah write-only
+ * (dikirim ke server hanya saat save via POST body, tidak pernah dikembalikan).
+ */
+export function toPublicProviderConfig(
+  c: ProviderRuntimeConfig
+): Omit<ProviderRuntimeConfig, 'apiKey'> & { isConfigured: boolean } {
+  return {
+    provider: c.provider,
+    name: c.name,
+    apiEndpoint: c.apiEndpoint,
+    keyIdentifier: c.keyIdentifier,
+    maskedKeyPreview: c.maskedKeyPreview,
+    selectedModel: c.selectedModel,
+    defaultModel: c.defaultModel,
+    temperature: c.temperature,
+    maxOutputTokens: c.maxOutputTokens,
+    requestTimeoutMs: c.requestTimeoutMs,
+    retryLimit: c.retryLimit,
+    lastConnectionStatus: c.lastConnectionStatus,
+    lastTestedAt: c.lastTestedAt,
+    lastErrorMessage: c.lastErrorMessage,
+    // M12: flag kegagalan dekripsi / key env ikut terkirim agar panel
+    // menampilkannya — tidak pernah disembunyikan dari admin.
+    keyFromEnvFallback: c.keyFromEnvFallback,
+    decryptionFailed: c.decryptionFailed,
+    isConfigured: Boolean(c.apiKey && c.apiKey.trim().length > 0),
+  };
+}
+
+/**
  * Mengambil Konfigurasi Runtime Provider AI dengan Kredensial Terdekripsi
  */
 export async function getProviderRuntimeConfig(provider: AIProviderType): Promise<ProviderRuntimeConfig> {
@@ -129,26 +161,66 @@ export async function getProviderRuntimeConfig(provider: AIProviderType): Promis
     if (rows && rows.length > 0) {
       const r = rows[0];
       let plainApiKey = '';
+      // M12: kegagalan dekripsi TIDAK BOLEH ditelan diam-diam. Bila dekripsi
+      // gagal (master secret berubah/rotasi atau data korup), tandai
+      // konfigurasi dengan status connection_error + pesan yang menjelaskan
+      // penyebabnya, PERSIST ke DB agar panel menampilkannya, dan bila key
+      // env dipakai sebagai pengganti, beri flag eksplisit — jangan pernah
+      // memakai key env seolah-olah tidak terjadi apa-apa.
+      let decryptionFailed = false;
       if (r.encrypted_api_key) {
         try {
           plainApiKey = decryptApiKey(r.encrypted_api_key);
         } catch (err: any) {
-          console.error(`[AI Repository] Gagal mendekripsi API key untuk ${provider}:`, err.message);
+          decryptionFailed = true;
+          console.warn(
+            `[AI Repository] PERINGATAN: dekripsi API key tersimpan untuk provider '${provider}' GAGAL (${err.message}). ` +
+              `Key di database tidak dapat dipakai — kemungkinan master secret berubah/rotasi atau data terenkripsi korup. ` +
+              `Konfigurasi ditandai connection_error; periksa dan simpan ulang API key provider ini.`
+          );
         }
       }
 
       // Jika di DB kosong tapi ada di .env, gunakan env sebagai fallback
+      let keyFromEnvFallback = false;
       if (!plainApiKey && provider === 'gemini' && process.env.GEMINI_API_KEY) {
         plainApiKey = process.env.GEMINI_API_KEY;
+        keyFromEnvFallback = decryptionFailed;
       }
       if (!plainApiKey && provider === 'groq' && process.env.GROQ_API_KEY) {
         plainApiKey = process.env.GROQ_API_KEY;
+        keyFromEnvFallback = decryptionFailed;
       }
       if (!plainApiKey) {
         const providerUpper = provider.toUpperCase().replace(/[^A-Z0-9_]/g, '_');
         const envKey = process.env[`${providerUpper}_API_KEY`];
         if (envKey) {
           plainApiKey = envKey;
+          keyFromEnvFallback = decryptionFailed;
+        }
+      }
+
+      let lastConnectionStatus = r.last_connection_status as AIConnectionStatus;
+      let lastErrorMessage: string | null = r.last_error_message ?? null;
+      if (decryptionFailed) {
+        lastConnectionStatus = 'connection_error';
+        lastErrorMessage =
+          'Gagal mendekripsi API key tersimpan (master secret berubah atau data korup). ' +
+          (plainApiKey
+            ? 'Sistem sementara memakai API key dari environment (.env) — bukan key yang tersimpan di database. Simpan ulang API key provider ini.'
+            : 'Tidak ada API key pengganti dari environment. Simpan ulang API key provider ini.');
+        // Persist agar panel admin menampilkan kegagalan ini (bukan hanya
+        // di log server). Hanya tulis bila status/pesan belum sama, agar
+        // pembacaan berulang tidak menulis ke DB setiap kali.
+        if (r.last_connection_status !== 'connection_error' || r.last_error_message !== lastErrorMessage) {
+          try {
+            await query(
+              `UPDATE ai_provider_configs SET last_connection_status = 'connection_error', last_error_message = ?, last_tested_at = CURRENT_TIMESTAMP WHERE provider = ?`,
+              [lastErrorMessage, provider]
+            );
+          } catch (persistErr: any) {
+            console.warn(`[AI Repository] Gagal menyimpan status kegagalan dekripsi untuk ${provider}:`, persistErr.message);
+          }
         }
       }
 
@@ -165,9 +237,11 @@ export async function getProviderRuntimeConfig(provider: AIProviderType): Promis
         maxOutputTokens: Number(r.max_output_tokens || 2048),
         requestTimeoutMs: Number(r.request_timeout_ms || 30000),
         retryLimit: Number(r.retry_limit || 2),
-        lastConnectionStatus: r.last_connection_status as AIConnectionStatus,
+        lastConnectionStatus,
         lastTestedAt: r.last_tested_at,
-        lastErrorMessage: r.last_error_message,
+        lastErrorMessage,
+        keyFromEnvFallback: keyFromEnvFallback || undefined,
+        decryptionFailed: decryptionFailed || undefined,
       };
     }
   } catch {
@@ -234,27 +308,15 @@ export async function getAllProviderConfigsAdmin(): Promise<{
 
 /**
  * Mengambil Ringkasan Seluruh Konfigurasi Provider (Aman untuk Frontend Publik)
+ *
+ * T1: satu-satunya daftar konfigurasi yang boleh dikirim ke browser — TANPA
+ * apiKey plaintext (lihat toPublicProviderConfig). Route configs GET memakai
+ * fungsi ini, BUKAN getAllProviderConfigsAdmin.
  */
 export async function getAllProviderConfigsPublic(): Promise<Array<Omit<ProviderRuntimeConfig, 'apiKey'> & { isConfigured: boolean }>> {
   const { configList } = await getAllProviderConfigsAdmin();
 
-  return configList.map((c) => ({
-    provider: c.provider,
-    name: c.name,
-    apiEndpoint: c.apiEndpoint,
-    keyIdentifier: c.keyIdentifier,
-    maskedKeyPreview: c.maskedKeyPreview,
-    selectedModel: c.selectedModel,
-    defaultModel: c.defaultModel,
-    temperature: c.temperature,
-    maxOutputTokens: c.maxOutputTokens,
-    requestTimeoutMs: c.requestTimeoutMs,
-    retryLimit: c.retryLimit,
-    lastConnectionStatus: c.lastConnectionStatus,
-    lastTestedAt: c.lastTestedAt,
-    lastErrorMessage: c.lastErrorMessage,
-    isConfigured: Boolean(c.apiKey && c.apiKey.trim().length > 0),
-  }));
+  return configList.map((c) => toPublicProviderConfig(c));
 }
 
 /**
@@ -549,9 +611,15 @@ export async function deleteProviderConfig(
   adminId: number,
   clientMeta: { ip?: string; userAgent?: string } = {}
 ): Promise<{ success: boolean; message: string }> {
-  if (provider === 'gemini' || provider === 'groq') {
-    throw new Error(`Provider bawaan sistem '${provider}' tidak dapat dihapus.`);
+  // M2: normalisasi slug SEBELUM penjaga provider bawaan. Penjaga memakai
+  // perbandingan case-sensitive di JS, tetapi MySQL default collation
+  // case-insensitive — tanpa normalisasi, 'GEMINI' lolos penjaga namun cocok
+  // dengan baris 'gemini' di DB dan menghapus konfigurasi bawaan.
+  const normalizedProvider = provider.trim().toLowerCase();
+  if (normalizedProvider === 'gemini' || normalizedProvider === 'groq') {
+    throw new Error(`Provider bawaan sistem '${normalizedProvider}' tidak dapat dihapus.`);
   }
+  provider = normalizedProvider;
 
   // 1. VALIDASI DULU (tanpa mutasi): bila provider yang dihapus sedang aktif,
   // pastikan provider pengganti (Gemini) memiliki API key.
@@ -569,9 +637,15 @@ export async function deleteProviderConfig(
   }
 
   // 2. Hapus dari database (Source of Truth). Bila gagal, lempar error dan
-  // jangan sentuh state in-memory.
+  // jangan sentuh state in-memory. M2: penjaga level query sebagai pertahanan
+  // lapis kedua — DELETE tidak akan pernah menyentuh baris provider bawaan
+  // meski slug lolos penjaga di atas (mis. variasi case pada collation
+  // case-insensitive).
   try {
-    await query('DELETE FROM ai_provider_configs WHERE provider = ?', [provider]);
+    await query(
+      `DELETE FROM ai_provider_configs WHERE provider = ? AND provider NOT IN ('gemini', 'groq')`,
+      [provider]
+    );
   } catch (err: any) {
     throw new Error(`Gagal menghapus provider '${provider}' dari database: ${err.message}. Provider tidak dihapus.`);
   }
@@ -588,12 +662,35 @@ export async function deleteProviderConfig(
   // 3. Baru setelah DB memastikan penghapusan, hapus dari memori.
   delete IN_MEMORY_CONFIGS[provider];
 
+  // M13: hapus juga key provider dari .env.local dan process.env — key yang
+  // tertinggal bisa menghidupkan kembali provider yang sudah dihapus lewat
+  // fallback env di getProviderRuntimeConfig. Kegagalan di sini hanya warning
+  // (penghapusan di DB tetap menjadi sumber kebenaran).
+  try {
+    const envRemoval = removeProviderFromEnvLocal(provider);
+    if (!envRemoval.success) {
+      console.warn(`[AI Repository] Key provider '${provider}' mungkin masih ada di .env.local: ${envRemoval.error || 'penghapusan gagal'}`);
+    }
+  } catch (envErr: any) {
+    console.warn(`[AI Repository] Gagal menghapus key provider '${provider}' dari .env.local:`, envErr.message);
+  }
+
   // Jika provider yang dihapus sedang aktif, kembalikan ke gemini
   if (isActiveProvider) {
     await setActiveAIProvider('gemini', adminId, clientMeta);
   }
   if (isFallbackProvider) {
-    await setAutomaticFallbackSettings(currentGlobal.enableFallback, 'groq', adminId, clientMeta);
+    // M8: setAutomaticFallbackSettings kini menolak fallback tanpa key bila
+    // fallback aktif. Bila Groq (pengganti) tidak punya key, nonaktifkan
+    // fallback daripada gagal SETELAH penghapusan sudah terjadi.
+    const groqConfig = await getProviderRuntimeConfig('groq');
+    const groqHasKey = Boolean(groqConfig.apiKey && groqConfig.apiKey.trim());
+    await setAutomaticFallbackSettings(
+      groqHasKey ? currentGlobal.enableFallback : false,
+      'groq',
+      adminId,
+      clientMeta
+    );
   }
 
   return {
@@ -696,7 +793,36 @@ export async function setAutomaticFallbackSettings(
   adminId: number,
   clientMeta: { ip?: string; userAgent?: string } = {}
 ): Promise<{ success: boolean; message: string; version: number }> {
+  // M2: normalisasi slug (route juga menormalisasi; ini pertahanan lapis kedua
+  // untuk pemanggil internal seperti deleteProviderConfig).
+  fallbackProvider = (fallbackProvider || '').trim().toLowerCase() as AIProviderType;
+
   const currentSettings = await getGlobalAISettings();
+
+  // M8: bila fallback DI AKTIFKAN, provider fallback WAJIB punya API key —
+  // cerminan validasi di setActiveAIProvider. Tanpa ini, toggle fallback
+  // menyala tetapi manager diam-diam tidak pernah fallback (generateChatCompletion
+  // mensyaratkan fallbackConfig.apiKey terisi), dan admin mengira ada jaring
+  // pengaman padahal tidak ada. Validasi hanya berlaku saat mengaktifkan:
+  // menonaktifkan fallback atau mengganti pilihan saat fallback nonaktif
+  // tidak perlu key.
+  if (enableFallback) {
+    if (!fallbackProvider) {
+      throw new Error('Tidak dapat mengaktifkan Automatic Fallback: provider cadangan belum dipilih.');
+    }
+    if (fallbackProvider === currentSettings.activeProvider) {
+      throw new Error(
+        `Tidak dapat mengaktifkan Automatic Fallback: provider cadangan '${fallbackProvider}' sama dengan provider aktif. Pilih provider cadangan yang berbeda.`
+      );
+    }
+    const fallbackConfig = await getProviderRuntimeConfig(fallbackProvider);
+    if (!fallbackConfig.apiKey || !fallbackConfig.apiKey.trim()) {
+      throw new Error(
+        `Tidak dapat mengaktifkan Automatic Fallback: provider cadangan ${fallbackConfig.name || fallbackProvider} belum memiliki API Key. Harap simpan API Key provider cadangan terlebih dahulu.`
+      );
+    }
+  }
+
   const nextVersion = currentSettings.version + 1;
 
   try {

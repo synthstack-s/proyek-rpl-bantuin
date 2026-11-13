@@ -1,16 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAdminSession } from '@/lib/auth';
 import {
-  getAllProviderConfigsAdmin,
+  getAllProviderConfigsPublic,
   getGlobalAISettings,
   saveProviderConfig,
   deleteProviderConfig,
+  toPublicProviderConfig,
 } from '@/lib/ai/repository';
 import { AIProviderType } from '@/lib/ai/types';
 
 /**
  * GET /api/admin/ai/configs
- * Mengambil status dan konfigurasi seluruh provider AI untuk panel admin (termasuk API Key terdekripsi agar bisa dilihat & diedit)
+ * Mengambil status dan konfigurasi seluruh provider AI untuk panel admin.
+ *
+ * T1: respons TIDAK PERNAH berisi apiKey plaintext — memakai
+ * getAllProviderConfigsPublic (maskedKeyPreview + isConfigured saja).
+ * API key adalah write-only: dikirim ke server hanya saat save via POST
+ * body, tidak pernah dikembalikan ke browser.
  */
 export async function GET() {
   try {
@@ -22,19 +28,26 @@ export async function GET() {
       );
     }
 
-    const [providerData, globalSettings] = await Promise.all([
-      getAllProviderConfigsAdmin(),
+    const [publicConfigList, globalSettings] = await Promise.all([
+      getAllProviderConfigsPublic(),
       getGlobalAISettings(),
     ]);
 
+    // Bentuk respons dipertahankan (map `configs` + array `configList`)
+    // agar UI tidak berubah — isinya kini tanpa apiKey.
+    const configs: Record<string, (typeof publicConfigList)[number]> = {};
+    for (const c of publicConfigList) {
+      configs[c.provider] = c;
+    }
+
     return NextResponse.json({
       success: true,
-      configs: providerData.configs,
-      configList: providerData.configList,
+      configs,
+      configList: publicConfigList,
       globalSettings,
       data: {
-        configs: providerData.configs,
-        configList: providerData.configList,
+        configs,
+        configList: publicConfigList,
         globalSettings,
       },
     });
@@ -107,7 +120,9 @@ export async function POST(req: NextRequest) {
       success: true,
       message: result.message,
       maskedKeyPreview: result.maskedKeyPreview,
-      config: result.config,
+      // T1: jangan kembalikan result.config apa adanya — objek itu berisi
+      // apiKey plaintext. Kirim versi publiknya (tanpa key).
+      config: toPublicProviderConfig(result.config),
     });
   } catch (err: any) {
     console.error('Error in POST /api/admin/ai/configs:', err);
@@ -142,10 +157,14 @@ export async function DELETE(req: NextRequest) {
       );
     }
 
+    // M2: normalisasi slug (trim + lowercase) agar 'GEMINI'/' Gemini ' tidak
+    // lolos dari penjaga provider bawaan di deleteProviderConfig.
+    const normalizedProvider = provider.trim().toLowerCase();
+
     const ip = req.headers.get('x-forwarded-for') || '127.0.0.1';
     const userAgent = req.headers.get('user-agent') || 'AdminBrowser';
 
-    const result = await deleteProviderConfig(provider, adminSession.userId, { ip, userAgent });
+    const result = await deleteProviderConfig(normalizedProvider, adminSession.userId, { ip, userAgent });
 
     return NextResponse.json({
       success: true,

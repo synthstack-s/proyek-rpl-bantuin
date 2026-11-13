@@ -36,10 +36,16 @@ interface ProviderConfigState {
   provider: string;
   name: string;
   apiEndpoint: string;
-  apiKey?: string;
+  // T1: apiKey TIDAK PERNAH dikirim server ke browser (write-only). Key hanya
+  // diwakili maskedKeyPreview + isConfigured; field input kosong berarti
+  // "pertahankan key tersimpan", field terisi berarti key baru.
   maskedKeyPreview: string;
   hasKey?: boolean;
   isConfigured?: boolean;
+  // M12: true bila key yang dipakai berasal dari .env karena key tersimpan
+  // gagal didekripsi / dekripsi gagal.
+  keyFromEnvFallback?: boolean;
+  decryptionFailed?: boolean;
   selectedModel: string;
   defaultModel: string;
   temperature: number;
@@ -343,12 +349,13 @@ export default function AIProviderSettingsSection() {
   const [toast, setToast] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
 
   // Form input states per provider slug
+  // T1: inputKeys HANYA berisi key yang admin ketik di sesi ini (key baru).
+  // Server tidak pernah mengirim key tersimpan ke browser, jadi field kosong
+  // berarti "pertahankan key tersimpan" — backend sudah mendukung pola ini
+  // (saveProviderConfig: apiKey kosong = pertahankan key lama). Field TIDAK
+  // di-prefill dari server (lihat loadData) dan dikosongkan setelah save
+  // berhasil (lihat handleSaveConfig).
   const [inputKeys, setInputKeys] = useState<Record<string, string>>({});
-  // H1: API key yang terakhir dimuat dari server per provider — dipakai untuk
-  // membedakan tes terhadap key tersimpan vs key yang diedit di form (belum
-  // disimpan). Diisi ulang di loadData setiap configs dimuat, termasuk setelah
-  // save berhasil (handleSaveConfig memanggil loadData).
-  const [loadedKeys, setLoadedKeys] = useState<Record<string, string>>({});
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
   const [endpoints, setEndpoints] = useState<Record<string, string>>({
     gemini: 'https://generativelanguage.googleapis.com',
@@ -368,6 +375,10 @@ export default function AIProviderSettingsSection() {
   // Dynamic models state
   const [availableModels, setAvailableModels] = useState<Record<string, ModelItem[]>>({});
   const [isLoadingModels, setIsLoadingModels] = useState<Record<string, boolean>>({});
+  // M4: apakah daftar model terakhir untuk provider ini benar-benar live
+  // (true) atau daftar cadangan karena pengambilan live gagal (false).
+  // undefined = belum pernah diambil.
+  const [modelsLive, setModelsLive] = useState<Record<string, boolean>>({});
 
   // Testing & saving states
   const [isTesting, setIsTesting] = useState<Record<string, boolean>>({});
@@ -442,8 +453,6 @@ export default function AIProviderSettingsSection() {
           const nextEndpoints: Record<string, string> = {};
           const nextModels: Record<string, string> = {};
           const nextParams: Record<string, { temp: number; maxTokens: number; timeout: number; retries: number }> = {};
-          const nextInputKeys: Record<string, string> = {};
-          const nextLoadedKeys: Record<string, string> = {};
 
           for (const [providerKey, conf] of Object.entries(configMap)) {
             nextEndpoints[providerKey] = conf.apiEndpoint || (providerKey === 'gemini' ? 'https://generativelanguage.googleapis.com' : 'https://api.groq.com/openai/v1');
@@ -454,20 +463,16 @@ export default function AIProviderSettingsSection() {
               timeout: conf.requestTimeoutMs ?? 30000,
               retries: conf.retryLimit ?? 2,
             };
-            // PREFILL API Key jika ada di runtime config
-            if (conf.apiKey) {
-              nextInputKeys[providerKey] = conf.apiKey;
-            }
-            // H1: catat key tersimpan apa adanya ('' bila provider belum punya
-            // key) sebagai pembanding dirty-tracking untuk tes koneksi.
-            nextLoadedKeys[providerKey] = conf.apiKey || '';
+            // T1: JANGAN prefill API key — server tidak mengirimnya, dan
+            // inputKeys sengaja TIDAK disentuh di sini agar key yang sedang
+            // admin ketik tidak hilang saat loadData berjalan (mis. pindah
+            // tab atau setelah tes koneksi). Field kosong = pertahankan key
+            // tersimpan; handleSaveConfig mengosongkan field setelah save.
           }
 
           setEndpoints((prev) => ({ ...prev, ...nextEndpoints }));
           setSelectedModels((prev) => ({ ...prev, ...nextModels }));
           setParams((prev) => ({ ...prev, ...nextParams }));
-          setInputKeys((prev) => ({ ...prev, ...nextInputKeys }));
-          setLoadedKeys((prev) => ({ ...prev, ...nextLoadedKeys }));
 
           // Pastikan activeFormTab valid
           if (!configMap[activeFormTab]) {
@@ -496,21 +501,41 @@ export default function AIProviderSettingsSection() {
   }, [loadData]);
 
   // Fetch available models for provider
+  // T2: API key TIDAK PERNAH dikirim lewat query string. Bila admin mengetik
+  // key baru di form (belum disimpan), key dikirim via POST body; bila field
+  // kosong, server memakai key tersimpan (GET tanpa key).
+  // M4: bila respons `isLive: false`, daftar adalah cadangan hardcoded —
+  // tampilkan peringatan "daftar cadangan", JANGAN toast sukses.
   const fetchModels = async (provider: string) => {
     try {
       setIsLoadingModels((prev) => ({ ...prev, [provider]: true }));
-      const queryParams = new URLSearchParams({ provider });
-      if (inputKeys[provider] && inputKeys[provider].trim()) {
-        queryParams.set('apiKey', inputKeys[provider].trim());
+      const formKey = (inputKeys[provider] || '').trim();
+      const endpoint = (endpoints[provider] || '').trim();
+      let res: Response;
+      if (formKey) {
+        // Menguji key yang belum disimpan — key lewat POST body.
+        res = await fetch('/api/admin/ai/models', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider, apiKey: formKey, apiEndpoint: endpoint || undefined }),
+        });
+      } else {
+        // Server memakai key tersimpan; hanya provider (+ endpoint) di URL.
+        const queryParams = new URLSearchParams({ provider });
+        if (endpoint) {
+          queryParams.set('apiEndpoint', endpoint);
+        }
+        res = await fetch(`/api/admin/ai/models?${queryParams.toString()}`);
       }
-      if (endpoints[provider] && endpoints[provider].trim()) {
-        queryParams.set('apiEndpoint', endpoints[provider].trim());
-      }
-      const res = await fetch(`/api/admin/ai/models?${queryParams.toString()}`);
       const data = await res.json();
       if (res.ok && data.success && Array.isArray(data.models)) {
         setAvailableModels((prev) => ({ ...prev, [provider]: data.models }));
-        showToast('info', `Berhasil memuat ${data.models.length} model aktif dari ${configs[provider]?.name || provider}`);
+        setModelsLive((prev) => ({ ...prev, [provider]: data.isLive !== false }));
+        if (data.isLive === false) {
+          showToast('info', `Daftar cadangan — pengambilan live gagal (${configs[provider]?.name || provider}): ${data.error || 'provider tidak dapat dihubungi'}. Model di bawah ini bukan daftar live.`);
+        } else {
+          showToast('info', `Berhasil memuat ${data.models.length} model aktif dari ${configs[provider]?.name || provider}`);
+        }
       } else {
         showToast('error', data.message || `Gagal mengambil model dari ${provider}`);
       }
@@ -536,19 +561,19 @@ export default function AIProviderSettingsSection() {
         body.apiKey = inputKeys[provider].trim();
       }
 
-      // H1: beri tahu server apakah tes ini memakai kredensial tersimpan.
-      // - Field key kosong berarti manager memakai key tersimpan (override
-      //   kosong diabaikan di testProviderConnection), jadi tetap dihitung
-      //   sebagai tes tersimpan.
-      // - Key yang diedit (berbeda dari yang dimuat) berarti tes override:
-      //   hasilnya dicatat di log tetapi TIDAK boleh menimpa status tersimpan.
-      // - Endpoint/model yang diedit juga membuat tes menjadi override
-      //   meskipun key-nya tidak berubah (dibandingkan dengan config yang
-      //   dimuat dari server), karena tes itu tidak lagi mencerminkan
-      //   konfigurasi tersimpan.
+      // H1 + T1: beri tahu server apakah tes ini memakai kredensial tersimpan.
+      // Sejak T1, key tersimpan tidak pernah dikirim ke browser, jadi
+      // dirty-tracking key menjadi sederhana: field key KOSONG berarti
+      // manager memakai key tersimpan (override kosong diabaikan di
+      // testProviderConnection) → tes tersimpan. Field TERISI berarti admin
+      // mengetik key baru (belum disimpan) → tes override: hasilnya dicatat
+      // di log tetapi TIDAK boleh menimpa status tersimpan.
+      // Endpoint/model yang diedit juga membuat tes menjadi override
+      // meskipun key-nya tidak berubah (dibandingkan dengan config yang
+      // dimuat dari server), karena tes itu tidak lagi mencerminkan
+      // konfigurasi tersimpan.
       const trimmedInputKey = (inputKeys[provider] || '').trim();
-      const loadedKey = (loadedKeys[provider] || '').trim();
-      const keyIsStored = trimmedInputKey.length === 0 || trimmedInputKey === loadedKey;
+      const keyIsStored = trimmedInputKey.length === 0;
       const storedConf = configs[provider];
       const endpointIsStored =
         !endpoints[provider] || !storedConf?.apiEndpoint ||
@@ -610,7 +635,14 @@ export default function AIProviderSettingsSection() {
       const data = await res.json();
       if (res.ok && data.success) {
         showToast('success', `Konfigurasi ${configs[provider]?.name || provider} berhasil disimpan.`);
-        // Jangan mengosongkan inputKeys agar admin tetap dapat melihat dan mengeditnya!
+        // T1: kosongkan field key setelah save berhasil — key kini tersimpan
+        // di server dan field kosong berarti "pertahankan key tersimpan".
+        // (Sebelumnya field dipertahankan berisi key plaintext hasil prefill.)
+        setInputKeys((prev) => {
+          const next = { ...prev };
+          delete next[provider];
+          return next;
+        });
         await loadData();
       } else {
         showToast('error', data.message || 'Gagal menyimpan konfigurasi');
@@ -696,6 +728,22 @@ export default function AIProviderSettingsSection() {
       if (res.ok && data.success) {
         showToast('success', data.message || 'Provider berhasil dihapus.');
         setActiveFormTab('gemini');
+        // Bersihkan sisa state form provider yang dihapus.
+        setInputKeys((prev) => {
+          const next = { ...prev };
+          delete next[provider];
+          return next;
+        });
+        setAvailableModels((prev) => {
+          const next = { ...prev };
+          delete next[provider];
+          return next;
+        });
+        setModelsLive((prev) => {
+          const next = { ...prev };
+          delete next[provider];
+          return next;
+        });
         await loadData();
       } else {
         showToast('error', data.message || 'Gagal menghapus provider');
@@ -734,13 +782,23 @@ export default function AIProviderSettingsSection() {
     }
   };
 
-  // Toggle Fallback
+  // Toggle Fallback — M8: toggle memakai provider cadangan yang DIPILIH
+  // admin di dropdown (globalSettings.fallbackProvider), BUKAN provider
+  // non-aktif pertama secara arbitrer. Bila pilihan tersimpan tidak valid
+  // (sama dengan provider aktif / tidak ada di daftar), pakai provider
+  // non-aktif pertama sebagai cadangan terakhir. Server memvalidasi bahwa
+  // provider cadangan punya API key saat fallback diaktifkan.
   const handleToggleFallback = async (enabled: boolean) => {
     try {
       setIsSwitchingFallback(true);
       const allProviderKeys = Object.keys(configs);
+      const selectedFallback = globalSettings.fallbackProvider;
       const fallbackTarget =
-        allProviderKeys.find((p) => p !== globalSettings.activeProvider) ||
+        (selectedFallback &&
+          selectedFallback !== globalSettings.activeProvider &&
+          allProviderKeys.includes(selectedFallback)
+          ? selectedFallback
+          : allProviderKeys.find((p) => p !== globalSettings.activeProvider)) ||
         (globalSettings.activeProvider === 'gemini' ? 'groq' : 'gemini');
 
       const res = await fetch('/api/admin/ai/fallback', {
@@ -761,6 +819,41 @@ export default function AIProviderSettingsSection() {
       }
     } catch (err: any) {
       showToast('error', 'Error memperbarui fallback: ' + err.message);
+    } finally {
+      setIsSwitchingFallback(false);
+    }
+  };
+
+  // M8: ganti provider cadangan dari dropdown, tanpa mengubah status
+  // on/off fallback. Bila fallback sedang aktif, server memvalidasi key
+  // provider baru (menolak bila tanpa key); bila nonaktif, pilihan hanya
+  // disimpan untuk dipakai saat fallback diaktifkan nanti.
+  const handleChangeFallbackProvider = async (provider: string) => {
+    if (!provider || provider === globalSettings.fallbackProvider) return;
+    if (provider === globalSettings.activeProvider) {
+      showToast('error', 'Provider cadangan tidak boleh sama dengan provider aktif.');
+      return;
+    }
+    try {
+      setIsSwitchingFallback(true);
+      const res = await fetch('/api/admin/ai/fallback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enableFallback: globalSettings.enableFallback,
+          fallbackProvider: provider,
+        }),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showToast('success', `Provider cadangan diubah ke ${configs[provider]?.name || provider}.`);
+        await loadData();
+      } else {
+        showToast('error', data.message || 'Gagal mengubah provider cadangan');
+      }
+    } catch (err: any) {
+      showToast('error', 'Error mengubah provider cadangan: ' + err.message);
     } finally {
       setIsSwitchingFallback(false);
     }
@@ -1285,7 +1378,7 @@ export default function AIProviderSettingsSection() {
                     </div>
                     <div>
                       <span className="text-gray-500 block text-[10px]">Status API Key:</span>
-                      {conf.apiKey || conf.maskedKeyPreview ? (
+                      {conf.isConfigured || conf.maskedKeyPreview ? (
                         <span className="text-emerald-600 text-[11px] font-semibold flex items-center gap-1">
                           <CheckCircle2 className="w-3 h-3" />
                           Tersimpan
@@ -1422,6 +1515,33 @@ export default function AIProviderSettingsSection() {
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
             Circuit Breaker aktif (Threshold: 3x kegagalan berturut-turut, Cooldown: 60 detik)
           </div>
+          {/* M8: pemilih provider cadangan — sebelumnya toggle memilih
+              provider non-aktif pertama secara arbitrer (bisa provider tanpa
+              key, sehingga fallback mati diam-diam). Provider aktif tidak
+              bisa dipilih sebagai cadangan. */}
+          <div className="mt-3">
+            <label className="text-[11px] font-semibold text-gray-900 block mb-1">
+              Provider Cadangan (Fallback)
+            </label>
+            <select
+              value={globalSettings.fallbackProvider}
+              onChange={(e) => handleChangeFallbackProvider(e.target.value)}
+              disabled={isSwitchingFallback}
+              className="w-full px-3 py-2 bg-white border border-gray-300 rounded-xl text-gray-900 outline-none focus:border-amber-500 text-xs disabled:opacity-50"
+            >
+              {Object.entries(configs)
+                .filter(([slug]) => slug !== globalSettings.activeProvider)
+                .map(([slug, c]) => (
+                  <option key={slug} value={slug}>
+                    {c.name}
+                    {c.isConfigured || c.maskedKeyPreview ? '' : ' — tanpa API key'}
+                  </option>
+                ))}
+            </select>
+            <p className="text-[10px] text-gray-500 mt-1">
+              Provider cadangan dipakai saat provider aktif gagal (kuota habis/429 atau timeout). Provider tanpa API key tidak dapat dipakai sebagai cadangan saat fallback aktif.
+            </p>
+          </div>
         </div>
       </div>
 
@@ -1466,7 +1586,7 @@ export default function AIProviderSettingsSection() {
                 <div className="flex items-center justify-between mb-1">
                   <label className="text-xs font-semibold text-gray-900 flex items-center gap-2">
                     {configs[activeFormTab].name} API Key
-                    {inputKeys[activeFormTab] || configs[activeFormTab].maskedKeyPreview ? (
+                    {configs[activeFormTab].isConfigured || configs[activeFormTab].maskedKeyPreview ? (
                       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
                         <CheckCircle2 className="w-3 h-3" />
                         Tersimpan & Aktif
@@ -1512,8 +1632,18 @@ export default function AIProviderSettingsSection() {
                   </button>
                 </div>
                 <p className="text-[10px] text-gray-500 mt-1">
-                  💡 Klik ikon mata di atas untuk melihat atau mengedit API Key secara langsung. Setelah disimpan, kunci dienkripsi kuat menggunakan AES-256-GCM.
+                  💡 Kosongkan field ini untuk mempertahankan API key yang sudah tersimpan — isi hanya bila ingin mengganti key. Setelah disimpan, kunci dienkripsi kuat menggunakan AES-256-GCM dan tidak pernah ditampilkan lagi.
                 </p>
+                {/* M12: key dari .env karena dekripsi key tersimpan gagal —
+                    admin wajib tahu sistem tidak memakai key yang disimpannya. */}
+                {configs[activeFormTab].keyFromEnvFallback && (
+                  <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-2 mt-2 flex items-start gap-1.5">
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                    <span>
+                      Peringatan: API key tersimpan gagal didekripsi, sistem sementara memakai API key dari environment (.env). Simpan ulang API key provider ini.
+                    </span>
+                  </p>
+                )}
               </div>
 
               {/* Endpoint & Model Selection */}
@@ -1573,6 +1703,14 @@ export default function AIProviderSettingsSection() {
                       placeholder="Masukkan nama model..."
                       className="w-full px-3 py-2 bg-white border border-gray-300 rounded-xl text-gray-900 font-mono outline-none focus:border-amber-500 transition"
                     />
+                  )}
+                  {/* M4: tandai daftar cadangan agar admin tidak mengira
+                      daftar ini diambil live dari provider. */}
+                  {modelsLive[activeFormTab] === false && availableModels[activeFormTab] && availableModels[activeFormTab].length > 0 && (
+                    <p className="text-[10px] text-amber-700 mt-1 flex items-center gap-1">
+                      <AlertTriangle className="w-3 h-3 shrink-0" />
+                      Daftar cadangan — pengambilan live gagal. Periksa API key / koneksi provider.
+                    </p>
                   )}
                 </div>
               </div>

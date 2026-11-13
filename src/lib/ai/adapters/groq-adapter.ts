@@ -20,6 +20,7 @@ import {
   AIChatResponse,
   AIConnectionTestResult,
   AIModelInfo,
+  AIModelListResult,
   NormalizedAIError,
   UniversalToolCall,
 } from '../types';
@@ -391,7 +392,7 @@ export class GroqProviderAdapter implements AIProviderAdapter {
         payload.tool_choice = 'auto';
       }
 
-      const res = await makeHttpsRequest(url, {
+      let res = await makeHttpsRequest(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -402,8 +403,42 @@ export class GroqProviderAdapter implements AIProviderAdapter {
         timeoutMs,
       });
 
-      const latencyMs = Date.now() - startTime;
-      const resText = await res.text();
+      let latencyMs = Date.now() - startTime;
+      let resText = await res.text();
+
+      // M3 (opsi a): terapkan auto-heal `/v1` yang SAMA dengan testConnection.
+      // Sebelumnya tes koneksi diam-diam mencoba `{base}/v1/...` bila `/models`
+      // 404, tetapi chat memakai endpoint tersimpan apa adanya — provider yang
+      // endpoint-nya disimpan tanpa `/v1` lolos tes tetapi setiap chat gagal
+      // 404 selamanya. Bila chat 404 dan base belum berakhiran `/v1`, coba
+      // sekali dengan `/v1/chat/completions`. Bila percobaan itu berhasil,
+      // pakai responsnya; bila gagal dengan status non-404 (mis. 401 — key
+      // salah), pakai respons itu karena lebih informatif; bila tetap 404,
+      // laporkan respons aslinya (endpoint tersimpan-lah yang bermasalah).
+      // Endpoint tersimpan TIDAK diubah — heal bersifat per-request, sama
+      // seperti di testConnection.
+      if (res.status === 404 && !endpointValidation.normalizedUrl.endsWith('/v1')) {
+        try {
+          const v1Url = `${endpointValidation.normalizedUrl}/v1/chat/completions`;
+          const v1Res = await makeHttpsRequest(v1Url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${config.apiKey.trim()}`,
+            },
+            body: JSON.stringify(payload),
+            agent,
+            timeoutMs,
+          });
+          if (v1Res.ok || v1Res.status !== 404) {
+            res = v1Res;
+            resText = await v1Res.text();
+            latencyMs = Date.now() - startTime;
+          }
+        } catch {
+          // Gagal menghubungi /v1 — lanjut dengan respons aslinya.
+        }
+      }
 
       if (!res.ok) {
         let errJson: any = null;
@@ -510,9 +545,19 @@ export class GroqProviderAdapter implements AIProviderAdapter {
   }
 
   /**
-   * Mengambil daftar model yang tersedia melalui endpoint /models
+   * Mengambil daftar model yang tersedia melalui endpoint /models.
+   *
+   * M4: bila pengambilan live gagal (termasuk 401 — key tidak valid),
+   * kembalikan daftar cadangan dengan `isLive: false` + pesan error, BUKAN
+   * daftar hardcoded yang tampak seperti data live. UI menampilkan
+   * "daftar cadangan — pengambilan live gagal" untuk kasus ini. Untuk
+   * provider kustom, daftar cadangan tetap [] (perilaku PR #2).
+   *
+   * M3: heal `/v1` yang sama seperti testConnection diterapkan di sini —
+   * bila `/models` 404 dan base belum berakhiran `/v1`, coba `/v1/models`
+   * agar endpoint yang lolos tes tidak dilaporkan gagal mengambil model.
    */
-  async fetchAvailableModels(config: ProviderRuntimeConfig): Promise<AIModelInfo[]> {
+  async fetchAvailableModels(config: ProviderRuntimeConfig): Promise<AIModelListResult> {
     // Daftar model fallback hanya berlaku untuk Groq. Provider kustom TIDAK BOLEH
     // menerima daftar model Groq — model yang salah membuat admin memilih model
     // yang tidak ada di provider tersebut, lalu chat gagal 404 ("tidak terkoneksi").
@@ -526,18 +571,25 @@ export class GroqProviderAdapter implements AIProviderAdapter {
           ]
         : [];
 
+    const fallback = (error: string): AIModelListResult => ({
+      models: fallbackModels,
+      isLive: false,
+      error,
+    });
+
     if (!config.apiKey || !config.apiKey.trim()) {
-      return fallbackModels;
+      return fallback(`API key ${this.providerName} belum dikonfigurasi — daftar model tidak dapat diambil dari provider.`);
     }
 
     try {
       const endpointUrl = config.apiEndpoint || (this.providerName === 'groq' ? 'https://api.groq.com/openai/v1' : '');
-      if (!endpointUrl) return fallbackModels;
+      if (!endpointUrl) return fallback('Endpoint provider belum dikonfigurasi.');
       const endpointValidation = await validateAndPinEndpoint(endpointUrl, this.providerName === 'groq' ? 'groq' : undefined);
       const agent = createPinnedHttpsAgent(endpointValidation.hostname, endpointValidation.pinnedIp);
-      const url = `${endpointValidation.normalizedUrl}/models`;
+      const normalizedBase = endpointValidation.normalizedUrl;
+      const url = `${normalizedBase}/models`;
 
-      const res = await makeHttpsRequest(url, {
+      let res = await makeHttpsRequest(url, {
         method: 'GET',
         headers: {
           Authorization: `Bearer ${config.apiKey.trim()}`,
@@ -546,8 +598,31 @@ export class GroqProviderAdapter implements AIProviderAdapter {
         timeoutMs: 8000,
       });
 
+      // M3: heal /v1 seperti testConnection.
+      if (res.status === 404 && !normalizedBase.endsWith('/v1')) {
+        try {
+          const v1Res = await makeHttpsRequest(`${normalizedBase}/v1/models`, {
+            method: 'GET',
+            headers: {
+              Authorization: `Bearer ${config.apiKey.trim()}`,
+            },
+            agent,
+            timeoutMs: 8000,
+          });
+          if (v1Res.ok || v1Res.status !== 404) {
+            res = v1Res;
+          }
+        } catch {
+          // Gagal menghubungi /v1 — lanjut dengan respons aslinya.
+        }
+      }
+
       if (!res.ok) {
-        return fallbackModels;
+        const detail =
+          res.status === 401
+            ? 'API key ditolak provider (401 Unauthorized) — periksa kembali key yang tersimpan.'
+            : `Provider mengembalikan HTTP ${res.status} saat mengambil daftar model.`;
+        return fallback(detail);
       }
 
       const data = await res.json();
@@ -561,13 +636,15 @@ export class GroqProviderAdapter implements AIProviderAdapter {
             isDefault: m.id === (config.selectedModel || 'llama-3.3-70b-versatile'),
           }));
 
-        return models.length > 0 ? models : fallbackModels;
+        if (models.length > 0) {
+          return { models, isLive: true, error: null };
+        }
+        return fallback('Provider tidak mengembalikan model apa pun.');
       }
-    } catch {
-      // Fallback
+      return fallback('Respons daftar model provider tidak dikenali.');
+    } catch (err: any) {
+      return fallback(`Gagal menghubungi provider untuk daftar model: ${err?.message || 'error jaringan'}`);
     }
-
-    return fallbackModels;
   }
 
   /**

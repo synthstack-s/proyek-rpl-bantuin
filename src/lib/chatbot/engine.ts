@@ -21,7 +21,13 @@ import {
 import { validateTopicAndSafety, getStandardRefusalMessage } from './guard';
 import * as DataService from './data-service';
 import * as ActionService from './action-service';
-import { resolveConversationContext, updateSessionMemory } from './context-manager';
+import {
+  resolveConversationContext,
+  updateSessionMemory,
+  getPendingTechnicianAction,
+  setPendingTechnicianAction,
+  clearPendingTechnicianAction,
+} from './context-manager';
 import { buildSystemPrompt } from './prompt-builder';
 import { getRoleBasedSuggestedPrompts } from './suggested-prompts';
 import { executeRoleBasedTool } from './tools';
@@ -38,6 +44,31 @@ import { query } from '@/lib/db';
 // Ekspor pembantu saran halaman untuk backward compatibility
 export function getPageContextSuggestions(pathname?: string, role: string = 'guest'): QuickSuggestion[] {
   return getRoleBasedSuggestedPrompts(role as any, pathname);
+}
+
+// ============================================================================
+// F10 — Pola jawaban konfirmasi aksi teknisi (langkah ke-2 two-step
+// verification). Pesan yang diawali "ya"/"tidak" (dan padanannya) menanggapi
+// aksi tertunda di sesi ini; pesan lain diabaikan dan diproses seperti biasa.
+// ============================================================================
+const TECHNICIAN_CONFIRM_YES_PATTERN =
+  /^(ya|iya|yup|betul|benar|lanjut|lanjutkan|konfirmasi|setuju|yakin|oke|ok|silakan|silahkan)\b/i;
+const TECHNICIAN_CONFIRM_NO_PATTERN =
+  /^(tidak|nggak|gak|ga|batal|batalkan|jangan|tunda)\b/i;
+
+/**
+ * F10 — Menentukan jenis aksi teknisi dari teks pesan (null bila pesan tidak
+ * mengandung perintah aksi). Dipakai cabang konfirmasi untuk memastikan
+ * jawaban "ya, <aksi> <kode>" hanya mengonfirmasi aksi tertunda yang SAMA —
+ * perintah aksi/kode yang berbeda tidak boleh mengeksekusi aksi tertunda
+ * yang salah, melainkan ditangani cabang aksi sebagai permintaan baru.
+ */
+function detectTechnicianActionType(norm: string): 'accept' | 'on_the_way' | 'start_diagnosis' | 'start_repair' | null {
+  if (!/terima\s+tugas|menuju\s+lokasi|mulai\s+diagnosa|mulai\s+perbaikan/i.test(norm)) return null;
+  if (/terima/i.test(norm)) return 'accept';
+  if (/diagnosa/i.test(norm)) return 'start_diagnosis';
+  if (/perbaikan/i.test(norm)) return 'start_repair';
+  return 'on_the_way';
 }
 
 /**
@@ -507,8 +538,54 @@ ${orderDetail.invoice ? `- **Status Tagihan:** Rp ${orderDetail.invoice.totalAmo
   if (userContext.role === 'technician' && userContext.userId) {
     const techId = userContext.userId;
 
+    // F10 — Jawaban atas aksi tertunda (langkah ke-2 two-step verification).
+    // Cabang ini HARUS berada di awal rantai teknisi agar jawaban "ya" /
+    // "tidak" tidak jatuh ke cabang lain atau ke AI. Pesan menanggapi aksi
+    // tertunda hanya bila (a) ada aksi tertunda dari teknisi yang sama di
+    // sesi ini, dan (b) pesan TIDAK memerintahkan aksi/kode yang berbeda
+    // (perintah baru ditangani cabang aksi di bawah dan menggantikan aksi
+    // tertunda lama).
+    const pendingAction = getPendingTechnicianAction(session.id);
+    const messageActionType = detectTechnicianActionType(norm);
+    const messageOrderCode = contextEntities.orderCodeFromCurrentMessage === true
+      ? contextEntities.activeOrderCode
+      : null;
+    const messageTargetsPending = Boolean(
+      pendingAction &&
+      pendingAction.userId === userContext.userId &&
+      (!messageActionType || messageActionType === pendingAction.action) &&
+      (!messageOrderCode || messageOrderCode === pendingAction.orderCode)
+    );
+
+    if (pendingAction && messageTargetsPending && TECHNICIAN_CONFIRM_YES_PATTERN.test(norm)) {
+      // Konfirmasi afirmatif: eksekusi aksi tertunda dengan confirmed: true.
+      // State machine di action-service memvalidasi ulang status saat ini,
+      // jadi konfirmasi yang sudah basi secara status ditolak dengan aman.
+      const confirmedResult = await ActionService.executeTechnicianTaskStatusUpdate(userContext, {
+        orderCodeOrId: pendingAction.orderCode,
+        newStatus: pendingAction.action,
+        notes: userMessage,
+        confirmed: true,
+      });
+      if (confirmedResult.requiresConfirmation && confirmedResult.confirmationPrompt) {
+        // Tidak seharusnya terjadi (confirmed: true), tetapi bila terjadi,
+        // simpan lagi aksinya dan tampilkan prompt baru.
+        setPendingTechnicianAction(session.id, { ...pendingAction, createdAt: Date.now() });
+        directReply = confirmedResult.confirmationPrompt;
+      } else {
+        clearPendingTechnicianAction(session.id);
+        directReply = confirmedResult.success
+          ? `✅ **Berhasil:** ${confirmedResult.message}`
+          : `⚠️ **Gagal:** ${confirmedResult.message}`;
+      }
+    } else if (pendingAction && messageTargetsPending && TECHNICIAN_CONFIRM_NO_PATTERN.test(norm)) {
+      const actionLabel = ActionService.TECHNICIAN_TASK_TRANSITIONS?.[pendingAction.action]?.label || pendingAction.action;
+      clearPendingTechnicianAction(session.id);
+      directReply = `Baik, aksi ${actionLabel} untuk pesanan #${pendingAction.orderCode} dibatalkan. Tidak ada perubahan yang disimpan.`;
+    }
+
     // Profil & Riwayat Kinerja Teknisi
-    if (/siapa\s+nama\s+saya|profil\s+saya/i.test(norm)) {
+    else if (/siapa\s+nama\s+saya|profil\s+saya/i.test(norm)) {
       const [profile, metrics] = await Promise.all([
         DataService.getTechnicianProfile(techId),
         DataService.getTechnicianPerformanceMetrics(techId),
@@ -614,20 +691,39 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
       if (!explicitOrderCode) {
         directReply = 'Untuk memperbarui status tugas, sebutkan kode ordernya di pesan yang sama, contoh: "terima tugas REP-2026-0001".';
       } else {
-        let actionType: 'accept' | 'on_the_way' | 'start_diagnosis' | 'start_repair' = 'on_the_way';
-        if (/terima/i.test(norm)) actionType = 'accept';
-        else if (/diagnosa/i.test(norm)) actionType = 'start_diagnosis';
-        else if (/perbaikan/i.test(norm)) actionType = 'start_repair';
+        const actionType = detectTechnicianActionType(norm) || 'on_the_way';
 
+        // F10 — Panggilan pertama tanpa confirmed: action-service
+        // mengembalikan requiresConfirmation + prompt TANPA memutasi.
+        // Simpan aksi sebagai tertunda dan tampilkan prompt ke teknisi;
+        // eksekusi terjadi saat teknisi membalas "ya" (cabang konfirmasi
+        // di awal rantai teknisi). Pesan satu langkah ("ya, terima tugas
+        // BAN-...") yang cocok dengan aksi tertunda sudah ditangani cabang
+        // konfirmasi di atas, sehingga ke sini selalu tanpa confirmed.
         const actionResult = await ActionService.executeTechnicianTaskStatusUpdate(userContext, {
           orderCodeOrId: explicitOrderCode,
           newStatus: actionType,
           notes: userMessage,
         });
 
-        directReply = actionResult.success
-          ? `✅ **Berhasil:** ${actionResult.message}`
-          : `⚠️ **Gagal:** ${actionResult.message}`;
+        if (actionResult.requiresConfirmation && actionResult.confirmationPrompt) {
+          setPendingTechnicianAction(session.id, {
+            orderCode: explicitOrderCode,
+            action: actionType,
+            userId: userContext.userId,
+            createdAt: Date.now(),
+          });
+          directReply = actionResult.confirmationPrompt;
+        } else {
+          // Aksi dieksekusi atau ditolak definitif (mis. state machine):
+          // aksi tertunda yang sama (bila ada) sudah tidak berlaku.
+          if (pendingAction && pendingAction.orderCode === explicitOrderCode && pendingAction.action === actionType) {
+            clearPendingTechnicianAction(session.id);
+          }
+          directReply = actionResult.success
+            ? `✅ **Berhasil:** ${actionResult.message}`
+            : `⚠️ **Gagal:** ${actionResult.message}`;
+        }
       }
     }
   }
@@ -1217,11 +1313,22 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
           metadata,
           diagnosisCard: extractedCard,
         };
+      } else {
+        // N7 — Tidak ada API key sama sekali: blok AI dilewati tanpa
+        // exception, jadi tanpa baris ini aiGatewayError tetap null dan
+        // jawaban expert system disajikan TANPA label "Mode offline"
+        // (fallback diam-diam yang sama seperti yang diperbaiki PR #2
+        // untuk jalur exception).
+        aiGatewayError = 'Tidak ada API key provider AI yang terkonfigurasi';
       }
     } catch (err: any) {
       aiGatewayError = err?.message || String(err);
       console.warn('[AI Provider Gateway] Menggunakan fallback BANTUIN Database Expert System:', aiGatewayError);
     }
+  } else {
+    // N7 — Mode offline dipaksa via env: beri label pada jawaban expert
+    // system di bawah, seperti jalur gagalnya AI.
+    aiGatewayError = 'Mode offline dipaksa via FORCE_OFFLINE_AI';
   }
 
   // ==========================================================================

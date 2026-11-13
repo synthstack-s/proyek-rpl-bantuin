@@ -45,6 +45,14 @@ export interface ProviderRuntimeConfig {
   lastConnectionStatus: AIConnectionStatus;
   lastTestedAt?: string | null;
   lastErrorMessage?: string | null;
+  // M12: true bila key yang dipakai saat ini berasal dari environment karena
+  // key tersimpan di DB gagal didekripsi (bukan key yang admin simpan).
+  // Tidak pernah true secara diam-diam — panel admin menampilkannya.
+  keyFromEnvFallback?: boolean;
+  // M12: true bila dekripsi key tersimpan di DB gagal (master secret berubah
+  // atau data korup). Dipasangkan dengan lastConnectionStatus
+  // 'connection_error' + lastErrorMessage yang menjelaskan penyebabnya.
+  decryptionFailed?: boolean;
 }
 
 export interface UniversalToolParameterProperty {
@@ -134,6 +142,20 @@ export interface AIModelInfo {
   isDefault?: boolean;
 }
 
+/**
+ * Hasil pengambilan daftar model (M4).
+ * `isLive: true` berarti daftar benar-benar diambil dari API provider.
+ * `isLive: false` berarti pengambilan live GAGAL dan `models` hanyalah daftar
+ * cadangan hardcoded (atau [] untuk provider kustom) — UI wajib menampilkan
+ * "daftar cadangan — pengambilan live gagal" dan TIDAK boleh mengklaim sukses.
+ * `error` berisi penyebab kegagalan live (mis. key ditolak 401).
+ */
+export interface AIModelListResult {
+  models: AIModelInfo[];
+  isLive: boolean;
+  error?: string | null;
+}
+
 export interface NormalizedAIError {
   provider: AIProviderType;
   status: AIConnectionTestStatus;
@@ -165,9 +187,11 @@ export interface AIProviderAdapter {
   ): Promise<AIChatResponse>;
 
   /**
-   * Mengambil daftar model yang aktif tersedia dari endpoint API provider
+   * Mengambil daftar model yang aktif tersedia dari endpoint API provider.
+   * Mengembalikan AIModelListResult: bila pengambilan live gagal, `isLive`
+   * false dan `models` berisi daftar cadangan (M4) — bukan daftar live.
    */
-  fetchAvailableModels(config: ProviderRuntimeConfig): Promise<AIModelInfo[]>;
+  fetchAvailableModels(config: ProviderRuntimeConfig): Promise<AIModelListResult>;
 
   /**
    * Menormalkan error dari vendor ke format standar BANTUIN

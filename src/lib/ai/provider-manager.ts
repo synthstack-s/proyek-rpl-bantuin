@@ -17,7 +17,7 @@ import {
   AIChatRequest,
   AIChatResponse,
   AIConnectionTestResult,
-  AIModelInfo,
+  AIModelListResult,
   ProviderRuntimeConfig,
   NormalizedAIError,
 } from './types';
@@ -40,6 +40,39 @@ interface CircuitBreakerTracker {
   consecutiveFailures: number;
   lastFailureTime: number;
   nextAllowedProbeTime: number;
+  // M9: apakah kegagalan terakhir yang DIHITUNG menuju breaker layak fallback
+  // (dari NormalizedAIError.isFallbackEligible). Cabang OPEN memakai ini agar
+  // konsisten dengan jalur normal — error yang tidak layak fallback tidak
+  // memicu fallback lewat jalur OPEN. Default true (belum ada kegagalan).
+  lastFailureFallbackEligible: boolean;
+}
+
+/**
+ * M9: status error NON-TRANSIEN — tidak akan sembuh dengan menunggu, jadi
+ * TIDAK BOLEH dihitung menuju pembukaan circuit breaker. Sebelumnya 3x chat
+ * gagal karena key salah membuat breaker OPEN dan request berikutnya
+ * menampilkan pesan "cooldown" alih-alih "API key salah", menutupi akar
+ * masalah. Kegagalan ini tetap dicatat di log/metrik (recordAIUsageLog),
+ * hanya tidak dihitung menuju threshold breaker.
+ */
+const NON_TRANSIENT_BREAKER_STATUSES: ReadonlySet<string> = new Set([
+  'invalid_api_key',
+  'model_not_available',
+  'invalid_endpoint',
+]);
+
+function isNonTransientBreakerStatus(status: string | undefined | null): boolean {
+  return !!status && NON_TRANSIENT_BREAKER_STATUSES.has(status);
+}
+
+function createCircuitBreakerTracker(): CircuitBreakerTracker {
+  return {
+    state: 'CLOSED',
+    consecutiveFailures: 0,
+    lastFailureTime: 0,
+    nextAllowedProbeTime: 0,
+    lastFailureFallbackEligible: true,
+  };
 }
 
 export class AIProviderManager {
@@ -59,19 +92,9 @@ export class AIProviderManager {
     this.adapters.set('gemini', new GeminiProviderAdapter());
     this.adapters.set('groq', new GroqProviderAdapter());
 
-    this.circuitBreakers.set('gemini', {
-      state: 'CLOSED',
-      consecutiveFailures: 0,
-      lastFailureTime: 0,
-      nextAllowedProbeTime: 0,
-    });
+    this.circuitBreakers.set('gemini', createCircuitBreakerTracker());
 
-    this.circuitBreakers.set('groq', {
-      state: 'CLOSED',
-      consecutiveFailures: 0,
-      lastFailureTime: 0,
-      nextAllowedProbeTime: 0,
-    });
+    this.circuitBreakers.set('groq', createCircuitBreakerTracker());
   }
 
   public static getInstance(): AIProviderManager {
@@ -97,12 +120,7 @@ export class AIProviderManager {
     }
 
     if (!this.circuitBreakers.has(provider)) {
-      this.circuitBreakers.set(provider, {
-        state: 'CLOSED',
-        consecutiveFailures: 0,
-        lastFailureTime: 0,
-        nextAllowedProbeTime: 0,
-      });
+      this.circuitBreakers.set(provider, createCircuitBreakerTracker());
     }
 
     return adapter;
@@ -188,7 +206,7 @@ export class AIProviderManager {
     // masalah sebenarnya hanya key yang belum dikonfigurasi.
     if (!activeConfig.apiKey || !activeConfig.apiKey.trim()) {
       if (globalSettings.enableFallback && fallbackConfig && fallbackConfig.apiKey && fallbackConfig.apiKey.trim()) {
-        return this.executeFallback(request, fallbackConfig, primaryProvider, 'API key provider aktif belum dikonfigurasi');
+        return this.executeFallback(request, fallbackConfig, primaryProvider, 'API key provider aktif belum dikonfigurasi', globalSettings);
       }
       throw new Error(
         `API key untuk ${activeConfig.name || primaryProvider} belum dikonfigurasi. Silakan simpan API key di panel Konfigurasi AI.`
@@ -200,8 +218,22 @@ export class AIProviderManager {
 
     if (primaryCircuitState === 'OPEN') {
       console.warn(`[Circuit Breaker] Provider ${primaryProvider} sedang OPEN (cooldown aktif).`);
-      if (globalSettings.enableFallback && fallbackConfig && fallbackConfig.apiKey) {
-        return this.executeFallback(request, fallbackConfig, primaryProvider, 'Circuit breaker OPEN on primary provider');
+      // M9: cabang OPEN WAJIB menghormati isFallbackEligible seperti jalur
+      // normal — kegagalan terakhir yang membuka breaker tercatat di tracker
+      // (lihat recordCircuitFailure). Tanpa ini, error yang dinyatakan tidak
+      // layak fallback tetap memicu fallback lewat jalur ini. Pemeriksaan key
+      // juga memakai .trim() agar konsisten dengan cabang lain (key berisi
+      // spasi saja dianggap tidak ada).
+      const primaryTracker = this.circuitBreakers.get(primaryProvider);
+      const primaryFailureWasFallbackEligible = primaryTracker?.lastFailureFallbackEligible !== false;
+      if (
+        globalSettings.enableFallback &&
+        fallbackConfig &&
+        fallbackConfig.apiKey &&
+        fallbackConfig.apiKey.trim() &&
+        primaryFailureWasFallbackEligible
+      ) {
+        return this.executeFallback(request, fallbackConfig, primaryProvider, 'Circuit breaker OPEN on primary provider', globalSettings);
       }
       throw new Error(`Layanan ${activeConfig.name} sedang mengalami gangguan berulang dan dalam masa pemulihan (cooldown).`);
     }
@@ -233,7 +265,10 @@ export class AIProviderManager {
         ? err
         : adapter.normalizeError(err, activeConfig.apiKey);
 
-      this.recordCircuitFailure(primaryProvider, globalSettings);
+      // M9: recordCircuitFailure mengabaikan error non-transien
+      // (invalid_api_key / model_not_available / invalid_endpoint) untuk
+      // hitungan threshold — kegagalan tetap dicatat di log/metrik di bawah.
+      this.recordCircuitFailure(primaryProvider, globalSettings, normalizedErr);
 
       console.warn(`[AI Provider Manager] Gagal pada provider utama (${primaryProvider}): ${normalizedErr.sanitizedMessage}`);
 
@@ -249,7 +284,8 @@ export class AIProviderManager {
           request,
           fallbackConfig,
           primaryProvider,
-          normalizedErr.sanitizedMessage
+          normalizedErr.sanitizedMessage,
+          globalSettings
         );
       }
 
@@ -271,20 +307,40 @@ export class AIProviderManager {
 
   /**
    * Menjalankan Eksekusi Provider Cadangan (Fallback)
+   *
+   * M10: fallback TIDAK BOLEH melewati circuit breaker. Sebelum memanggil
+   * provider cadangan, periksa breaker-nya (lempar error gabungan bila OPEN);
+   * catat sukses fallback via recordCircuitSuccess dan kegagalan via
+   * recordCircuitFailure (dengan pengecualian non-transien M9) seperti
+   * provider utama. Sebelumnya breaker untuk provider cadangan praktis mati
+   * — provider cadangan yang bermasalah terus dihantam tanpa cooldown.
    */
   private async executeFallback(
     request: AIChatRequest,
     fallbackConfig: ProviderRuntimeConfig,
     fallbackFrom: AIProviderType,
-    causeReason: string
+    causeReason: string,
+    settings: GlobalAISettings
   ): Promise<AIChatResponse> {
     const fallbackProvider = fallbackConfig.provider;
     const fallbackAdapter = this.getAdapter(fallbackProvider);
+
+    // M10: periksa breaker cadangan di awal — jangan menghantam provider
+    // cadangan yang sedang dalam masa pemulihan.
+    const fallbackCircuitState = this.checkCircuitState(fallbackProvider, settings);
+    if (fallbackCircuitState === 'OPEN') {
+      throw new Error(
+        `Provider utama (${fallbackFrom}) gagal (${causeReason}), dan provider cadangan (${fallbackProvider}) juga tidak dapat dipakai saat ini karena circuit breaker-nya sedang OPEN (dalam masa pemulihan/cooldown setelah kegagalan berulang).`
+      );
+    }
 
     console.info(`[AI Fallback Engine] Mengalihkan request ke ${fallbackConfig.name} (Penyebab: ${causeReason})`);
 
     try {
       const response = await fallbackAdapter.generateChatCompletion(request, fallbackConfig);
+
+      // M10: sukses fallback me-reset breaker cadangan.
+      this.recordCircuitSuccess(fallbackProvider);
 
       response.isFallback = true;
       response.fallbackFrom = fallbackFrom;
@@ -308,6 +364,11 @@ export class AIProviderManager {
       const normFallbackErr: NormalizedAIError = fallbackErr.sanitizedMessage
         ? fallbackErr
         : fallbackAdapter.normalizeError(fallbackErr, fallbackConfig.apiKey);
+
+      // M10: kegagalan fallback dicatat ke breaker cadangan (dengan
+      // pengecualian non-transien M9 — key cadangan yang salah tidak boleh
+      // membuka breaker dan menutupi pesan error aslinya).
+      this.recordCircuitFailure(fallbackProvider, settings, normFallbackErr);
 
       await recordAIUsageLog({
         provider: fallbackProvider,
@@ -372,11 +433,14 @@ export class AIProviderManager {
 
   /**
    * Mengambil Model yang Tersedia untuk Provider (Mendukung override kredensial dari form)
+   *
+   * M4: mengembalikan AIModelListResult — `isLive: false` berarti daftar
+   * adalah cadangan hardcoded karena pengambilan live gagal (lihat adapter).
    */
   public async getAvailableModels(
     provider: AIProviderType,
     configOverride?: Partial<ProviderRuntimeConfig>
-  ): Promise<AIModelInfo[]> {
+  ): Promise<AIModelListResult> {
     await this.syncWithDatabase();
     const config = await getProviderRuntimeConfig(provider);
     const effectiveConfig: ProviderRuntimeConfig = {
@@ -460,12 +524,38 @@ export class AIProviderManager {
       tracker.consecutiveFailures = 0;
       tracker.lastFailureTime = 0;
       tracker.nextAllowedProbeTime = 0;
+      tracker.lastFailureFallbackEligible = true;
     }
   }
 
-  private recordCircuitFailure(provider: AIProviderType, settings: GlobalAISettings): void {
+  /**
+   * M9: error non-transien (invalid_api_key, model_not_available,
+   * invalid_endpoint) TIDAK dihitung menuju pembukaan breaker — menunggu
+   * cooldown tidak akan memperbaiki key yang salah atau model yang tidak
+   * ada. Kegagalan tetap dicatat di log/metrik oleh pemanggil
+   * (recordAIUsageLog); fungsi ini hanya menentukan hitungan breaker.
+   * Bila `normalizedErr` diberikan, kelayakan fallback-nya dicatat di
+   * tracker agar cabang OPEN dapat menghormati isFallbackEligible seperti
+   * jalur normal.
+   */
+  private recordCircuitFailure(
+    provider: AIProviderType,
+    settings: GlobalAISettings,
+    normalizedErr?: NormalizedAIError
+  ): void {
     const tracker = this.circuitBreakers.get(provider);
     if (!tracker) return;
+
+    if (normalizedErr && isNonTransientBreakerStatus(normalizedErr.status)) {
+      console.warn(
+        `[Circuit Breaker] Kegagalan non-transien (${normalizedErr.status}) pada provider ${provider} TIDAK dihitung menuju pembukaan breaker — pesan error asli tetap ditampilkan.`
+      );
+      return;
+    }
+
+    if (normalizedErr) {
+      tracker.lastFailureFallbackEligible = normalizedErr.isFallbackEligible;
+    }
 
     tracker.consecutiveFailures++;
     tracker.lastFailureTime = Date.now();

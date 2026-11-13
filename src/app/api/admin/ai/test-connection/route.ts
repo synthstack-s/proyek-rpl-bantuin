@@ -28,6 +28,10 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // M2: normalisasi slug provider (trim + lowercase) agar konsisten dengan
+    // slug tersimpan di database.
+    const normalizedProvider = provider.trim().toLowerCase() as AIProviderType;
+
     // H1: tentukan apakah tes ini memakai kredensial tersimpan atau override
     // dari form yang belum disimpan. Hanya tes kredensial tersimpan yang boleh
     // memperbarui status tersimpan (lihat recordConnectionTestLog).
@@ -43,7 +47,7 @@ export async function POST(req: NextRequest) {
     if (typeof usesStoredCredentials === 'boolean') {
       storedCredentialsTest = usesStoredCredentials;
     } else {
-      const stored = await getProviderRuntimeConfig(provider as AIProviderType);
+      const stored = await getProviderRuntimeConfig(normalizedProvider);
       const keyDiffers =
         typeof apiKey === 'string' && apiKey.trim().length > 0 &&
         apiKey.trim() !== (stored.apiKey || '').trim();
@@ -58,7 +62,7 @@ export async function POST(req: NextRequest) {
 
     const manager = AIProviderManager.getInstance();
     const result = await manager.testProviderConnection(
-      provider as AIProviderType,
+      normalizedProvider,
       {
         apiEndpoint,
         apiKey,
