@@ -31,6 +31,13 @@ import type { AdminSessionPayload, UserSessionPayload } from './auth-edge';
  * DB — token yang diterbitkan sebelum reset password (tokenVersion lebih
  * lama dari users.token_version) ditolak, begitu pula akun yang
  * di-suspend/di-nonaktifkan/dihapus.
+ *
+ * T6: role juga direvalidasi dari DB — sesi admin HANYA sah bila role
+ * terkini di DB adalah 'admin'. Admin yang dicopot (role diubah di DB)
+ * langsung kehilangan akses admin meskipun tokennya belum kedaluwarsa.
+ * Token yang sudah logout (jti di blocklist) juga ditolak. Bila DB tidak
+ * dapat diakses, pemeriksaan fail-open seperti T5 (klaim token dipakai
+ * apa adanya — lihat token-revocation.ts).
  */
 export async function getAdminSession(): Promise<AdminSessionPayload | null> {
   try {
@@ -46,6 +53,16 @@ export async function getAdminSession(): Promise<AdminSessionPayload | null> {
       console.warn('[Auth] Sesi admin ditolak:', check.reason, '(userId', session.userId + ')');
       return null;
     }
+
+    // T6: role DB menang atas klaim token. Sesi admin mensyaratkan role
+    // 'admin' di DB — bila admin dicopot, token lamanya tidak lagi memberi
+    // akses admin. (dbRole kosong hanya saat fail-open DB-down; saat itu
+    // klaim token dipertahankan sesuai kebijakan fail-open T5.)
+    if (check.dbRole !== undefined && check.dbRole !== 'admin') {
+      console.warn('[Auth] Sesi admin ditolak: role di DB adalah', check.dbRole, 'bukan admin (userId', session.userId + ')');
+      return null;
+    }
+
     return session;
   } catch {
     return null;
@@ -59,6 +76,13 @@ export async function getAdminSession(): Promise<AdminSessionPayload | null> {
  * DB — token yang diterbitkan sebelum reset password (tokenVersion lebih
  * lama dari users.token_version) ditolak, begitu pula akun yang
  * di-suspend/di-nonaktifkan/dihapus.
+ *
+ * T6: role/status/isVerified yang dikembalikan adalah nilai TERKINI dari
+ * DB, bukan klaim token. Perubahan role (promosi/demosi) langsung berlaku
+ * pada sesi yang sudah berjalan; token yang sudah logout (jti di
+ * blocklist) ditolak. Bila DB tidak dapat diakses, pemeriksaan fail-open
+ * seperti T5 (klaim token dipakai apa adanya — lihat
+ * token-revocation.ts).
  */
 export async function getUserSession(): Promise<UserSessionPayload | null> {
   try {
@@ -74,7 +98,18 @@ export async function getUserSession(): Promise<UserSessionPayload | null> {
       console.warn('[Auth] Sesi pengguna ditolak:', check.reason, '(userId', session.userId + ')');
       return null;
     }
-    return session;
+
+    // T6: DB menang atas klaim token. Nilai DB dipakai bila tersedia;
+    // bila kosong (fail-open DB-down), klaim token dipertahankan.
+    if (check.dbRole !== undefined && check.dbRole !== session.role) {
+      console.warn('[Auth] Role sesi disesuaikan dari DB:', session.role, '->', check.dbRole, '(userId', session.userId + ')');
+    }
+    return {
+      ...session,
+      role: check.dbRole ?? session.role,
+      status: check.dbStatus ?? session.status,
+      isVerified: check.dbIsVerified ?? session.isVerified,
+    };
   } catch {
     return null;
   }

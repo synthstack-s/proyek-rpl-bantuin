@@ -42,6 +42,15 @@ export interface AdminSessionPayload {
    * (pra-migrasi 004) tidak membawa klaim ini dan dianggap versi 1.
    */
   tokenVersion?: number;
+  /**
+   * T6 — ID unik token (klaim `jti`), dipakai blocklist logout. Token yang
+   * diterbitkan sebelum T6 tidak membawa klaim ini dan tidak dapat
+   * dicabut satu per satu lewat logout (tetap tunduk pada revalidasi
+   * role/status dan token_version).
+   */
+  jti?: string;
+  /** T6 — Waktu kedaluwarsa token (detik sejak epoch, klaim `exp`). */
+  exp?: number;
   [key: string]: any;
 }
 
@@ -59,6 +68,15 @@ export interface UserSessionPayload {
    * (pra-migrasi 004) tidak membawa klaim ini dan dianggap versi 1.
    */
   tokenVersion?: number;
+  /**
+   * T6 — ID unik token (klaim `jti`), dipakai blocklist logout. Token yang
+   * diterbitkan sebelum T6 tidak membawa klaim ini dan tidak dapat
+   * dicabut satu per satu lewat logout (tetap tunduk pada revalidasi
+   * role/status dan token_version).
+   */
+  jti?: string;
+  /** T6 — Waktu kedaluwarsa token (detik sejak epoch, klaim `exp`). */
+  exp?: number;
   [key: string]: any;
 }
 
@@ -114,6 +132,11 @@ export async function createAdminToken(
     .setSubject(payload.uuid)
     .setIssuedAt()
     .setExpirationTime(expiresIn)
+    // T6: setiap token mendapat ID unik (jti) agar dapat dicabut satu per
+    // satu lewat blocklist logout. crypto.randomUUID adalah Web Crypto API
+    // — tersedia di Edge runtime maupun Node — jadi modul ini tetap
+    // edge-safe.
+    .setJti(crypto.randomUUID())
     .sign(secretKey);
 }
 
@@ -138,6 +161,10 @@ export async function verifyAdminToken(token: string): Promise<AdminSessionPaylo
       role: 'admin',
       name: payload.name ? String(payload.name) : undefined,
       tokenVersion: Number(payload.tokenVersion) || 1,
+      // T6: jti + exp dikembalikan agar pemeriksaan pencabutan (Node) dapat
+      // mengecek blocklist dan logout dapat mencatat kedaluwarsa token.
+      jti: typeof payload.jti === 'string' ? payload.jti : undefined,
+      exp: typeof payload.exp === 'number' ? payload.exp : undefined,
     };
   } catch {
     return null;
@@ -169,6 +196,11 @@ export async function createUserToken(
     .setSubject(payload.uuid)
     .setIssuedAt()
     .setExpirationTime(expiry)
+    // T6: setiap token mendapat ID unik (jti) agar dapat dicabut satu per
+    // satu lewat blocklist logout. crypto.randomUUID adalah Web Crypto API
+    // — tersedia di Edge runtime maupun Node — jadi modul ini tetap
+    // edge-safe.
+    .setJti(crypto.randomUUID())
     .sign(secretKey);
 }
 
@@ -196,6 +228,10 @@ export async function verifyUserToken(token: string): Promise<UserSessionPayload
       isVerified: Boolean(payload.isVerified),
       name: payload.name ? String(payload.name) : undefined,
       tokenVersion: Number(payload.tokenVersion) || 1,
+      // T6: jti + exp dikembalikan agar pemeriksaan pencabutan (Node) dapat
+      // mengecek blocklist dan logout dapat mencatat kedaluwarsa token.
+      jti: typeof payload.jti === 'string' ? payload.jti : undefined,
+      exp: typeof payload.exp === 'number' ? payload.exp : undefined,
     };
   } catch {
     return null;
