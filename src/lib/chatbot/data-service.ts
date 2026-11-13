@@ -2306,29 +2306,35 @@ export async function executeGovernedDatabaseQuery(
 
 // Daftar nama pengguna berdasarkan peran (untuk jawaban list).
 // Mengembalikan null bila database tidak dapat diakses (berbeda dari [] = kosong).
+// Parameter status opsional: bila diisi, hanya pengguna dengan status itu yang diambil.
 export async function getUserNameList(
   role: 'customer' | 'technician' | null,
-  limit: number = 50
+  limit: number = 50,
+  status?: 'active' | 'pending_verification' | 'suspended'
 ): Promise<string[] | null> {
   const cleanLimit = Math.min(100, Math.max(1, Math.floor(limit) || 50));
+  const cleanStatus = status === 'active' || status === 'pending_verification' || status === 'suspended' ? status : null;
   try {
+    const whereParts = ['u.deleted_at IS NULL'];
+    const params: any[] = [];
+    if (role) {
+      whereParts.push('u.role = ?');
+      params.push(role);
+    }
+    if (cleanStatus) {
+      whereParts.push('u.status = ?');
+      params.push(cleanStatus);
+    }
+    params.push(cleanLimit);
     const rows = await query<any[]>(
-      role
-        ? `SELECT COALESCE(cp.full_name, tp.full_name, u.email) AS full_name
-           FROM users u
-           LEFT JOIN customer_profiles cp ON u.id = cp.user_id
-           LEFT JOIN technician_profiles tp ON u.id = tp.user_id
-           WHERE u.deleted_at IS NULL AND u.role = ?
-           ORDER BY u.created_at DESC
-           LIMIT ?`
-        : `SELECT COALESCE(cp.full_name, tp.full_name, u.email) AS full_name
-           FROM users u
-           LEFT JOIN customer_profiles cp ON u.id = cp.user_id
-           LEFT JOIN technician_profiles tp ON u.id = tp.user_id
-           WHERE u.deleted_at IS NULL
-           ORDER BY u.created_at DESC
-           LIMIT ?`,
-      role ? [role, cleanLimit] : [cleanLimit]
+      `SELECT COALESCE(cp.full_name, tp.full_name, u.email) AS full_name
+       FROM users u
+       LEFT JOIN customer_profiles cp ON u.id = cp.user_id
+       LEFT JOIN technician_profiles tp ON u.id = tp.user_id
+       WHERE ${whereParts.join(' AND ')}
+       ORDER BY u.created_at DESC
+       LIMIT ?`,
+      params
     );
     return (rows || []).map((r) => String(r.full_name || '').trim()).filter(Boolean);
   } catch {
