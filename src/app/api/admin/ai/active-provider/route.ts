@@ -30,9 +30,12 @@ export async function POST(req: NextRequest) {
     const ip = req.headers.get('x-forwarded-for') || '127.0.0.1';
     const userAgent = req.headers.get('user-agent') || 'AdminBrowser';
 
+    // M2: normalisasi slug provider (trim + lowercase).
+    const normalizedProvider = activeProvider.trim().toLowerCase() as AIProviderType;
+
     const manager = AIProviderManager.getInstance();
     const result = await manager.switchActiveProvider(
-      activeProvider as AIProviderType,
+      normalizedProvider,
       adminSession.userId,
       { ip, userAgent }
     );

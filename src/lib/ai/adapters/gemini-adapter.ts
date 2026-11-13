@@ -19,6 +19,7 @@ import {
   AIChatResponse,
   AIConnectionTestResult,
   AIModelInfo,
+  AIModelListResult,
   NormalizedAIError,
   UniversalToolCall,
 } from '../types';
@@ -273,9 +274,18 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
   }
 
   /**
-   * Mengambil daftar model Google Gemini yang tersedia
+   * Mengambil daftar model Google Gemini yang tersedia.
+   *
+   * T2: API key TIDAK PERNAH dimasukkan ke query string URL (`?key=...` —
+   * key masuk ke log server/proxy dan histori browser). Key dikirim lewat
+   * header `x-goog-api-key` yang didukung REST API Google.
+   *
+   * M4: bila pengambilan live gagal (termasuk 401 — key tidak valid),
+   * kembalikan daftar cadangan dengan `isLive: false` + pesan error, BUKAN
+   * daftar hardcoded yang tampak seperti data live. UI menampilkan
+   * "daftar cadangan — pengambilan live gagal" untuk kasus ini.
    */
-  async fetchAvailableModels(config: ProviderRuntimeConfig): Promise<AIModelInfo[]> {
+  async fetchAvailableModels(config: ProviderRuntimeConfig): Promise<AIModelListResult> {
     const fallbackGeminiModels: AIModelInfo[] = [
       { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash', description: 'Model rekomendasi cepat dan cerdas untuk operasional BANTUIN', isDefault: true },
       { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', description: 'Model inferensi generasi baru dengan latensi ultra rendah' },
@@ -284,18 +294,29 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
       { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro', description: 'Model kapasitas token besar' },
     ];
 
+    const fallback = (error: string): AIModelListResult => ({
+      models: fallbackGeminiModels,
+      isLive: false,
+      error,
+    });
+
     if (!config.apiKey || !config.apiKey.trim()) {
-      return fallbackGeminiModels;
+      return fallback('API key Gemini belum dikonfigurasi — daftar model tidak dapat diambil dari provider.');
     }
 
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${config.apiKey}`;
-      const res = await fetch(url, {
+      // T2: key lewat header, bukan query string.
+      const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models', {
+        headers: { 'x-goog-api-key': config.apiKey.trim() },
         signal: AbortSignal.timeout(8000),
       });
 
       if (!res.ok) {
-        return fallbackGeminiModels;
+        const detail =
+          res.status === 401
+            ? 'API key ditolak provider (401 Unauthorized) — periksa kembali key yang tersimpan.'
+            : `Provider mengembalikan HTTP ${res.status} saat mengambil daftar model.`;
+        return fallback(detail);
       }
 
       const data = await res.json();
@@ -314,17 +335,29 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
             };
           });
 
-        return models.length > 0 ? models : fallbackGeminiModels;
+        if (models.length > 0) {
+          return { models, isLive: true, error: null };
+        }
+        return fallback('Provider tidak mengembalikan model apa pun yang mendukung generateContent.');
       }
-    } catch {
-      // Fallback
+      return fallback('Respons daftar model provider tidak dikenali.');
+    } catch (err: any) {
+      return fallback(`Gagal menghubungi provider untuk daftar model: ${err?.message || 'error jaringan'}`);
     }
-
-    return fallbackGeminiModels;
   }
 
   /**
-   * Menormalkan error vendor Google Gemini dan menyensor API key
+   * Menormalkan error vendor Google Gemini dan menyensor API key.
+   *
+   * H3: klasifikasikan berdasarkan STATUS HTTP NUMERIK dari SDK terlebih
+   * dahulu (seperti adapter Groq) — `GoogleGenerativeAIFetchError` membawa
+   * `status`/`statusCode`. Pencocokan substring pesan hanya dipakai sebagai
+   * fallback bila tidak ada status numerik. Sebelumnya klasifikasi sepenuhnya
+   * substring-matching, sehingga: 500/502 selalu dilaporkan 503; error kuota
+   * 429 yang pesan-nya mengandung substring "401" (mis. nomor proyek Google)
+   * salah jadi `invalid_api_key` dan mematikan fallback; setiap pesan yang
+   * mengandung `models/` diklaim model tidak tersedia; dan error 400 jatuh
+   * ke `unknown_error`.
    */
   normalizeError(error: any, apiKeyToSanitize?: string): NormalizedAIError {
     const rawMsg = String(error?.message || error || 'Unknown Gemini error');
@@ -340,43 +373,122 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
     let isRetryable = false;
     let isFallbackEligible = false;
 
-    const lower = sanitizedMsg.toLowerCase();
+    // 1. Status HTTP numerik dari SDK menang atas segalanya. Terima angka
+    // maupun string numerik 3 digit dari properti yang umum dipakai SDK
+    // (`status`, `statusCode`, `response.status`, `code` bila numerik).
+    const numericStatus = extractNumericHttpStatus(error);
 
-    if (lower.includes('api_key_invalid') || lower.includes('api key not valid') || lower.includes('invalid api key') || lower.includes('401')) {
-      status = 'invalid_api_key';
-      httpStatusCode = 401;
-      isRetryable = false;
-      isFallbackEligible = false; // TIDAK BOLEH fallback jika API key salah
-    } else if (lower.includes('permission_denied') || lower.includes('403')) {
-      status = 'provider_error';
-      httpStatusCode = 403;
-      isRetryable = false;
-      isFallbackEligible = false;
-    } else if (lower.includes('resource_exhausted') || lower.includes('quota') || lower.includes('rate limit') || lower.includes('429')) {
-      status = 'rate_limit_exceeded';
-      httpStatusCode = 429;
-      isRetryable = true;
-      isFallbackEligible = true; // Boleh fallback jika kuota terlampaui
-    } else if (lower.includes('not found') || lower.includes('models/') || lower.includes('404')) {
-      status = 'model_not_available';
-      httpStatusCode = 404;
-      isRetryable = false;
-      isFallbackEligible = false;
-    } else if (lower.includes('timeout') || lower.includes('aborted') || lower.includes('etimedout')) {
-      status = 'timeout';
-      httpStatusCode = 504;
-      isRetryable = true;
-      isFallbackEligible = true; // Boleh fallback jika timeout
-    } else if (lower.includes('500') || lower.includes('502') || lower.includes('503') || lower.includes('unavailable') || lower.includes('overloaded')) {
-      status = 'provider_error';
-      httpStatusCode = 503;
-      isRetryable = true;
-      isFallbackEligible = true; // Boleh fallback jika server Google error
-    } else if (lower.includes('ssrf') || lower.includes('protocol') || lower.includes('private ip')) {
-      status = 'invalid_endpoint';
-      httpStatusCode = 400;
-      isRetryable = false;
-      isFallbackEligible = false;
+    if (numericStatus !== null) {
+      httpStatusCode = numericStatus;
+      switch (numericStatus) {
+        case 400:
+          // Argumen tidak valid / prompt diblokir safety — sebelumnya jatuh
+          // ke unknown_error. Fallback ke provider lain masih layak dicoba
+          // (provider lain memakai model dan filter berbeda).
+          status = 'provider_error';
+          isRetryable = false;
+          isFallbackEligible = true;
+          break;
+        case 401:
+          status = 'invalid_api_key';
+          isRetryable = false;
+          isFallbackEligible = false; // TIDAK BOLEH fallback jika API key salah
+          break;
+        case 403:
+          status = 'provider_error';
+          isRetryable = false;
+          isFallbackEligible = false;
+          break;
+        case 404:
+          status = 'model_not_available';
+          isRetryable = false;
+          isFallbackEligible = false;
+          break;
+        case 408:
+          status = 'timeout';
+          isRetryable = true;
+          isFallbackEligible = true;
+          break;
+        case 429:
+          status = 'rate_limit_exceeded';
+          isRetryable = true;
+          isFallbackEligible = true; // Boleh fallback jika kuota terlampaui
+          break;
+        default:
+          // 500/502/503/504 dan kode lain: LAPORKAN KODE ASLINYA — jangan
+          // paksa semua menjadi 503 seperti sebelumnya. Error server (5xx)
+          // layak retry + fallback; kode 4xx lain tidak.
+          status = 'provider_error';
+          isRetryable = numericStatus >= 500;
+          isFallbackEligible = numericStatus >= 500;
+          break;
+      }
+    } else {
+      // 2. Fallback: tidak ada status numerik — klasifikasikan dari pesan.
+      // URUTAN PENTING: kuota/429 HARUS diperiksa SEBELUM 401, karena pesan
+      // kuota Google menyertakan nomor proyek konsumen yang bisa mengandung
+      // substring "401" (atau "404"/"500") — memeriksa 401 lebih dulu akan
+      // salah mengklasifikasi error 429 sebagai invalid_api_key.
+      const lower = sanitizedMsg.toLowerCase();
+
+      if (lower.includes('resource_exhausted') || lower.includes('quota') || lower.includes('rate limit') || lower.includes('too many requests') || lower.includes('429')) {
+        status = 'rate_limit_exceeded';
+        httpStatusCode = 429;
+        isRetryable = true;
+        isFallbackEligible = true; // Boleh fallback jika kuota terlampaui
+      } else if (lower.includes('api_key_invalid') || lower.includes('api key not valid') || lower.includes('invalid api key') || lower.includes('unauthenticated') || lower.includes('401')) {
+        status = 'invalid_api_key';
+        httpStatusCode = 401;
+        isRetryable = false;
+        isFallbackEligible = false; // TIDAK BOLEH fallback jika API key salah
+      } else if (lower.includes('permission_denied') || lower.includes('permission denied') || lower.includes('403')) {
+        status = 'provider_error';
+        httpStatusCode = 403;
+        isRetryable = false;
+        isFallbackEligible = false;
+      } else if (
+        lower.includes('invalid argument') || lower.includes('invalid_argument') ||
+        lower.includes('bad request') || lower.includes('safety') ||
+        lower.includes('blocked') || lower.includes('400')
+      ) {
+        // 400: argumen tidak valid / prompt diblokir safety.
+        status = 'provider_error';
+        httpStatusCode = 400;
+        isRetryable = false;
+        isFallbackEligible = true;
+      } else if (
+        lower.includes('not found') || lower.includes('model not found') ||
+        lower.includes('does not exist') || lower.includes('404') ||
+        lower.includes('unknown model') ||
+        // 'models/' saja TIDAK cukup (H3): hanya hitung bila disertai penanda
+        // tidak-tersedia — error 400/403 yang hanya menyebut path model
+        // tidak boleh diklaim model_not_available.
+        (lower.includes('models/') && lower.includes('not supported'))
+      ) {
+        status = 'model_not_available';
+        httpStatusCode = 404;
+        isRetryable = false;
+        isFallbackEligible = false;
+      } else if (lower.includes('timeout') || lower.includes('aborted') || lower.includes('etimedout')) {
+        status = 'timeout';
+        httpStatusCode = 504;
+        isRetryable = true;
+        isFallbackEligible = true; // Boleh fallback jika timeout
+      } else if (lower.includes('500') || lower.includes('502') || lower.includes('503') || lower.includes('unavailable') || lower.includes('overloaded')) {
+        // Pisahkan kode 5xx apa adanya; 'unavailable'/'overloaded' tanpa kode
+        // eksplisit tetap dilaporkan 503 (perilaku lama yang benar untuk kasus ini).
+        status = 'provider_error';
+        if (lower.includes('500')) httpStatusCode = 500;
+        else if (lower.includes('502')) httpStatusCode = 502;
+        else httpStatusCode = 503;
+        isRetryable = true;
+        isFallbackEligible = true; // Boleh fallback jika server Google error
+      } else if (lower.includes('ssrf') || lower.includes('protocol') || lower.includes('private ip')) {
+        status = 'invalid_endpoint';
+        httpStatusCode = 400;
+        isRetryable = false;
+        isFallbackEligible = false;
+      }
     }
 
     return {
@@ -390,4 +502,25 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
       timestamp: new Date().toISOString(),
     };
   }
+}
+
+/**
+ * H3: ambil kode status HTTP numerik dari error SDK bila ada.
+ * Menerima angka (mis. 429) atau string numerik 3 digit (mis. '429').
+ * Mengembalikan null bila tidak ada status numerik yang valid — pemanggil
+ * kemudian memakai pencocokan pesan sebagai fallback.
+ */
+function extractNumericHttpStatus(error: any): number | null {
+  if (!error || typeof error !== 'object') return null;
+  const candidates = [error.status, error.statusCode, error.response?.status, error.code];
+  for (const c of candidates) {
+    if (typeof c === 'number' && Number.isFinite(c) && c >= 100 && c < 600) {
+      return Math.trunc(c);
+    }
+    if (typeof c === 'string' && /^\d{3}$/.test(c.trim())) {
+      const n = Number(c.trim());
+      if (n >= 100 && n < 600) return n;
+    }
+  }
+  return null;
 }

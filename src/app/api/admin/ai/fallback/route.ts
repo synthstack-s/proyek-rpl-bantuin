@@ -30,10 +30,17 @@ export async function POST(req: NextRequest) {
     const ip = req.headers.get('x-forwarded-for') || '127.0.0.1';
     const userAgent = req.headers.get('user-agent') || 'AdminBrowser';
 
+    // M2: normalisasi slug provider fallback (trim + lowercase). Nilai default
+    // 'groq' dipertahankan bila tidak dikirim.
+    const normalizedFallback =
+      (typeof fallbackProvider === 'string' && fallbackProvider.trim()
+        ? fallbackProvider.trim().toLowerCase()
+        : 'groq') as AIProviderType;
+
     const manager = AIProviderManager.getInstance();
     const result = await manager.updateFallbackSettings(
       enableFallback,
-      (fallbackProvider || 'groq') as AIProviderType,
+      normalizedFallback,
       adminSession.userId,
       { ip, userAgent }
     );
