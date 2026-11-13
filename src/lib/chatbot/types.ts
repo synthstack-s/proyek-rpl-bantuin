@@ -54,6 +54,7 @@ export interface ChatMessageMetadata {
   safetyAlert?: string | null;
   topicRefused?: boolean;
   toolCalls?: Array<{ name: string; args: any }>;
+  aiError?: string | null;
 }
 
 export interface StoredChatMessage {

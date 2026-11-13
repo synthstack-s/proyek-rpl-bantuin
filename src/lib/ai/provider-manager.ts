@@ -183,6 +183,18 @@ export class AIProviderManager {
     const primaryProvider = activeConfig.provider;
     const adapter = this.getAdapter(primaryProvider);
 
+    // Fail-fast: jangan kirim request dengan API key kosong. Tanpa penjaga ini,
+    // adapter mengirim "Bearer " kosong → 401 → circuit breaker trip, padahal
+    // masalah sebenarnya hanya key yang belum dikonfigurasi.
+    if (!activeConfig.apiKey || !activeConfig.apiKey.trim()) {
+      if (globalSettings.enableFallback && fallbackConfig && fallbackConfig.apiKey && fallbackConfig.apiKey.trim()) {
+        return this.executeFallback(request, fallbackConfig, primaryProvider, 'API key provider aktif belum dikonfigurasi');
+      }
+      throw new Error(
+        `API key untuk ${activeConfig.name || primaryProvider} belum dikonfigurasi. Silakan simpan API key di panel Konfigurasi AI.`
+      );
+    }
+
     // 2. Periksa status Circuit Breaker untuk provider utama
     const primaryCircuitState = this.checkCircuitState(primaryProvider, globalSettings);
 

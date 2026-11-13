@@ -401,7 +401,17 @@ export async function saveProviderConfig(
       userAgent: clientMeta.userAgent,
     });
   } catch (err: any) {
-    console.warn(`[AI Repository] DB simpan gagal, menggunakan in-memory state: ${err.message}`);
+    // Database adalah Source of Truth konfigurasi AI. Jika penyimpanan ke DB
+    // gagal, perubahan TIDAK BOLEH dilaporkan berhasil — sebelumnya kegagalan
+    // ini disembunyikan (lanjut dengan in-memory state), sehingga admin melihat
+    // status "connected" dari auto-probe padahal key baru tidak pernah tersimpan
+    // dan chat tetap memakai key lama (atau hilang saat server restart).
+    const isProviderColumnError =
+      /provider/i.test(err.message) && (/enum/i.test(err.message) || /truncated/i.test(err.message) || /data too long/i.test(err.message));
+    const migrationHint = isProviderColumnError
+      ? ' Jika Anda menambah provider baru, pastikan migrasi database/migrations/003_allow_dynamic_ai_providers.sql sudah dijalankan (kolom provider masih ENUM gemini/groq).'
+      : '';
+    throw new Error(`Gagal menyimpan konfigurasi AI ke database: ${err.message}.${migrationHint}`);
   }
 
   // Bump version global agar AIProviderManager mendeteksi perubahan konfigurasi

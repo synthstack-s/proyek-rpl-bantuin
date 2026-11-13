@@ -827,6 +827,10 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
   // ==========================================================================
   // E. PEMANGGILAN MULTI-PROVIDER AI (GEMINI & GROQ VIA AI PROVIDER MANAGER)
   // ==========================================================================
+  // Jika pemanggilan AI gagal, simpan alasannya agar fallback expert system
+  // di bawah TIDAK menyamar sebagai jawaban AI (lihat bagian F).
+  let aiGatewayError: string | null = null;
+
   if (process.env.FORCE_OFFLINE_AI !== 'true') {
     try {
       const providerManager = AIProviderManager.getInstance();
@@ -1052,7 +1056,8 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
         };
       }
     } catch (err: any) {
-      console.warn('[AI Provider Gateway] Menggunakan fallback BANTUIN Database Expert System:', err.message);
+      aiGatewayError = err?.message || String(err);
+      console.warn('[AI Provider Gateway] Menggunakan fallback BANTUIN Database Expert System:', aiGatewayError);
     }
   }
 
@@ -1065,12 +1070,19 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
     userContext
   );
 
-  const finalReply = `${safetyAlertPrefix}${fallback.reply}`;
+  // Jika AI sempat dicoba tetapi gagal, JANGAN menyajikan jawaban expert system
+  // seolah-olah berasal dari AI. Beri label yang jelas beserta alasannya, agar
+  // admin dan pengguna tahu provider AI sedang tidak terhubung.
+  const offlineNotice = aiGatewayError
+    ? `⚠️ *Mode offline:* layanan AI sedang tidak tersedia (${aiGatewayError}), jadi jawaban berikut berasal dari sistem pakar BANTUIN, bukan dari AI.\n\n`
+    : '';
+  const finalReply = `${safetyAlertPrefix}${offlineNotice}${fallback.reply}`;
   const metadata: ChatMessageMetadata = {
     model: 'bantuin-expert-system-v1',
     responseTimeMs: Date.now() - startTime,
     diagnosisCard: fallback.card || null,
     quickSuggestions: fallback.quickSuggestions,
+    aiError: aiGatewayError,
   };
 
   await saveChatMessage(session.id, 'user', userMessage);
