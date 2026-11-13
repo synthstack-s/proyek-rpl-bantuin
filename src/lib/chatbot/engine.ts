@@ -620,6 +620,15 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
     } else if (/^(berapa\s+)?total\s+teknisi$/.test(singleMetric) || /^(berapa\s+)?jumlah\s+teknisi$/.test(singleMetric)) {
       const stats = await DataService.getAdminUserStats();
       directReply = `Total Mitra Teknisi: ${stats.technicians.total}`;
+    } else if (/^(berapa\s+)?(total\s+|jumlah\s+)?pengguna\s+aktif$/.test(singleMetric)) {
+      const stats = await DataService.getAdminUserStats();
+      directReply = `Total Pengguna Aktif: ${stats.customers.active + stats.technicians.active + stats.admins.active}`;
+    } else if (/^(berapa\s+)?(total\s+|jumlah\s+)?(customer|pelanggan)\s+aktif$/.test(singleMetric)) {
+      const stats = await DataService.getAdminUserStats();
+      directReply = `Total Pelanggan Aktif: ${stats.customers.active}`;
+    } else if (/^(berapa\s+)?(total\s+|jumlah\s+)?teknisi\s+aktif$/.test(singleMetric)) {
+      const stats = await DataService.getAdminUserStats();
+      directReply = `Total Teknisi Aktif: ${stats.technicians.active}`;
     }
 
     // 0a. Daftar nama pengguna (mode list lugas: "siapa saja nama customer" -> list nama saja)
@@ -897,12 +906,14 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
             dbContextSummary += `  - Order #${t.orderCode}: Pelanggan: ${t.customerName}, Status: ${t.assignmentStatus}, Alamat: ${t.address}\n`;
           });
         } else if (userContext.role === 'admin') {
-          const [overview, workload, finance] = await Promise.all([
+          const [overview, workload, finance, userStats] = await Promise.all([
             DataService.getAdminOperationalOverview(),
             DataService.getAdminTechnicianWorkload(),
             DataService.getAdminFinancialAnalytics(),
+            DataService.getAdminUserStats(),
           ]);
-          dbContextSummary += `Ringkasan Admin: Total Pesanan: ${overview.orders.total}, Menunggu: ${overview.orders.submitted}, Dikerjakan: ${overview.orders.inRepair}, Selesai: ${overview.orders.completed}, Mitra Teknisi Aktif: ${overview.technicians.active}, Pelanggan: ${overview.customers.active}\n`;
+          const totalActiveUsers = userStats.customers.active + userStats.technicians.active + userStats.admins.active;
+          dbContextSummary += `Ringkasan Admin: Total Pesanan: ${overview.orders.total}, Menunggu: ${overview.orders.submitted}, Dikerjakan: ${overview.orders.inRepair}, Selesai: ${overview.orders.completed}, Mitra Teknisi Aktif: ${overview.technicians.active}, Pelanggan Aktif: ${overview.customers.active}, Total Pengguna Aktif: ${totalActiveUsers}, Total Pengguna Terdaftar: ${userStats.totalUsers}\n`;
           dbContextSummary += `Keuangan: Total Pendapatan: Rp ${finance.totalRevenuePaid.toLocaleString('id-ID')}, Piutang Tertunggak: Rp ${finance.totalUnpaidAmount.toLocaleString('id-ID')}, Total Invoice: ${finance.totalInvoices}\n`;
           dbContextSummary += `Teknisi: ${workload.length} mitra teknisi aktif terdaftar.\n`;
 

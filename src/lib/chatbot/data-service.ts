@@ -965,13 +965,13 @@ export async function getAdminOperationalOverview() {
     const [activeTechs]: any = await query<any[]>(
       `SELECT COUNT(*) AS total_active_techs 
        FROM users 
-       WHERE role = 'technician' AND status = 'active'`
+       WHERE role = 'technician' AND status = 'active' AND deleted_at IS NULL`
     );
 
     const [activeCustomers]: any = await query<any[]>(
       `SELECT COUNT(*) AS total_active_customers 
        FROM users 
-       WHERE role = 'customer' AND status = 'active'`
+       WHERE role = 'customer' AND status = 'active' AND deleted_at IS NULL`
     );
 
     const [openComplaints]: any = await query<any[]>(
