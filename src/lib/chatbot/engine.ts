@@ -27,6 +27,7 @@ import {
   getPendingTechnicianAction,
   setPendingTechnicianAction,
   clearPendingTechnicianAction,
+  setPendingMemorySearchConfirmation,
 } from './context-manager';
 import { buildSystemPrompt } from './prompt-builder';
 import { getRoleBasedSuggestedPrompts } from './suggested-prompts';
@@ -47,12 +48,12 @@ export function getPageContextSuggestions(pathname?: string, role: string = 'gue
 }
 
 // ============================================================================
-// F10 — Pola jawaban konfirmasi aksi teknisi (langkah ke-2 two-step
-// verification). Pesan yang diawali "ya"/"tidak" (dan padanannya) menanggapi
-// aksi tertunda di sesi ini; pesan lain diabaikan dan diproses seperti biasa.
+// F10 — Pola jawaban penolakan aksi teknisi (langkah ke-2 two-step
+// verification). Pesan yang diawali "tidak"/"batal" (dan padanannya)
+// membatalkan aksi tertunda di sesi ini; pembatalan tidak memutasi apa pun
+// sehingga polanya boleh longgar. Jawaban AFIRMATIF ("ya") ditangani
+// isTechnicianConfirmationReply (S9g, ketat) — bukan pola awalan semata.
 // ============================================================================
-const TECHNICIAN_CONFIRM_YES_PATTERN =
-  /^(ya|iya|yup|betul|benar|lanjut|lanjutkan|konfirmasi|setuju|yakin|oke|ok|silakan|silahkan)\b/i;
 const TECHNICIAN_CONFIRM_NO_PATTERN =
   /^(tidak|nggak|gak|ga|batal|batalkan|jangan|tunda)\b/i;
 
@@ -114,6 +115,374 @@ function combineStoredIn(...locations: MessageStoreLocation[]): MessageStoreLoca
 // di log server dan TIDAK PERNAH dikembalikan ke klien — baik di teks
 // balasan maupun metadata.aiError.
 const AI_UNAVAILABLE_MESSAGE = 'Layanan AI sedang tidak tersedia, coba lagi nanti';
+
+/**
+ * S9a/F13 — Jendela riwayat yang dikirim ke LLM: 20 pesan terakhir saja.
+ * Sesi yang panjang (ratusan pesan) tidak lagi membebani token dan memori
+ * di setiap pesan baru; context-manager hanya memakai 4 pesan terakhir.
+ */
+export const LLM_HISTORY_LIMIT = 20;
+
+// ============================================================================
+// S9e/F16 — Serialisasi pemrosesan per sesi (in-process).
+//
+// Dua pesan yang dikirim hampir bersamaan ke sesi yang sama tidak boleh
+// diproses paralel (riwayat yang belum memuat satu sama lain, urutan simpan
+// tidak dijamin, jawaban tertukar konteks). Rantai promise per sessionId:
+// pemrosesan pesan berikutnya menunggu pesan sebelumnya SELESAI (termasuk
+// bila sebelumnya gagal — rantai tidak pernah rejected). Entri Map dibersihkan
+// saat rantai terakhir selesai dan tidak ada rantai baru yang menggantikannya.
+// CATATAN: lock ini hanya berlaku dalam satu instance proses; deployment
+// multi-instance tetap butuh lock terdistribusi (di luar cakupan ini).
+// ============================================================================
+const sessionProcessingChains = new Map<number, Promise<void>>();
+
+function runSerializedPerSession<T>(sessionId: number, fn: () => Promise<T>): Promise<T> {
+  const prev = sessionProcessingChains.get(sessionId) ?? Promise.resolve();
+  const result = prev.then(fn, fn);
+  const chained = result.then(
+    () => undefined,
+    () => undefined
+  );
+  sessionProcessingChains.set(sessionId, chained);
+  chained.then(() => {
+    if (sessionProcessingChains.get(sessionId) === chained) {
+      sessionProcessingChains.delete(sessionId);
+    }
+  });
+  return result;
+}
+
+// ============================================================================
+// S9g — Konfirmasi aksi teknisi yang KETAT.
+//
+// Pola lama ("pesan diawali ya/iya/...") mengeksekusi aksi tertunda bahkan
+// bila "ya" itu hanya awalan pesan lain ("ya, saya mau tanya soal garansi").
+// Sekarang: setelah kata penegasan, pesan hanya boleh berisi (opsional)
+// frasa aksi yang SAMA dengan aksi tertunda dan/atau kode order yang SAMA
+// — dan tidak ada yang lain. Pesan lain jatuh ke cabang biasa (cabang aksi
+// akan menampilkan prompt konfirmasi baru bila memuat perintah aksi).
+// ============================================================================
+const TECHNICIAN_ACTION_PHRASES: Record<string, string> = {
+  accept: 'terima tugas',
+  on_the_way: 'menuju lokasi',
+  start_diagnosis: 'mulai diagnosa',
+  start_repair: 'mulai perbaikan',
+};
+
+export function isTechnicianConfirmationReply(
+  norm: string,
+  pending: { orderCode: string; action: 'accept' | 'on_the_way' | 'start_diagnosis' | 'start_repair' }
+): boolean {
+  const match = norm.match(
+    /^(ya|iya|yup|betul|benar|lanjut|lanjutkan|konfirmasi|setuju|yakin|oke|ok|silakan|silahkan)\b[,.]?\s*(.*)$/i
+  );
+  if (!match) return false;
+  const rest = (match[2] || '')
+    .toLowerCase()
+    .replace(/[.,!]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (rest === '') return true;
+  const code = pending.orderCode.toLowerCase();
+  const phrase = TECHNICIAN_ACTION_PHRASES[pending.action] || '';
+  return (
+    rest === code ||
+    (phrase !== '' &&
+      (rest === phrase || rest === `${phrase} ${code}` || rest === `${code} ${phrase}`))
+  );
+}
+
+// ============================================================================
+// S9b/S9d — Deteksi permintaan eksplisit atas field PII.
+//
+// Proyeksi hasil tool dan ringkasan konteks membuang nomor telepon, email,
+// alamat, dan UUID — KECUALI pertanyaan saat ini secara eksplisit meminta
+// field itu untuk satu orang/pesanan spesifik ("berapa nomor telepon Budi?").
+// Deteksi berbasis kata kunci pertanyaan, bukan tebakan.
+// ============================================================================
+export interface ExplicitPiiAsks {
+  phone: boolean;
+  email: boolean;
+  address: boolean;
+  uuid: boolean;
+}
+
+export function detectExplicitPiiAsks(norm: string): ExplicitPiiAsks {
+  return {
+    phone: /nomor|telepon|phone|no\s*hp|whatsapp|\bwa\b|kontak|hubungi/i.test(norm),
+    email: /email|e-mail|surat\s+elektronik/i.test(norm),
+    address: /alamat|domisili|tinggal\s+di|lokasi\s+rumah/i.test(norm),
+    uuid: /uuid/i.test(norm),
+  };
+}
+
+// ============================================================================
+// S29/F20 — Klarifikasi target pencarian dari memori.
+//
+// Nilai target ditampilkan TERSAMAR di pertanyaan klarifikasi (nomor telepon
+// dan email adalah PII — cukup petunjuk agar pengguna mengenali targetnya);
+// kode order/invoice bukan PII dan ditampilkan penuh.
+// ============================================================================
+function maskPhoneForClarification(phone: string): string {
+  const digits = phone.replace(/[^0-9+]/g, '');
+  if (digits.length <= 6) return `${digits.slice(0, 2)}…`;
+  return `${digits.slice(0, 4)}…${digits.slice(-2)}`;
+}
+
+function maskEmailForClarification(email: string): string {
+  const at = email.indexOf('@');
+  if (at <= 0) return '…';
+  return `${email[0]}***${email.slice(at)}`;
+}
+
+function maskUuidForClarification(uuid: string): string {
+  return `${uuid.slice(0, 8)}…`;
+}
+
+export function buildMemorySearchClarification(target: {
+  kind: 'phone' | 'email' | 'uuid' | 'order' | 'invoice';
+  value: string;
+}): string {
+  switch (target.kind) {
+    case 'phone':
+      return `Maksud Bos nomor ${maskPhoneForClarification(target.value)} yang tadi? Balas "ya" bila benar, atau sebutkan nomor yang dimaksud.`;
+    case 'email':
+      return `Maksud Bos email ${maskEmailForClarification(target.value)} yang tadi? Balas "ya" bila benar, atau sebutkan email yang dimaksud.`;
+    case 'uuid':
+      return `Maksud Bos pengguna dengan UUID ${maskUuidForClarification(target.value)} yang tadi? Balas "ya" bila benar, atau sebutkan UUID yang dimaksud.`;
+    case 'order':
+      return `Maksud Bos pesanan #${target.value} yang tadi? Balas "ya" bila benar, atau sebutkan kode pesanan yang dimaksud.`;
+    case 'invoice':
+      return `Maksud Bos invoice ${target.value} yang tadi? Balas "ya" bila benar, atau sebutkan nomor invoice yang dimaksud.`;
+    default:
+      return 'Maksud Bos data yang tadi? Balas "ya" bila benar, atau sebutkan yang dimaksud.';
+  }
+}
+
+// ============================================================================
+// S9d — Proyeksi hasil tool sebelum masuk ke prompt LLM.
+//
+// Hasil tool TIDAK LAGI di-JSON-stringify utuh: tiap alat hanya menyumbang
+// kolom yang dibutuhkan jawaban, sesuai aturan LUGAS dan minimasi S9b.
+// Kolom PII (telepon, email, alamat, UUID) hanya disertakan bila pertanyaan
+// saat ini secara eksplisit memintanya (lihat detectExplicitPiiAsks).
+// - searchDatabaseUsers / Invoices / Technicians: allowlist kolom eksplisit.
+// - searchDatabaseOrders / queryDatabase / lainnya: scrub generik (buang
+//   kunci PII + kunci sensitif, pertahankan sisanya) — bentuk barisnya
+//   bervariasi menurut peran/tabel sehingga allowlist kaku tidak cocok.
+//   queryDatabase sendiri sudah dijaga governed layer (kolom sensitif
+//   ditolak, row scoping ditegakkan); scrub di sini adalah lapis kedua.
+// Hasil error ({success: false}) diteruskan utuh (tidak mengandung PII).
+// ============================================================================
+const SENSITIVE_KEY_PATTERN = /password|otp|token|secret|api[_-]?key|hash|credential/i;
+
+/**
+ * S9d — Klasifikasi kunci PII berdasarkan NAMA KUNCI (pola, bukan daftar
+ * eksak): baris queryDatabase memakai nama kolom mentah snake_case
+ * (`phone_number`, `address_text`, `user_uuid`) sementara record search
+ * memakai camelCase (`phoneNumber`, `customerPhone`) — keduanya harus
+ * dikenali sebagai PII yang sama.
+ */
+function piiKeyClass(key: string): 'phone' | 'email' | 'address' | 'uuid' | null {
+  if (/phone|telepon|no_hp|whatsapp/i.test(key)) return 'phone';
+  if (key.toLowerCase() === 'email' || /e_mail/i.test(key)) return 'email';
+  if (/address|alamat/i.test(key)) return 'address';
+  if (/uuid/i.test(key)) return 'uuid';
+  return null;
+}
+
+function scrubRowGenerically(row: any, asks: ExplicitPiiAsks): any {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return row;
+  const out: Record<string, any> = {};
+  for (const [key, value] of Object.entries(row)) {
+    if (SENSITIVE_KEY_PATTERN.test(key)) continue;
+    const piiClass = piiKeyClass(key);
+    if (piiClass === 'phone' && !asks.phone) continue;
+    if (piiClass === 'email' && !asks.email) continue;
+    if (piiClass === 'address' && !asks.address) continue;
+    if (piiClass === 'uuid' && !asks.uuid) continue;
+    // Objek bersarang (mis. technician: {name, rating, phone}) ikut di-scrub.
+    out[key] =
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? scrubRowGenerically(value, asks)
+        : value;
+  }
+  return out;
+}
+
+function projectUserRecordForPrompt(u: any, asks: ExplicitPiiAsks): any {
+  if (!u || typeof u !== 'object') return u;
+  const projected: Record<string, any> = {
+    name: u.fullName ?? u.name ?? null,
+    role: u.role ?? null,
+    status: u.status ?? null,
+  };
+  if (typeof u.isVerified === 'boolean') projected.isVerified = u.isVerified;
+  if (u.registeredAt) projected.registeredAt = u.registeredAt;
+  if (u.technicianDetails && typeof u.technicianDetails === 'object') {
+    projected.technicianDetails = {
+      ratingAvg: u.technicianDetails.ratingAvg ?? null,
+      ratingCount: u.technicianDetails.ratingCount ?? null,
+      yearsOfExperience: u.technicianDetails.yearsOfExperience ?? null,
+      isAvailable: u.technicianDetails.isAvailable ?? null,
+    };
+  }
+  if (asks.phone && u.phoneNumber) projected.phoneNumber = u.phoneNumber;
+  if (asks.email && u.email) projected.email = u.email;
+  if (asks.address) {
+    if (u.address) projected.address = u.address;
+    if (u.city) projected.city = u.city;
+  }
+  if (asks.uuid && u.uuid) projected.uuid = u.uuid;
+  return projected;
+}
+
+function projectInvoiceRecordForPrompt(inv: any, asks: ExplicitPiiAsks): any {
+  if (!inv || typeof inv !== 'object') return inv;
+  const projected: Record<string, any> = {
+    invoiceNumber: inv.invoiceNumber ?? null,
+    orderCode: inv.orderCode ?? null,
+    category: inv.category ?? null,
+    customerName: inv.customerName ?? null,
+    laborCost: inv.laborCost ?? null,
+    partsCost: inv.partsCost ?? null,
+    serviceFee: inv.serviceFee ?? null,
+    totalAmount: inv.totalAmount ?? null,
+    status: inv.status ?? null,
+    dueDate: inv.dueDate ?? null,
+  };
+  if (inv.paidAt) projected.paidAt = inv.paidAt;
+  if (asks.phone && inv.customerPhone) projected.customerPhone = inv.customerPhone;
+  return projected;
+}
+
+function projectTechnicianRecordForPrompt(t: any, asks: ExplicitPiiAsks): any {
+  if (!t || typeof t !== 'object') return t;
+  const projected: Record<string, any> = {
+    name: t.name ?? null,
+    rating: t.rating ?? null,
+    reviewsCount: t.reviewsCount ?? null,
+    experienceYears: t.experienceYears ?? null,
+    isAvailable: t.isAvailable ?? null,
+    verifiedStatus: t.verifiedStatus ?? null,
+    specializations: Array.isArray(t.specializations) ? t.specializations : [],
+  };
+  if (asks.phone && t.phone) projected.phone = t.phone;
+  if (asks.email && t.email) projected.email = t.email;
+  return projected;
+}
+
+export function projectToolResultForPrompt(
+  toolName: string,
+  toolResult: any,
+  norm: string
+): any {
+  if (!toolResult || typeof toolResult !== 'object') return toolResult;
+  if (toolResult.success === false) return toolResult;
+  const data = (toolResult as any).data;
+  if (data === undefined || data === null) return toolResult;
+  const asks = detectExplicitPiiAsks(norm);
+
+  // queryDatabase: { table, rows, rowCount } — scrub tiap baris generik.
+  if (data && typeof data === 'object' && !Array.isArray(data) && Array.isArray((data as any).rows)) {
+    return {
+      ...toolResult,
+      data: {
+        ...data,
+        rows: (data as any).rows.map((row: any) => scrubRowGenerically(row, asks)),
+      },
+    };
+  }
+
+  const projectRow = (row: any): any => {
+    switch (toolName) {
+      case 'searchDatabaseUsers':
+      case 'searchUsers':
+        return projectUserRecordForPrompt(row, asks);
+      case 'searchDatabaseInvoices':
+      case 'searchInvoices':
+        return projectInvoiceRecordForPrompt(row, asks);
+      case 'searchDatabaseTechnicians':
+      case 'searchTechnicians':
+        return projectTechnicianRecordForPrompt(row, asks);
+      default:
+        return scrubRowGenerically(row, asks);
+    }
+  };
+
+  if (Array.isArray(data)) {
+    return { ...toolResult, data: data.map(projectRow) };
+  }
+  if (typeof data === 'object') {
+    return { ...toolResult, data: projectRow(data) };
+  }
+  return toolResult;
+}
+
+// ============================================================================
+// S9f/F19 — Validasi kartu diagnosis dari AI (validasi struktural manual —
+// TANPA dependensi Zod baru; periksa field yang benar-benar dipakai kode).
+// Kartu yang bentuknya tidak valid DITOLAK (null) tanpa membuang balasan AI:
+// kartu hanyalah pelengkap; teks jawaban tetap dikembalikan ke pengguna.
+// ============================================================================
+const DIAGNOSIS_CONFIDENCE_LEVELS = new Set([
+  'Sangat Mungkin',
+  'Kemungkinan Besar',
+  'Perlu Pemeriksaan Langsung',
+]);
+
+export function isValidDiagnosisCard(value: unknown): value is DiagnosisCard {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const card = value as Record<string, unknown>;
+  if (typeof card.deviceCategory !== 'string' || !card.deviceCategory.trim()) return false;
+  if (typeof card.symptomsSummary !== 'string' || !card.symptomsSummary.trim()) return false;
+  if (typeof card.recommendedAction !== 'string' || !card.recommendedAction.trim()) return false;
+  if (
+    !Array.isArray(card.possibleCauses) ||
+    !card.possibleCauses.every((c) => typeof c === 'string')
+  ) {
+    return false;
+  }
+  if (
+    !Array.isArray(card.safeCheckSteps) ||
+    !card.safeCheckSteps.every((s) => typeof s === 'string')
+  ) {
+    return false;
+  }
+  if (
+    card.confidenceLevel !== undefined &&
+    (typeof card.confidenceLevel !== 'string' ||
+      !DIAGNOSIS_CONFIDENCE_LEVELS.has(card.confidenceLevel))
+  ) {
+    return false;
+  }
+  if (card.categorySlug !== undefined && typeof card.categorySlug !== 'string') return false;
+  if (card.categoryId !== undefined && typeof card.categoryId !== 'number') return false;
+  if (
+    card.safetyHazardWarning !== undefined &&
+    card.safetyHazardWarning !== null &&
+    typeof card.safetyHazardWarning !== 'string'
+  ) {
+    return false;
+  }
+  if (
+    card.estimatedLaborCostRange !== undefined &&
+    typeof card.estimatedLaborCostRange !== 'string'
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/** S9f/F19 — Gabung daftar string secara defensif: non-array dinormalisasi ke string, bukan throw. */
+export function joinStringList(value: unknown, separator = '; '): string {
+  if (Array.isArray(value)) {
+    return value.filter((v) => typeof v === 'string').join(separator);
+  }
+  if (typeof value === 'string') return value;
+  return '';
+}
 
 /**
  * Intelligent Appliance Expert System untuk analisis diagnosis kerusakan
@@ -327,6 +696,19 @@ export async function processChatMessage(params: {
   session: ConsultationSession;
   userContext: ChatUserContext;
 }): Promise<ChatbotReply> {
+  // S9e/F16 — proses pesan dalam satu sesi secara BERURUTAN (pesan kedua
+  // menunggu pesan pertama selesai, termasuk penangan error F18 di bawah,
+  // agar urutan riwayat dan konteks selalu konsisten).
+  return runSerializedPerSession(params.session.id, () =>
+    processChatMessageWithRecovery(params)
+  );
+}
+
+async function processChatMessageWithRecovery(params: {
+  userMessage: string;
+  session: ConsultationSession;
+  userContext: ChatUserContext;
+}): Promise<ChatbotReply> {
   const startTime = Date.now();
   try {
     return await processChatMessageInternal(params);
@@ -350,7 +732,10 @@ export async function processChatMessage(params: {
     // sudah tersimpan (error terjadi setelah penyimpanan), jangan simpan
     // dua kali.
     try {
-      const recent = await getSessionMessages(session.id);
+      // S9a/S9e — cukup 20 pesan terakhir: dengan persist-first (S9e),
+      // pesan pengguna adalah pesan TERBARU di sesi ini, jadi dedup tidak
+      // perlu memuat seluruh riwayat.
+      const recent = await getSessionMessages(session.id, { limit: LLM_HISTORY_LIMIT });
       const alreadySaved = recent.some((m: any) => m.role === 'user' && String(m.message || '').trim() === userMessage.trim());
       const locations: MessageStoreLocation[] = [];
       if (!alreadySaved) {
@@ -389,13 +774,13 @@ async function processChatMessageInternal(params: {
       quickSuggestions: getRoleBasedSuggestedPrompts(userContext.role, currentPath),
     };
 
-    const userStored = await saveChatMessageTracked(session.id, 'user', userMessage);
+    const refusalUserStored = await saveChatMessageTracked(session.id, 'user', userMessage);
     const replyStored = await saveChatMessageTracked(session.id, 'assistant', refusalReply, metadata, 0, metadata.responseTimeMs);
 
     return {
       reply: refusalReply,
       metadata,
-      storedIn: combineStoredIn(userStored, replyStored),
+      storedIn: combineStoredIn(refusalUserStored, replyStored),
     };
   }
 
@@ -406,8 +791,28 @@ async function processChatMessageInternal(params: {
   }
 
   // 2. KELOLA MEMORI SESI & RESOLUSI ENTITAS PERCAKAPAN
-  const rawHistory = await getSessionMessages(session.id);
-  const contextEntities = resolveConversationContext(userMessage, rawHistory, session.id);
+  // S9a/F13 — riwayat dibatasi 20 pesan terakhir (jendela LLM); riwayat
+  // dimuat SEBELUM pesan saat ini disimpan (lihat S9e di bawah) agar pesan
+  // saat ini tidak ganda di konteks LLM.
+  // S29/F7 — userId pemanggil diteruskan agar memori konteks diverifikasi
+  // pemiliknya (memori pengguna lain / guest tidak pernah dipakai).
+  const rawHistory = await getSessionMessages(session.id, { limit: LLM_HISTORY_LIMIT });
+  const contextEntities = resolveConversationContext(
+    userMessage,
+    rawHistory,
+    session.id,
+    userContext.userId ?? null
+  );
+
+  // S9e/F16 — SIMPAN PESAN PENGGUNA DULU, sebelum kueri deterministik
+  // maupun panggilan AI. Sebelumnya pesan baru disimpan SETELAH seluruh
+  // pipeline selesai, sehingga kegagalan di tengah jalan menghilangkan
+  // pesan total (lihat F18) dan dua pesan bersamaan saling balap. Semua
+  // jalur kembali di bawah memakai `userStored` ini dan HANYA menyimpan
+  // balasan asisten — pesan pengguna tidak pernah disimpan dua kali.
+  // Komposisi dengan F18: bila error terjadi setelah titik ini, wrapper
+  // F18 menemukan pesan ini lewat dedup dan tidak menyimpannya lagi.
+  const userStored = await saveChatMessageTracked(session.id, 'user', userMessage);
 
   // 3. PENGAMBILAN DATA DATABASE AKTUAL SESUAI PERAN & INTENT PENGGUNA
   let dbContextSummary = '';
@@ -440,7 +845,27 @@ async function processChatMessageInternal(params: {
         ? '🔴 Gangguan Koneksi'
         : '⚪ Disconnected';
 
-    directReply = `🤖 **Informasi Model & Provider AI Aktif (BANTUIN Assistant):**
+    // S9c — detail konfigurasi provider DIBATASI PER PERAN. Sebelumnya
+    // cabang ini menampilkan endpoint, temperature, timeout, dan provider
+    // fallback ke SEMUA peran termasuk guest. Sekarang:
+    // - guest: HANYA nama model (tanpa provider, endpoint, parameter, fallback).
+    // - customer/teknisi: nama model + nama provider + status koneksi.
+    // - admin: detail lengkap seperti sebelumnya.
+    if (userContext.role === 'guest') {
+      directReply = `🤖 Asisten AI BANTUIN saat ini menggunakan model **\`${activeConf.selectedModel}\`**.
+
+Asisten AI BANTUIN siap membantu kebutuhan konsultasi dan operasional servis peralatan rumah tangga Anda.`;
+    } else if (userContext.role !== 'admin') {
+      directReply = `🤖 **Informasi Model AI Aktif (BANTUIN Assistant):**
+
+Saat ini asisten AI BANTUIN aktif beroperasi menggunakan:
+- **Provider AI Aktif:** **${activeConf.name}**
+- **Model yang Digunakan:** **\`${activeConf.selectedModel}\`**
+- **Status Koneksi:** ${statusBadge}
+
+Asisten AI BANTUIN siap membantu kebutuhan konsultasi dan operasional servis peralatan rumah tangga Anda.`;
+    } else {
+      directReply = `🤖 **Informasi Model & Provider AI Aktif (BANTUIN Assistant):**
 
 Saat ini asisten AI BANTUIN aktif beroperasi menggunakan:
 - **Provider AI Aktif:** **${activeConf.name}** (\`${activeConf.provider}\`)
@@ -453,7 +878,8 @@ Saat ini asisten AI BANTUIN aktif beroperasi menggunakan:
   - Request Timeout: \`${activeConf.requestTimeoutMs} ms\`
 - **Fitur Automatic Fallback:** ${global.enableFallback ? `✅ Aktif (Otomatis beralih ke **${global.fallbackProvider.toUpperCase()}** jika provider utama kendala)` : '❌ Nonaktif'}
 
-${userContext.role === 'admin' ? '💡 _Catatan Administrator: Anda dapat mengganti provider aktif, memilih model lain, atau menambah provider kustom kapan saja melalui menu **Pengaturan Sistem → AI Provider Management**._' : 'Asisten AI BANTUIN siap membantu kebutuhan konsultasi dan operasional servis peralatan rumah tangga Anda.'}`;
+💡 _Catatan Administrator: Anda dapat mengganti provider aktif, memilih model lain, atau menambah provider kustom kapan saja melalui menu **Pengaturan Sistem → AI Provider Management**._`;
+    }
   }
 
   // ==========================================================================
@@ -748,7 +1174,11 @@ ${orderDetail.invoice ? `- **Status Tagihan:** Rp ${orderDetail.invoice.totalAmo
       (!messageOrderCode || messageOrderCode === pendingAction.orderCode)
     );
 
-    if (pendingAction && messageTargetsPending && TECHNICIAN_CONFIRM_YES_PATTERN.test(norm)) {
+    // S9g — konfirmasi harus KETAT (lihat isTechnicianConfirmationReply):
+    // "ya" yang diikuti isi lain ("ya, saya mau tanya soal garansi") BUKAN
+    // konfirmasi aksi — pesan itu jatuh ke cabang biasa, dan aksi tertunda
+    // tetap menunggu jawaban "ya" yang sesungguhnya.
+    if (pendingAction && messageTargetsPending && isTechnicianConfirmationReply(norm, pendingAction)) {
       // Konfirmasi afirmatif: eksekusi aksi tertunda dengan confirmed: true.
       // State machine di action-service memvalidasi ulang status saat ini,
       // jadi konfirmasi yang sudah basi secara status ditolak dengan aman.
@@ -1187,7 +1617,28 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
         norm.match(/\b\d{8,15}\b/)?.[0] ||
         strippedName;
 
-      if (!searchTerm) {
+      // S29/F20 — bila target pencarian berasal dari MEMORI (bukan disebut
+      // di pesan ini) dan belum dikonfirmasi, JANGAN mencari dulu: tanyakan
+      // klarifikasi dan simpan targetnya sebagai tertunda. Jawaban "ya"
+      // pada pesan berikutnya menjalankan pencarian ini (resolve
+      // mengembalikan memorySearchConfirmed). Target dari pesan saat ini
+      // (termasuk angka yang diketik langsung) tidak perlu konfirmasi.
+      const memoryTarget = contextEntities.memorySearchTarget;
+      const searchTermFromMemory = Boolean(
+        memoryTarget &&
+        searchTerm === memoryTarget.value &&
+        (memoryTarget.kind === 'phone' || memoryTarget.kind === 'email' || memoryTarget.kind === 'uuid')
+      );
+
+      if (searchTermFromMemory && memoryTarget) {
+        setPendingMemorySearchConfirmation(session.id, {
+          kind: memoryTarget.kind,
+          value: memoryTarget.value,
+          userId: userContext.userId ?? null,
+          createdAt: Date.now(),
+        });
+        directReply = buildMemorySearchClarification(memoryTarget);
+      } else if (!searchTerm) {
         directReply = 'Sebutkan nama, nomor telepon, email, atau UUID pengguna yang ingin dicari (mis. "cari pelanggan Budi").';
       } else {
         const matchedUsers = await DataService.searchDatabaseUsers(searchTerm, { limit: 5 });
@@ -1217,7 +1668,18 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
     // 13. Pencarian & Detail Pesanan Spesifik (Order Lookup)
     else if (contextEntities.activeOrderCode || /detail\s+pesanan|cari\s+pesanan|status\s+order|lacak\s+order/i.test(norm)) {
       const orderSearchTerm = contextEntities.activeOrderCode || norm.match(/\b(?:REP|BAN|ORD)-[A-Za-z0-9-]+\b/i)?.[0] || '';
-      if (orderSearchTerm) {
+      // S29/F20 — kode order dari memori (bukan dari pesan ini) wajib
+      // dikonfirmasi dulu (lihat D#12). Kode dari pesan saat ini — atau
+      // yang sudah dikonfirmasi ("ya" atas klarifikasi) — langsung dicari.
+      if (contextEntities.orderCodeFromMemory && !contextEntities.memorySearchConfirmed && orderSearchTerm) {
+        setPendingMemorySearchConfirmation(session.id, {
+          kind: 'order',
+          value: orderSearchTerm,
+          userId: userContext.userId ?? null,
+          createdAt: Date.now(),
+        });
+        directReply = buildMemorySearchClarification({ kind: 'order', value: orderSearchTerm });
+      } else if (orderSearchTerm) {
         const orders = await DataService.searchDatabaseOrders(orderSearchTerm, { limit: 3 });
         if (orders.length > 0) {
           directReply = `📋 **Rincian Pesanan Perbaikan Basis Data (Admin Intelligence):**\n\n` +
@@ -1244,7 +1706,16 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
     // 14. Pencarian Tagihan Invoice Spesifik (Invoice Lookup)
     else if (contextEntities.activeInvoiceNumber || /tagihan\s+invoice|cek\s+invoice|nomor\s+invoice/i.test(norm)) {
       const invSearchTerm = contextEntities.activeInvoiceNumber || norm.match(/\bINV-[A-Za-z0-9-]+\b/i)?.[0] || '';
-      if (invSearchTerm) {
+      // S29/F20 — nomor invoice dari memori wajib dikonfirmasi dulu (lihat D#12).
+      if (contextEntities.invoiceNumberFromMemory && !contextEntities.memorySearchConfirmed && invSearchTerm) {
+        setPendingMemorySearchConfirmation(session.id, {
+          kind: 'invoice',
+          value: invSearchTerm,
+          userId: userContext.userId ?? null,
+          createdAt: Date.now(),
+        });
+        directReply = buildMemorySearchClarification({ kind: 'invoice', value: invSearchTerm });
+      } else if (invSearchTerm) {
         const invoices = await DataService.searchDatabaseInvoices(invSearchTerm, { limit: 3 });
         if (invoices.length > 0) {
           directReply = `📋 **Data Tagihan Invoice Basis Data (Admin View):**\n\n` +
@@ -1271,6 +1742,32 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
     }
   }
 
+  // S29/F20 — pertanyaan lanjutan admin yang targetnya HANYA ada di memori
+  // dan tidak tertangkap cabang deterministik di atas (mis. "siapa namanya?"
+  // setelah menyebut nomor telepon) TIDAK BOLEH jatuh ke AI dengan target
+  // memori tersuntik diam-diam: tampilkan klarifikasi deterministik.
+  // (Cabang customer tidak digerakkan ke sini: target memori customer hanya
+  // memilih di antara pesanan MILIKNYA SENDIRI — salah pilih merugikan
+  // kenyamanan, bukan membocorkan data orang lain — dan alur follow-up
+  // "pesanan tadi" adalah UX yang dimaksudkan. Cabang teknisi memakai
+  // tugas milik sendiri, dan aksi status sudah mewajibkan kode eksplisit.)
+  if (
+    !directReply &&
+    userContext.role === 'admin' &&
+    contextEntities.hasUnconfirmedMemorySearchTarget &&
+    contextEntities.memorySearchTarget &&
+    contextEntities.isFollowUpLike
+  ) {
+    const target = contextEntities.memorySearchTarget;
+    setPendingMemorySearchConfirmation(session.id, {
+      kind: target.kind,
+      value: target.value,
+      userId: userContext.userId ?? null,
+      createdAt: Date.now(),
+    });
+    directReply = buildMemorySearchClarification(target);
+  }
+
   // JIKA DATA DAPAT DIJAWAB LANGSUNG SECARA DETERMINISTIK OLEH DATA SERVICE
   if (directReply) {
     const finalReply = `${safetyAlertPrefix}${directReply}`;
@@ -1280,7 +1777,8 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
       quickSuggestions: dynamicSuggestions,
     };
 
-    const userStored = await saveChatMessageTracked(session.id, 'user', userMessage);
+    // S9e — pesan pengguna sudah tersimpan di awal (userStored); di sini
+    // hanya balasan yang disimpan.
     const replyStored = await saveChatMessageTracked(session.id, 'assistant', finalReply, metadata, 0, metadata.responseTimeMs);
 
     return {
@@ -1318,7 +1816,12 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
           if (repairs === null || invoices === null) {
             dbContextSummary += 'Data pesanan/tagihan tidak dapat dibaca saat ini (database tidak dapat diakses).\n';
           }
-          dbContextSummary += `Profil Customer: Nama: ${profile?.fullName || '-'}, Telp: ${profile?.phoneNumber || '-'}, Alamat: ${profile?.defaultAddress || '-'}\n`;
+          // S9b — ringkasan konteks LLM TIDAK memuat nomor telepon maupun
+          // alamat lengkap pelanggan (keduanya PII yang tidak dibutuhkan
+          // untuk sebagian besar jawaban; bila pengguna menanyakan
+          // profilnya sendiri, cabang deterministik yang menjawab — bukan
+          // jalur AI ini).
+          dbContextSummary += `Profil Customer: Nama: ${profile?.fullName || '-'}\n`;
           dbContextSummary += `Pesanan Terkini: ${repairsList.length} pesanan tercatat.\n`;
           repairsList.forEach(r => {
             dbContextSummary += `  - Order #${r.orderCode}: Alat: ${r.device} (${r.categoryName}), Status: ${r.status}, Teknisi: ${r.technician?.name || 'Belum ada'}\n`;
@@ -1331,8 +1834,12 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
             dbContextSummary += 'Data tugas tidak dapat dibaca saat ini (database tidak dapat diakses).\n';
           }
           dbContextSummary += `Tugas Aktif Teknisi: ${tasksList.length} penugasan.\n`;
+          // S9b — alamat lengkap pelanggan TIDAK disuntik ke prompt LLM
+          // (nama pelanggan dipertahankan: teknisi perlu membedakan
+          // tugas-tugasnya; alamat kunjungan tersedia di dashboard tugas
+          // dan cabang deterministik bila ditanyakan).
           tasksList.forEach(t => {
-            dbContextSummary += `  - Order #${t.orderCode}: Pelanggan: ${t.customerName}, Status: ${t.assignmentStatus}, Alamat: ${t.address}\n`;
+            dbContextSummary += `  - Order #${t.orderCode}: Pelanggan: ${t.customerName}, Status: ${t.assignmentStatus}\n`;
           });
         } else if (userContext.role === 'admin') {
           const [overview, workload, finance, userStats] = await Promise.all([
@@ -1355,21 +1862,58 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
           }
           dbContextSummary += `Teknisi: ${(workload || []).length} mitra teknisi aktif terdaftar.\n`;
 
-          if (currentPath.includes('/admin/users') || contextEntities.activePhoneNumber || contextEntities.activeEmail || contextEntities.activeUserUuid) {
-            const userRecords = await DataService.searchDatabaseUsers(
-              contextEntities.activePhoneNumber || contextEntities.activeEmail || contextEntities.activeUserUuid || '',
-              { limit: 6 }
-            );
+          // S29/F20 — blok konteks pengguna/pesanan di bawah TIDAK disuntik
+          // bila targetnya berasal dari memori dan belum dikonfirmasi
+          // (klarifikasi deterministik sudah ditampilkan di atas; AI tidak
+          // boleh menjawab dari data target yang belum pasti). Target dari
+          // pesan saat ini — atau yang sudah dikonfirmasi — tetap dipakai.
+          const userSearchTerm = contextEntities.activePhoneNumber || contextEntities.activeEmail || contextEntities.activeUserUuid || '';
+          const userTermFromMemoryUnconfirmed = Boolean(
+            userSearchTerm &&
+            !contextEntities.memorySearchConfirmed &&
+            ((contextEntities.phoneNumberFromMemory && userSearchTerm === contextEntities.activePhoneNumber) ||
+              (contextEntities.emailFromMemory && userSearchTerm === contextEntities.activeEmail) ||
+              (contextEntities.userUuidFromMemory && userSearchTerm === contextEntities.activeUserUuid))
+          );
+          if (
+            !userTermFromMemoryUnconfirmed &&
+            (currentPath.includes('/admin/users') || contextEntities.activePhoneNumber || contextEntities.activeEmail || contextEntities.activeUserUuid)
+          ) {
+            const userRecords = await DataService.searchDatabaseUsers(userSearchTerm, { limit: 6 });
             if (userRecords.length > 0) {
+              // S9b — daftar pengguna di prompt HANYA memuat nama/peran/
+              // status; email/telepon/UUID/alamat dibuang, KECUALI
+              // pertanyaan saat ini secara eksplisit meminta field itu
+              // untuk satu orang spesifik (lihat detectExplicitPiiAsks).
+              const asks = detectExplicitPiiAsks(norm);
               dbContextSummary += `\nDaftar Pengguna Relevan Basis Data:\n` +
-                userRecords.map(u => `  - ID #${u.id} (${u.fullName}): Role: ${u.role}, Email: ${u.email}, Telp: ${u.phoneNumber}, Status: ${u.status}, UUID: ${u.uuid}`).join('\n') + '\n';
+                userRecords.map((u) => {
+                  const projected = projectUserRecordForPrompt(u, asks);
+                  const extra: string[] = [];
+                  if (projected.phoneNumber) extra.push(`Telp: ${projected.phoneNumber}`);
+                  if (projected.email) extra.push(`Email: ${projected.email}`);
+                  if (projected.address) extra.push(`Alamat: ${projected.address}`);
+                  if (projected.uuid) extra.push(`UUID: ${projected.uuid}`);
+                  return `  - ${projected.name}: Role: ${projected.role}, Status: ${projected.status}${extra.length > 0 ? `, ${extra.join(', ')}` : ''}`;
+                }).join('\n') + '\n';
             }
           }
-          if (currentPath.includes('/admin/repairs') || contextEntities.activeOrderCode) {
+          const orderTermFromMemoryUnconfirmed = Boolean(
+            contextEntities.activeOrderCode &&
+            contextEntities.orderCodeFromMemory &&
+            !contextEntities.memorySearchConfirmed
+          );
+          if (
+            !orderTermFromMemoryUnconfirmed &&
+            (currentPath.includes('/admin/repairs') || contextEntities.activeOrderCode)
+          ) {
             const orderRecords = await DataService.searchDatabaseOrders(contextEntities.activeOrderCode || '', { limit: 5 });
             if (orderRecords.length > 0) {
+              // S9b — nomor telepon pelanggan dibuang kecuali pertanyaan
+              // saat ini secara eksplisit memintanya.
+              const asks = detectExplicitPiiAsks(norm);
               dbContextSummary += `\nDaftar Pesanan Relevan Basis Data:\n` +
-                orderRecords.map(o => `  - Order #${o.orderCode}: Alat: ${o.device} (${o.category}), Status: ${o.status}, Pelanggan: ${o.customerName} (${o.customerPhone})`).join('\n') + '\n';
+                orderRecords.map(o => `  - Order #${o.orderCode}: Alat: ${o.device} (${o.category}), Status: ${o.status}, Pelanggan: ${o.customerName}${asks.phone && o.customerPhone ? ` (${o.customerPhone})` : ''}`).join('\n') + '\n';
             }
           }
         }
@@ -1496,12 +2040,18 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
           universalMessages.push(assistantTurn);
 
           for (const tc of aiResponse.toolCalls) {
-            const toolResult = await executeRoleBasedTool(tc.name, tc.arguments, userContext);
+            // S9g — session.id diteruskan agar tool aksi teknisi dapat
+            // menyimpan aksi tertundanya untuk alur konfirmasi dua langkah.
+            const toolResult = await executeRoleBasedTool(tc.name, tc.arguments, userContext, session.id);
+            // S9d — hasil tool DIPROYEKSI dulu (hanya kolom yang dibutuhkan
+            // jawaban; PII dibuang kecuali diminta eksplisit) — jangan
+            // pernah JSON-stringify utuh ke prompt.
+            const projectedResult = projectToolResultForPrompt(tc.name, toolResult, norm);
             universalMessages.push({
               role: 'tool',
               toolCallId: tc.id,
               name: tc.name,
-              content: typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult),
+              content: typeof projectedResult === 'string' ? projectedResult : JSON.stringify(projectedResult),
             });
           }
 
@@ -1524,7 +2074,16 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
           try {
             const parsed = JSON.parse(jsonMatch[1]);
             if (parsed.diagnosisCard) {
-              extractedCard = parsed.diagnosisCard;
+              // S9f/F19 — validasi bentuk kartu SEGERA setelah parse.
+              // Kartu tidak valid ditolak (bukan dipakai lalu throw di
+              // `.join`); balasan AI tetap dipakai — kartu hanyalah pelengkap.
+              // Blok JSON selalu dihapus dari teks jawaban (data mesin,
+              // bukan prosa untuk pengguna), valid atau tidak.
+              if (isValidDiagnosisCard(parsed.diagnosisCard)) {
+                extractedCard = parsed.diagnosisCard;
+              } else {
+                console.warn('[Chatbot Engine] diagnosisCard AI ditolak: bentuk tidak valid.');
+              }
               cleanedText = fullText.replace(jsonMatch[0], '').trim();
             }
           } catch {
@@ -1548,25 +2107,35 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
             quickSuggestions: dynamicSuggestions,
           };
 
-          const userStored = await saveChatMessageTracked(session.id, 'user', userMessage);
+          // S9e — pesan pengguna sudah tersimpan di awal (userStored); di sini
+          // hanya balasan yang disimpan.
           const replyStored = await saveChatMessageTracked(session.id, 'assistant', finalReply, metadata, 0, metadata.responseTimeMs);
 
           if (extractedCard) {
-            let catId = session.categoryId;
-            if (!catId && extractedCard.categorySlug) {
-              const catRows = await query<any[]>(
-                `SELECT id FROM appliance_categories WHERE slug = ? LIMIT 1`,
-                [extractedCard.categorySlug]
-              );
-              if (catRows.length > 0) catId = Number(catRows[0].id);
-            }
+            // S9f/F19 — persistensi diagnosis NON-FATAL: kegagalan apa pun
+            // di sini (termasuk kueri kategori yang bisa throw saat DB
+            // down) tidak boleh membuang balasan AI yang sudah valid dan
+            // tidak boleh memicu jalur fallback (yang dulu menyimpan ulang
+            // pesan). `.join` defensif meski kartu sudah divalidasi.
+            try {
+              let catId = session.categoryId;
+              if (!catId && extractedCard.categorySlug) {
+                const catRows = await query<any[]>(
+                  `SELECT id FROM appliance_categories WHERE slug = ? LIMIT 1`,
+                  [extractedCard.categorySlug]
+                );
+                if (catRows.length > 0) catId = Number(catRows[0].id);
+              }
 
-            await updateSessionDiagnosis(session.id, {
-              categoryId: catId,
-              initialSymptoms: extractedCard.symptomsSummary,
-              preliminaryDiagnosis: extractedCard.possibleCauses.join('; '),
-              recommendedAction: extractedCard.recommendedAction,
-            });
+              await updateSessionDiagnosis(session.id, {
+                categoryId: catId,
+                initialSymptoms: extractedCard.symptomsSummary,
+                preliminaryDiagnosis: joinStringList(extractedCard.possibleCauses),
+                recommendedAction: extractedCard.recommendedAction,
+              });
+            } catch (diagErr) {
+              console.error('[Chatbot Engine] Gagal menyimpan diagnosis sesi (non-fatal):', diagErr);
+            }
           }
 
           return {
@@ -1622,7 +2191,8 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
     aiError: aiGatewayError ? AI_UNAVAILABLE_MESSAGE : null,
   };
 
-  const userStored = await saveChatMessageTracked(session.id, 'user', userMessage);
+  // S9e — pesan pengguna sudah tersimpan di awal (userStored); di sini
+  // hanya balasan yang disimpan.
   const replyStored = await saveChatMessageTracked(session.id, 'assistant', finalReply, metadata, 0, metadata.responseTimeMs);
 
   if (fallback.card) {
@@ -1630,7 +2200,7 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
     await updateSessionDiagnosis(session.id, {
       categoryId: targetCatId,
       initialSymptoms: fallback.card.symptomsSummary,
-      preliminaryDiagnosis: fallback.card.possibleCauses.join('; '),
+      preliminaryDiagnosis: joinStringList(fallback.card.possibleCauses),
       recommendedAction: fallback.card.recommendedAction,
     });
   }

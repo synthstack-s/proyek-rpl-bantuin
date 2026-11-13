@@ -691,7 +691,7 @@ export function getRoleFilteredSchemaSummary(role: 'customer' | 'technician' | '
   if (role === 'technician') {
     return `Tabel Database yang Relevan untuk Mitra Teknisi:
 - technician_profiles: Profil teknisi Anda, keahlian, pengalaman, dan skor rating rata-rata Anda.
-- technician_assignments: Daftar tugas perbaikan yang ditugaskan kepada Anda (status: offered, accepted, in_repair, completed).
+- technician_assignments: Daftar tugas perbaikan yang ditugaskan kepada Anda (status penugasan: offered, accepted, completed).
 - technician_schedules: Jadwal slot waktu kunjungan Anda ke lokasi pelanggan.
 - repair_requests: Rincian pesanan yang ditugaskan kepada Anda (alamat pelanggan, nomor telepon, merk alat, keluhan).
 - repair_diagnoses: Catatan inspeksi teknis, kebutuhan sparepart, dan estimasi biaya yang Anda susun.

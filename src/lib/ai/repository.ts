@@ -90,6 +90,33 @@ const inMemoryUsageLogs: any[] = [];
 const inMemoryAuditLogs: any[] = [];
 
 /**
+ * S30 — Membaca API key provider dari environment (`<PROVIDER>_API_KEY`).
+ * Dipakai HANYA sebagai fallback legacy bila database tidak menyimpan key
+ * (lihat getProviderRuntimeConfig). Setiap pemakaian nyata key env
+ * diperingatkan lewat warnLegacyEnvKeyUsage (sekali per provider per
+ * proses) agar admin memindahkan key ke database terenkripsi.
+ */
+function readEnvApiKey(provider: AIProviderType): string | undefined {
+  if (provider === 'gemini' && process.env.GEMINI_API_KEY) return process.env.GEMINI_API_KEY;
+  if (provider === 'groq' && process.env.GROQ_API_KEY) return process.env.GROQ_API_KEY;
+  const providerUpper = provider.toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+  return process.env[`${providerUpper}_API_KEY`] || undefined;
+}
+
+const warnedEnvKeyProviders = new Set<string>();
+
+function warnLegacyEnvKeyUsage(provider: string): void {
+  if (warnedEnvKeyProviders.has(provider)) return;
+  warnedEnvKeyProviders.add(provider);
+  const providerUpper = provider.toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+  console.warn(
+    `[AI Repository] DEPRECATED: provider '${provider}' memakai API key dari environment (.env.local) karena tidak ada key tersimpan di database. ` +
+      `Pembacaan key dari environment adalah fallback legacy (S30) — simpan key lewat panel Konfigurasi AI agar tersimpan terenkripsi di database, ` +
+      `lalu hapus baris plaintext '${providerUpper}_API_KEY' dari .env.local.`
+  );
+}
+
+/**
  * Mengambil Pengaturan Global AI dari Database (Source of Truth)
  */
 export async function getGlobalAISettings(): Promise<GlobalAISettings> {
@@ -189,21 +216,17 @@ export async function getProviderRuntimeConfig(provider: AIProviderType): Promis
       }
 
       // Jika di DB kosong tapi ada di .env, gunakan env sebagai fallback
+      // (legacy — S30). Perilaku dipertahankan agar deployment yang key-nya
+      // hanya ada di .env.local tidak langsung mati, tetapi setiap
+      // pemakaian diperingatkan (sekali per provider per proses) kecuali
+      // kasus M12 yang sudah diperingatkan dengan pesan sendiri di atas.
       let keyFromEnvFallback = false;
-      if (!plainApiKey && provider === 'gemini' && process.env.GEMINI_API_KEY) {
-        plainApiKey = process.env.GEMINI_API_KEY;
-        keyFromEnvFallback = decryptionFailed;
-      }
-      if (!plainApiKey && provider === 'groq' && process.env.GROQ_API_KEY) {
-        plainApiKey = process.env.GROQ_API_KEY;
-        keyFromEnvFallback = decryptionFailed;
-      }
       if (!plainApiKey) {
-        const providerUpper = provider.toUpperCase().replace(/[^A-Z0-9_]/g, '_');
-        const envKey = process.env[`${providerUpper}_API_KEY`];
+        const envKey = readEnvApiKey(provider);
         if (envKey) {
           plainApiKey = envKey;
           keyFromEnvFallback = decryptionFailed;
+          if (!decryptionFailed) warnLegacyEnvKeyUsage(provider);
         }
       }
 
@@ -256,7 +279,14 @@ export async function getProviderRuntimeConfig(provider: AIProviderType): Promis
   }
 
   if (IN_MEMORY_CONFIGS[provider]) {
-    return IN_MEMORY_CONFIGS[provider];
+    // S30: key awal konfigurasi in-memory berasal dari environment (lihat
+    // definisi IN_MEMORY_CONFIGS) — peringatkan bila key yang dipakai
+    // memang sama dengan key env (pengecekan berbasis nilai).
+    const memCfg = IN_MEMORY_CONFIGS[provider];
+    if (memCfg.apiKey && readEnvApiKey(provider) === memCfg.apiKey) {
+      warnLegacyEnvKeyUsage(provider);
+    }
+    return memCfg;
   }
 
   // Sensible default jika provider baru belum ada di memori
@@ -398,6 +428,12 @@ export async function saveProviderConfig(
     targetEndpoint,
     provider === 'gemini' || provider === 'groq' ? provider : undefined
   );
+  // S8c: hasil validasi — termasuk pinnedIp — TIDAK lagi dibuang:
+  // validateAndPinEndpoint menyimpannya di cache validasi endpoint
+  // (ssrf-validator.ts, TTL 5 menit), sehingga request chat/tes/model
+  // berikutnya memakai pin yang sama tanpa lookup DNS ulang. Pin sengaja
+  // tidak dipersist ke database (pin adalah fakta DNS sesaat; lihat
+  // komentar cache di ssrf-validator.ts).
 
   // 2. Kelola Kredensial API Key (Enkripsi baru jika diisi, pertahankan jika kosong)
   // L14: flag clearApiKey yang menghapus key tersimpan. Bila key baru diisi
@@ -643,15 +679,17 @@ export async function saveProviderConfig(
 
   IN_MEMORY_CONFIGS[provider] = updatedConfig;
 
-  // 3. Sinkronisasi otomatis ke file .env.local
+  // 3. Sinkronisasi konfigurasi NON-RAHASIA ke file .env.local (model,
+  // endpoint, provider aktif). S30: API key TIDAK PERNAH lagi dioper ke
+  // syncProviderToEnvLocal — key hanya tersimpan terenkripsi di database.
   try {
     if (clearApiKey) {
       // L14: hapus juga key dari .env.local + process.env — tanpa ini,
       // fallback env di getProviderRuntimeConfig akan menghidupkan kembali
       // key yang baru saja dihapus (provider tetap "terkonfigurasi" lewat
-      // env). syncProviderToEnvLocal di bawah (dengan apiKey kosong) tidak
-      // menulis ulang var key, tetapi menulis ulang var model/endpoint —
-      // jadi hanya key yang hilang dari .env.local.
+      // env). syncProviderToEnvLocal di bawah tidak menulis var key sama
+      // sekali (S30), hanya var model/endpoint — jadi key yang dihapus
+      // tidak akan muncul lagi di .env.local.
       const envRemoval = removeProviderFromEnvLocal(provider);
       if (!envRemoval.success) {
         console.warn(`[AI Repository] Key provider '${provider}' mungkin masih ada di .env.local: ${envRemoval.error || 'penghapusan gagal'}`);
@@ -660,7 +698,6 @@ export async function saveProviderConfig(
     const currentGlobal = await getGlobalAISettings();
     syncProviderToEnvLocal({
       provider,
-      apiKey: activePlainKey,
       selectedModel,
       apiEndpoint: endpointValidation.normalizedUrl,
       isActive: currentGlobal.activeProvider === provider,
@@ -1155,6 +1192,136 @@ export async function recordAIUsageLog(params: {
     createdAt: new Date().toISOString(),
   });
   if (inMemoryUsageLogs.length > 500) inMemoryUsageLogs.shift();
+}
+
+/**
+ * S5/F8 — Kuota harian pemakaian AI di jalur chat.
+ *
+ * KOREKSI TERHADAP AUDIT: audit-2 menyatakan setting `ai_daily_free_quota`
+ * "tidak ditemukan di kode" (grep hanya mencakup `src/` dan
+ * `database/migrations/`). Verifikasi ulang Batch 5 menemukan setting itu
+ * ADA — di-seed di `seed.sql` ke tabel generik `system_settings` dengan
+ * nilai `'10'` ("Batas kuota harian percakapan diagnosis mandiri AI gratis
+ * per pengguna"). Jadi batas dibaca dari `system_settings` (dapat diubah
+ * admin lewat pengaturan sistem), BUKAN dari kolom baru di
+ * `ai_global_settings` (tabel itu tidak punya kolom kuota dan tidak
+ * mendukung setting generik). Bila baris setting tidak ada / DB tidak
+ * terbaca, dipakai default konstanta di bawah (= nilai seed).
+ *
+ * Yang dihitung: baris `ai_usage_logs` berstatus `success`/`fallback`
+ * hari ini (batas hari memakai zona waktu koneksi DB, +07:00/WIB).
+ * Satu pesan pengguna bisa menghabiskan 2 unit bila model memanggil tool
+ * (engine melakukan completion follow-up setelah tool dieksekusi) — kuota
+ * menghitung REQUEST AI yang dilayani, bukan pesan mentah. Request yang
+ * GAGAL (status `failed`) tidak dihitung: pemakai tidak boleh kehilangan
+ * kuota karena provider sedang down.
+ *
+ * Cakupan: per `userId` untuk pengguna login (dihitung lintas SEMUA sesi
+ * miliknya lewat JOIN ke `ai_consultation_sessions`, sehingga membuat
+ * sesi baru tidak mereset kuota) dan per `session_id` numerik untuk guest.
+ * Penegakan dilakukan route chat SEBELUM memanggil engine.
+ */
+export const DEFAULT_DAILY_AI_QUOTA = 10;
+
+const DAILY_QUOTA_LIMIT_CACHE_TTL_MS = 60 * 1000;
+let cachedDailyQuotaLimit: { value: number; expiresAt: number } | null = null;
+
+/**
+ * Membaca batas kuota harian dari `system_settings.ai_daily_free_quota`
+ * (cache 60 detik — cukup segar untuk perubahan admin, cukup hemat untuk
+ * tidak menambah 1 query di setiap pesan). Fallback ke
+ * DEFAULT_DAILY_AI_QUOTA bila setting tidak ada/tidak valid/DB error.
+ */
+export async function getDailyAIQuotaLimit(): Promise<number> {
+  const now = Date.now();
+  if (cachedDailyQuotaLimit && cachedDailyQuotaLimit.expiresAt > now) {
+    return cachedDailyQuotaLimit.value;
+  }
+
+  let limit = DEFAULT_DAILY_AI_QUOTA;
+  try {
+    const rows = await query<any[]>(
+      `SELECT setting_value FROM system_settings WHERE setting_key = 'ai_daily_free_quota' LIMIT 1`
+    );
+    const parsed = Number(rows?.[0]?.setting_value);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      limit = Math.floor(parsed);
+    }
+  } catch {
+    // system_settings tidak terbaca (DB down / seed belum dijalankan) —
+    // pakai default konstanta; jangan gagalkan chat karena ini.
+  }
+
+  cachedDailyQuotaLimit = { value: limit, expiresAt: now + DAILY_QUOTA_LIMIT_CACHE_TTL_MS };
+  return limit;
+}
+
+export interface DailyAIQuotaCheck {
+  allowed: boolean;
+  used: number;
+  limit: number;
+  remaining: number;
+  scope: 'user' | 'session';
+}
+
+/**
+ * Memeriksa kuota harian AI untuk satu identitas. `userId` (login) menang
+ * atas `sessionId` (guest) bila keduanya ada. Bila DB tidak dapat
+ * diakses, request DIIZINKAN (fail-open) dengan peringatan — kuota tidak
+ * boleh mematikan chat saat DB down (chat sendiri tetap berjalan lewat
+ * fallback in-memory + provider AI), dan pemakai tidak bisa mematikan DB
+ * untuk mengakali kuota.
+ */
+export async function checkDailyAIQuota(params: {
+  userId?: number | null;
+  sessionId?: number | null;
+}): Promise<DailyAIQuotaCheck> {
+  const limit = await getDailyAIQuotaLimit();
+  const scope: 'user' | 'session' = params.userId ? 'user' : 'session';
+
+  if (!params.userId && !params.sessionId) {
+    // Tanpa identitas apa pun tidak ada yang bisa dihitung — izinkan
+    // (fail-open) agar chat tidak mati karena pemanggil yang tidak
+    // membawa identitas.
+    return { allowed: true, used: 0, limit, remaining: limit, scope };
+  }
+
+  try {
+    let rows: any[];
+    if (params.userId) {
+      // Login: hitung lintas semua sesi milik pengguna ini.
+      rows = await query<any[]>(
+        `SELECT COUNT(*) AS used
+         FROM ai_usage_logs u
+         JOIN ai_consultation_sessions s ON s.id = u.session_id
+         WHERE s.user_id = ?
+           AND u.status IN ('success', 'fallback')
+           AND DATE(u.created_at) = CURDATE()`,
+        [params.userId]
+      );
+    } else {
+      // Guest: hitung per sesi numerik ini.
+      rows = await query<any[]>(
+        `SELECT COUNT(*) AS used
+         FROM ai_usage_logs
+         WHERE session_id = ?
+           AND status IN ('success', 'fallback')
+           AND DATE(created_at) = CURDATE()`,
+        [params.sessionId]
+      );
+    }
+    const used = Number(rows?.[0]?.used || 0);
+    return {
+      allowed: used < limit,
+      used,
+      limit,
+      remaining: Math.max(0, limit - used),
+      scope,
+    };
+  } catch (err: any) {
+    console.warn(`[AI Quota] Gagal memeriksa kuota harian AI (DB error) — request diizinkan (fail-open): ${err.message}`);
+    return { allowed: true, used: 0, limit, remaining: limit, scope };
+  }
 }
 
 /**

@@ -10,6 +10,7 @@
 import { ChatUserContext } from './types';
 import * as DataService from './data-service';
 import * as ActionService from './action-service';
+import { setPendingTechnicianAction } from './context-manager';
 
 // Re-ekspor seluruh fungsi data service
 export * from './data-service';
@@ -68,11 +69,19 @@ export function toPublicTechnicianView(t: any): {
  * Eksekusi tool berbasis peran pengguna (Role-Based Access Control)
  * Memvalidasi apakah peran pengguna diizinkan memanggil fungsi tersebut
  * dan menyuntikkan ID sesi tepercaya untuk mencegah eksfiltrasi data orang lain (Anti-IDOR).
+ *
+ * S9g — `sessionId` opsional (ID numerik sesi chat): bila diisi, aksi
+ * teknisi yang mengembalikan `requiresConfirmation` disimpan sebagai aksi
+ * tertunda di sesi itu, sehingga jawaban "ya" teknisi dapat mengeksekusinya
+ * lewat cabang konfirmasi engine. Tanpa `sessionId`, alur konfirmasi
+ * tool tidak dapat diselesaikan (pemanggil wajib mengopernya bila tool
+ * aksi dideklarasikan ke AI).
  */
 export async function executeRoleBasedTool(
   toolName: string,
   args: any,
-  userContext: ChatUserContext
+  userContext: ChatUserContext,
+  sessionId?: number
 ): Promise<{ success: boolean; data?: any; error?: string }> {
   try {
     switch (toolName) {
@@ -192,14 +201,39 @@ export async function executeRoleBasedTool(
             error: 'Akses ditolak: Hanya teknisi yang dapat memperbarui status tugas.',
           };
         }
-        // F10: hasil action-service diteruskan utuh — termasuk
+        // F10 + S9g: hasil action-service diteruskan utuh — termasuk
         // requiresConfirmation + confirmationPrompt pada panggilan pertama
-        // tanpa confirmed — agar AI dapat menanyakan konfirmasi ke teknisi
-        // lalu memanggil ulang dengan confirmed: true. (Tool ini saat ini
-        // tidak dideklarasikan ke AI di engine.ts, jadi jalur ini dorman
-        // sampai dideklarasikan; alur konfirmasi utama adalah jalur regex
-        // di engine.ts.)
-        return await ActionService.executeTechnicianTaskStatusUpdate(userContext, args);
+        // tanpa confirmed — agar AI dapat menanyakan konfirmasi ke teknisi.
+        // `confirmed` dari argumen AI SELALU DIBUANG: model AI tidak boleh
+        // mengonfirmasi atas nama teknisi (bila tidak, satu tool call AI
+        // bisa mengeksekusi mutasi status tanpa teknisi pernah menjawab
+        // "ya"). Eksekusi hanya terjadi lewat cabang konfirmasi engine,
+        // yang memanggil action-service langsung dengan confirmed: true
+        // setelah teknisi menjawab "ya" — dan cabang itu memakai aksi
+        // tertunda yang disimpan di bawah (bila sessionId tersedia).
+        // (Tool ini saat ini tidak dideklarasikan ke AI di engine.ts, jadi
+        // jalur ini dorman sampai dideklarasikan; alur konfirmasi utama
+        // adalah jalur regex di engine.ts.)
+        const { confirmed: _ignoredConfirmed, ...technicianActionArgs } = args || {};
+        const technicianActionResult = await ActionService.executeTechnicianTaskStatusUpdate(
+          userContext,
+          technicianActionArgs
+        );
+        if (
+          technicianActionResult.requiresConfirmation &&
+          typeof sessionId === 'number' &&
+          userContext.userId &&
+          technicianActionResult.data?.orderCode &&
+          technicianActionResult.data?.action
+        ) {
+          setPendingTechnicianAction(sessionId, {
+            orderCode: String(technicianActionResult.data.orderCode),
+            action: technicianActionResult.data.action,
+            userId: userContext.userId,
+            createdAt: Date.now(),
+          });
+        }
+        return technicianActionResult;
 
       // ----------------------------------------------------------------------
       // TOOL KHUSUS ADMINISTRATOR (Hanya Admin Terautentikasi)
@@ -320,7 +354,12 @@ export async function executeRoleBasedTool(
             error: 'Akses ditolak: Hanya administrator yang dapat membuat snapshot operasional.',
           };
         }
-        return await ActionService.executeAdminCreateOperationalSnapshot(userContext, args);
+        // S9g (pengerasan sekeluarga): `confirmed` dari argumen AI dibuang
+        // — model tidak boleh mengonfirmasi pembuatan snapshot atas nama
+        // admin; konfirmasi harus datang dari admin sendiri lewat alur
+        // dua langkah action-service.
+        const { confirmed: _ignoredSnapshotConfirmed, ...snapshotArgs } = args || {};
+        return await ActionService.executeAdminCreateOperationalSnapshot(userContext, snapshotArgs);
 
       // ----------------------------------------------------------------------
       // TOOL DATABASE INTELLIGENCE LINTAS TABEL (Role-Governed)

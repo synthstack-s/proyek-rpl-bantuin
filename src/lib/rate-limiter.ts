@@ -2,6 +2,79 @@
  * In-memory sliding window rate limiter untuk melindungi endpoint autentikasi dari serangan brute-force.
  */
 
+/**
+ * S5/F3 — Mengurai IP klien dari header `x-forwarded-for` dengan benar.
+ *
+ * ASUMSI DEPLOYMENT: aplikasi berjalan di belakang SATU trusted reverse
+ * proxy (mis. Nginx/Vercel/CDN) yang MENIMPA header ini dengan IP klien
+ * yang dilihatnya. Bila proxy hanya MENAMBAH (append) tanpa menimpa, entri
+ * pertama masih merupakan klaim klien dan bisa dipalsukan — dalam kondisi
+ * itu IP hanya boleh dipakai sebagai sinyal sekunder (lihat pemakaian di
+ * route chat: kunci utama adalah identitas user/sesi, IP hanya backstop),
+ * JANGAN PERNAH sebagai satu-satunya kunci pembatas.
+ *
+ * Aturan parsing: ambil HANYA entri pertama daftar (asal asli di balik
+ * proxy), validasi bentuk IPv4/IPv6 secara ketat, kembalikan `null` bila
+ * tidak ada/tidak valid — pemanggil memakai bucket bersama ('unknown')
+ * untuk nilai null, yang justru LEBIH ketat (satu kuota untuk semua
+ * request tanpa IP valid) daripada memberi tiap nilai sampah kuota baru.
+ * Sebelumnya route memakai SELURUH nilai header mentah sebagai kunci,
+ * sehingga setiap nilai berbeda (termasuk daftar koma yang dimodifikasi)
+ * mendapat kuota baru.
+ */
+export function parseClientIpFromForwardedHeader(headerValue: string | null | undefined): string | null {
+  if (!headerValue) return null;
+  let first = headerValue.split(',')[0]?.trim();
+  if (!first || first.length > 45) return null;
+  // Bentuk bracketed IPv6 ("[::1]") — buang kurungnya.
+  if (first.startsWith('[') && first.endsWith(']')) {
+    first = first.slice(1, -1);
+  }
+  if (isValidIPv4(first) || isValidIPv6(first)) return first;
+  return null;
+}
+
+function isValidIPv4(s: string): boolean {
+  const parts = s.split('.');
+  if (parts.length !== 4) return false;
+  for (const p of parts) {
+    // Oktet desimal tanpa leading zero ("01" ditolak) dan bernilai 0-255.
+    if (!/^(0|[1-9][0-9]{0,2})$/.test(p)) return false;
+    if (Number(p) > 255) return false;
+  }
+  return true;
+}
+
+function isValidIPv6(s: string): boolean {
+  let addr = s;
+  // Ekor IPv4 tersemat ("::ffff:192.168.1.1") — validasi bagian IPv4-nya,
+  // lalu ganti dengan dua grup heksa placeholder untuk cek struktural.
+  if (addr.includes('.')) {
+    const lastColon = addr.lastIndexOf(':');
+    if (lastColon === -1) return false;
+    if (!isValidIPv4(addr.slice(lastColon + 1))) return false;
+    addr = `${addr.slice(0, lastColon)}:0:0`;
+  }
+  if (!addr.includes(':') || addr.includes(':::')) return false;
+  const halves = addr.split('::');
+  if (halves.length > 2) return false;
+  const checkGroups = (g: string): boolean => {
+    if (g === '') return true;
+    const groups = g.split(':');
+    return groups.every((h) => /^[0-9a-fA-F]{1,4}$/.test(h));
+  };
+  if (halves.length === 2) {
+    // '::' wajib mewakili minimal satu grup nol.
+    const headCount = halves[0] === '' ? 0 : halves[0].split(':').length;
+    const tailCount = halves[1] === '' ? 0 : halves[1].split(':').length;
+    if (headCount + tailCount > 7) return false;
+    return checkGroups(halves[0]) && checkGroups(halves[1]);
+  }
+  // Tanpa kompresi: tepat 8 grup.
+  const groups = addr.split(':');
+  return groups.length === 8 && checkGroups(addr);
+}
+
 interface RateLimitRecord {
   attempts: number;
   blockedUntil: number | null;

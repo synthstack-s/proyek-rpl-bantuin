@@ -714,25 +714,51 @@ export async function updateSessionDiagnosis(
  * ter-drain mengadopsi ID DB-nya). Memori dibaca DULU lalu DB, sehingga
  * drain yang menyisip di antara kedua baca tidak bisa menggandakan maupun
  * menghilangkan pesan dari satu hasil baca.
+ *
+ * S9a/F13 — Parameter `limit` opsional membatasi hasil ke N pesan TERBARU
+ * (diurutkan kronologis menaik seperti biasa). Jalur LLM memakainya
+ * (20 pesan terakhir) agar sesi yang panjang tidak membebani token dan
+ * memori; tanpa `limit`, seluruh riwayat dikembalikan (kompatibilitas
+ * pemanggil lama — untuk API riwayat, pakai `getSessionMessagesPage` yang
+ * berpaginasi, bukan fungsi ini). LIMIT diterapkan di SQL (`ORDER BY id
+ * DESC LIMIT ?`) untuk sisi DB, lalu hasil gabungan dipangkas lagi setelah
+ * merge agar pesan memori yang lebih tua tidak menggeser jendela.
  */
-export async function getSessionMessages(sessionId: number): Promise<StoredChatMessage[]> {
+export async function getSessionMessages(
+  sessionId: number,
+  options: { limit?: number } = {}
+): Promise<StoredChatMessage[]> {
+  const limit =
+    typeof options.limit === 'number' && Number.isFinite(options.limit)
+      ? Math.min(500, Math.max(1, Math.floor(options.limit)))
+      : undefined;
   pruneMemoryFallback();
   const memoryCopy = (memoryMessages.get(sessionId) || []).slice();
 
   // F15 — Sesi fallback tidak punya baris di DB: memori saja.
   if (isFallbackId(sessionId)) {
-    return sortMessagesByTime(memoryCopy);
+    const merged = sortMessagesByTime(memoryCopy);
+    return limit === undefined ? merged : merged.slice(-limit);
   }
 
   let dbRows: StoredChatMessage[] = [];
   try {
-    const rows = await query<any[]>(
-      `SELECT id, session_id, role, message, tokens_used, response_time_ms, raw_metadata, created_at
-       FROM ai_chat_messages
-       WHERE session_id = ?
-       ORDER BY id ASC`,
-      [sessionId]
-    );
+    const rows = limit === undefined
+      ? await query<any[]>(
+          `SELECT id, session_id, role, message, tokens_used, response_time_ms, raw_metadata, created_at
+           FROM ai_chat_messages
+           WHERE session_id = ?
+           ORDER BY id ASC`,
+          [sessionId]
+        )
+      : await query<any[]>(
+          `SELECT id, session_id, role, message, tokens_used, response_time_ms, raw_metadata, created_at
+           FROM ai_chat_messages
+           WHERE session_id = ?
+           ORDER BY id DESC
+           LIMIT ?`,
+          [sessionId, limit]
+        );
 
     dbRows = (rows || []).map(mapMessageRow);
     // DB terbukti dapat dijangkau — coba drain pesan fallback yang tertunda.
@@ -746,7 +772,120 @@ export async function getSessionMessages(sessionId: number): Promise<StoredChatM
   const byId = new Map<number, StoredChatMessage>();
   for (const m of memoryCopy) byId.set(m.id, m);
   for (const m of dbRows) byId.set(m.id, m);
-  return sortMessagesByTime(Array.from(byId.values()));
+  const merged = sortMessagesByTime(Array.from(byId.values()));
+  return limit === undefined ? merged : merged.slice(-limit);
+}
+
+export interface SessionMessagesPage {
+  /** Pesan halaman ini, diurutkan kronologis menaik (terlama → terbaru). */
+  messages: StoredChatMessage[];
+  /** `true` bila masih ada pesan LEBIH LAMA di luar halaman ini. */
+  hasMore: boolean;
+  /**
+   * Cursor untuk halaman berikutnya (ID pesan tertua di halaman ini) —
+   * teruskan sebagai `beforeId`. `null` bila halaman ini kosong atau sudah
+   * halaman terakhir.
+   */
+  nextCursor: number | null;
+}
+
+/**
+ * S9a/F13 — Riwayat pesan berpaginasi berbasis cursor untuk API riwayat
+ * (`GET /api/chat/history`). Halaman pertama (tanpa `beforeId`) berisi N
+ * pesan TERBARU; halaman berikutnya berisi N pesan yang lebih lama dari
+ * `beforeId` (eksklusif). `limit` dijepit 1–100 (default 50).
+ *
+ * Jalur normal (tanpa pesan fallback in-memory) memakai paginasi cursor
+ * murni di SQL (`id < ? ORDER BY id DESC LIMIT ?`) — tidak pernah memuat
+ * seluruh riwayat ke memori. Bila ada pesan fallback in-memory untuk sesi
+ * ini (hanya selama/setelah DB outage; dibatasi 200/sesi), paginasi
+ * dilakukan pada hasil gabungan (merge) agar pesan-pesan itu tetap terlihat
+ * dan tidak terlewat — dengan catatan: cursor yang menunjuk pesan yang
+ * sudah tidak ada (mis. kedaluwarsa TTL) mengembalikan halaman kosong
+ * (paginasi berakhir bersih, bukan mengulang dari awal). Paginasi yang
+ * melintasi batas drain (pesan memori tersalin ke DB di tengah paginasi)
+ * dapat mengulang/melewatkan pesan — keterbatasan yang didokumentasikan,
+ * hanya relevan selama outage DB.
+ */
+export async function getSessionMessagesPage(
+  sessionId: number,
+  options: { limit?: number; beforeId?: number | null } = {}
+): Promise<SessionMessagesPage> {
+  const limit =
+    typeof options.limit === 'number' && Number.isFinite(options.limit)
+      ? Math.min(100, Math.max(1, Math.floor(options.limit)))
+      : 50;
+  const beforeId =
+    typeof options.beforeId === 'number' && Number.isInteger(options.beforeId)
+      ? options.beforeId
+      : null;
+
+  pruneMemoryFallback();
+  const memoryCopy = (memoryMessages.get(sessionId) || []).slice();
+
+  // Jalur merge: ada pesan fallback in-memory — paginasi pada hasil gabungan.
+  if (memoryCopy.length > 0) {
+    const all = await getSessionMessages(sessionId);
+    let end = all.length;
+    if (beforeId !== null) {
+      const idx = all.findIndex((m) => m.id === beforeId);
+      if (idx === -1) {
+        // Cursor basi (pesan sudah tidak ada) — akhiri paginasi bersih.
+        return { messages: [], hasMore: false, nextCursor: null };
+      }
+      end = idx;
+    }
+    const start = Math.max(0, end - limit);
+    const page = all.slice(start, end);
+    return {
+      messages: page,
+      hasMore: start > 0,
+      nextCursor: page.length > 0 ? page[0].id : null,
+    };
+  }
+
+  // Jalur normal: cursor SQL murni atas baris DB (ID DB kronologis menaik).
+  // Sesi fallback (ID negatif) tidak punya baris DB — kueri mengembalikan
+  // kosong, yang benar bila tidak ada pesan memori (lihat jalur merge di atas).
+  // Cursor negatif (menunjuk pesan memori yang sudah ter-drain/kedaluwarsa
+  // sejak halaman sebelumnya) diperlakukan sebagai "tanpa cursor" — klien
+  // mendapat halaman pertama (DB saja); tidak ada pengulangan tanpa akhir
+  // karena nextCursor halaman itu adalah ID DB positif.
+  let dbRows: StoredChatMessage[] = [];
+  try {
+    const rows =
+      beforeId !== null && beforeId > 0
+        ? await query<any[]>(
+            `SELECT id, session_id, role, message, tokens_used, response_time_ms, raw_metadata, created_at
+             FROM ai_chat_messages
+             WHERE session_id = ? AND id < ?
+             ORDER BY id DESC
+             LIMIT ?`,
+            [sessionId, beforeId, limit + 1]
+          )
+        : await query<any[]>(
+            `SELECT id, session_id, role, message, tokens_used, response_time_ms, raw_metadata, created_at
+             FROM ai_chat_messages
+             WHERE session_id = ?
+             ORDER BY id DESC
+             LIMIT ?`,
+            [sessionId, limit + 1]
+          );
+    dbRows = (rows || []).map(mapMessageRow);
+    triggerDrainIfPending();
+  } catch (err) {
+    logDbFailure('getSessionMessagesPage', { sessionId }, err);
+  }
+
+  // Ambil satu baris ekstra untuk mendeteksi hasMore, lalu kembalikan
+  // urutan kronologis menaik.
+  const hasMore = dbRows.length > limit;
+  const page = dbRows.slice(0, limit).reverse();
+  return {
+    messages: page,
+    hasMore,
+    nextCursor: page.length > 0 ? page[0].id : null,
+  };
 }
 
 /**

@@ -1,16 +1,27 @@
 /**
  * GOOGLE GEMINI PROVIDER ADAPTER
  * BANTUIN AI PROVIDER MANAGEMENT
- * 
+ *
  * Mengimplementasikan AIProviderAdapter untuk Google Gemini:
- * - Format resmi Google Generative AI API
+ * - Format resmi Google Generative AI API (REST v1beta)
  * - Normalisasi Function Calling / Tool Calling
  * - Normalisasi Token Usage & Latensi
  * - Uji koneksi terisolasi dengan payload minimal
  * - Penanganan error spesifik Google tanpa kebocoran API Key
+ *
+ * S7: adapter ini memakai REST langsung (fetch), BUKAN Google SDK
+ * (@google/generative-ai) — SDK itu tidak mendukung base URL kustom
+ * sehingga `config.apiEndpoint` selalu diabaikan dan request selalu ke
+ * endpoint resmi Google. Dengan REST, endpoint terkonfigurasi (termasuk
+ * proxy/region kustom) BENAR-BENAR dipakai: setiap metode memvalidasi
+ * endpoint lewat `validateAndPinEndpoint` dan memakai `normalizedUrl`
+ * hasil validasi untuk membangun URL request. Timeout memakai
+ * `AbortSignal.timeout` sehingga request yang kehabisan waktu BENAR-BENAR
+ * dibatalkan (bukan Promise.race yang membiarkan request liar berjalan).
+ * API key selalu dikirim lewat header `x-goog-api-key` (T2), tidak pernah
+ * di query string.
  */
 
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import {
   AIProviderAdapter,
   AIProviderType,
@@ -25,6 +36,78 @@ import {
 } from '../types';
 import { validateAndPinEndpoint } from '../ssrf-validator';
 
+/** Versi REST API Gemini yang dipakai seluruh metode adapter ini. */
+const GEMINI_REST_API_VERSION = 'v1beta';
+
+/**
+ * S7: bangun URL REST Gemini dari base URL TERNORMALISASI hasil validasi
+ * SSRF — jangan pernah memakai URL hardcoded atau base mentah dari config.
+ */
+function buildGeminiRestUrl(normalizedBaseUrl: string, model: string, action: 'generateContent'): string {
+  return `${normalizedBaseUrl}/${GEMINI_REST_API_VERSION}/models/${encodeURIComponent(model)}:${action}`;
+}
+
+/**
+ * S7: satu titik pemanggilan REST Gemini untuk seluruh metode adapter.
+ * - Key lewat header `x-goog-api-key` (T2 — tidak pernah di query string).
+ * - Timeout memakai `AbortSignal.timeout` sehingga fetch yang kehabisan
+ *   waktu benar-benar dibatalkan; error abort diubah menjadi Error timeout
+ *   yang jelas agar `normalizeError` mengklasifikasikannya sebagai
+ *   `timeout` (bukan `unknown_error`).
+ * - Respons non-2xx dilempar sebagai Error dengan properti numerik
+ *   `.status` + pesan dari body error Google, agar `normalizeError`
+ *   (cabang status numerik Batch 2/H3) mengklasifikasikannya dengan benar.
+ * - `JSON.parse` body respons berpenjaga (pola S8e).
+ */
+async function callGeminiRest(
+  url: string,
+  apiKey: string,
+  body: Record<string, any>,
+  timeoutMs: number
+): Promise<any> {
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey.trim(),
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err: any) {
+    // AbortSignal.timeout membatalkan fetch dengan TimeoutError/AbortError —
+    // ubah menjadi pesan timeout yang dikenali normalizeError.
+    if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+      throw new Error(`Request timeout (${timeoutMs}ms) — request ke Gemini dibatalkan.`);
+    }
+    throw err;
+  }
+
+  let data: any = null;
+  try {
+    data = await res.json();
+  } catch {
+    throw new Error(
+      `Respons Gemini bukan JSON yang valid (HTTP ${res.status}) — tidak dapat membaca body respons.`
+    );
+  }
+
+  if (!res.ok) {
+    const apiError: any = new Error(
+      data?.error?.message || `Gemini mengembalikan HTTP ${res.status}.`
+    );
+    // Status numerik agar normalizeError memakai cabang H3 (bukan substring).
+    apiError.status = res.status;
+    apiError.statusCode = res.status;
+    if (typeof data?.error?.status === 'string') apiError.code = data.error.status;
+    throw apiError;
+  }
+
+  return data;
+}
+
 export class GeminiProviderAdapter implements AIProviderAdapter {
   readonly providerName: AIProviderType = 'gemini';
 
@@ -37,8 +120,11 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
     const modelToTest = config.selectedModel || config.defaultModel || 'gemini-3.5-flash';
 
     try {
-      // 1. Validasi SSRF & DNS Pinning pada Endpoint
-      await validateAndPinEndpoint(endpointToTest, 'gemini');
+      // 1. Validasi SSRF & DNS Pinning pada Endpoint. S7: hasil validasi
+      // DIPAKAI — `normalizedUrl`-nya menjadi base URL request REST di
+      // bawah (sebelumnya hasil dibuang dan SDK selalu memanggil endpoint
+      // resmi Google apa pun endpoint terkonfigurasi).
+      const endpointValidation = await validateAndPinEndpoint(endpointToTest, 'gemini');
 
       if (!config.apiKey || !config.apiKey.trim()) {
         return {
@@ -53,16 +139,6 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
         };
       }
 
-      // 2. Kirim probe request berbobot minimal (1 token)
-      const genAI = new GoogleGenerativeAI(config.apiKey);
-      const model = genAI.getGenerativeModel({
-        model: modelToTest,
-        generationConfig: {
-          maxOutputTokens: 1,
-          temperature: 0,
-        },
-      });
-
       // L7: timeout probe memakai requestTimeoutMs dari konfigurasi (form) —
       // sebelumnya hardcoded 15 detik, sehingga pengaturan timeout admin
       // diabaikan saat tes koneksi. Dijepit 5s–120s; default 15s bila
@@ -71,13 +147,19 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
         ? Math.max(5000, Math.min(120000, Number(config.requestTimeoutMs)))
         : 15000;
 
-      // Panggil generateContent dengan prompt pendek untuk memverifikasi autentikasi dan model
-      const probeResult = await Promise.race([
-        model.generateContent('ping'),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`Koneksi timeout setelah ${Math.round(probeTimeoutMs / 1000)} detik`)), probeTimeoutMs)
-        ),
-      ]);
+      // 2. Kirim probe request berbobot minimal (1 token) lewat REST
+      // langsung ke endpoint terkonfigurasi (S7). Timeout benar-benar
+      // membatalkan fetch (AbortSignal di callGeminiRest).
+      const probeUrl = buildGeminiRestUrl(endpointValidation.normalizedUrl, modelToTest, 'generateContent');
+      await callGeminiRest(
+        probeUrl,
+        config.apiKey,
+        {
+          contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
+          generationConfig: { maxOutputTokens: 1, temperature: 0 },
+        },
+        probeTimeoutMs
+      );
 
       const latencyMs = Date.now() - startTime;
 
@@ -116,7 +198,12 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
     const startTime = Date.now();
 
     try {
-      const genAI = new GoogleGenerativeAI(config.apiKey);
+      // S7: validasi endpoint di generateChatCompletion JUGA (sebelumnya
+      // hanya testConnection yang memvalidasi — dan membuang hasilnya).
+      // `normalizedUrl` hasil validasi menjadi base URL request REST di
+      // bawah, sehingga endpoint kustom (proxy/region) benar-benar dipakai.
+      const endpointUrl = config.apiEndpoint || 'https://generativelanguage.googleapis.com';
+      const endpointValidation = await validateAndPinEndpoint(endpointUrl, 'gemini');
 
       // Pisahkan system message dari pesan obrolan reguler
       const systemMessage = request.messages.find((m) => m.role === 'system')?.content;
@@ -150,15 +237,20 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
         ];
       }
 
-      const model = genAI.getGenerativeModel({
-        model: config.selectedModel || config.defaultModel || 'gemini-3.5-flash',
-        systemInstruction: systemMessage,
+      // S7: body REST generateContent — bentuk yang sama seperti yang dulu
+      // dibangun SDK (systemInstruction/tools/generationConfig), hanya
+      // sekarang dikirim langsung lewat fetch ke endpoint terkonfigurasi.
+      const modelToUse = config.selectedModel || config.defaultModel || 'gemini-3.5-flash';
+      const requestBody: Record<string, any> = {
+        systemInstruction: systemMessage ? { parts: [{ text: systemMessage }] } : undefined,
         tools: genAITools,
         generationConfig: {
           temperature: request.temperature ?? config.temperature ?? 0.7,
           maxOutputTokens: request.maxTokens ?? config.maxOutputTokens ?? 2048,
         },
-      });
+      };
+      if (!systemMessage) delete requestBody.systemInstruction;
+      if (!genAITools) delete requestBody.tools;
 
       // Format riwayat percakapan untuk Gemini
       const contents: Array<{ role: 'user' | 'model'; parts: Array<{ text?: string; functionCall?: any; functionResponse?: any }> }> = [];
@@ -216,48 +308,59 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
       }
 
       const timeoutMs = config.requestTimeoutMs || 30000;
-      const apiCall = model.generateContent({
-        contents: contents as any,
-      });
+      requestBody.contents = contents;
 
-      const response = await Promise.race([
-        apiCall,
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`Request timeout (${timeoutMs}ms)`)), timeoutMs)
-        ),
-      ]);
+      // S7: panggil REST langsung ke endpoint terkonfigurasi. Timeout
+      // memakai AbortSignal sehingga request yang kehabisan waktu
+      // benar-benar dibatalkan (bukan Promise.race yang membiarkan
+      // request liar berjalan dan memakai token).
+      const chatUrl = buildGeminiRestUrl(endpointValidation.normalizedUrl, modelToUse, 'generateContent');
+      const data = await callGeminiRest(chatUrl, config.apiKey, requestBody, timeoutMs);
 
       const latencyMs = Date.now() - startTime;
-      const candidates = response.response.candidates;
+      const candidates = data?.candidates;
       const candidate = candidates?.[0];
 
-      let replyText = '';
-      try {
-        replyText = response.response.text();
-      } catch {
-        replyText = candidate?.content?.parts?.find((p: any) => p.text)?.text || '';
+      // Prompt diblokir safety filter / tidak ada kandidat: laporkan dengan
+      // jelas (bukan balasan kosong yang tampak seperti sukses).
+      if (!candidate) {
+        const blockReason =
+          data?.promptFeedback?.blockReason ||
+          data?.promptFeedback?.blockReasonMessage ||
+          'tidak diketahui';
+        throw new Error(
+          `Gemini tidak mengembalikan kandidat respons (prompt kemungkinan diblokir safety filter; blockReason: ${blockReason}).`
+        );
       }
 
-      // Ekstrak function calling jika dipicu oleh model
-      const functionCallsRaw = response.response.functionCalls();
+      const parts: any[] = candidate?.content?.parts || [];
+
+      // Gabungkan seluruh part teks (setara response.text() pada SDK).
+      const replyText = parts
+        .filter((p: any) => typeof p.text === 'string')
+        .map((p: any) => p.text)
+        .join('');
+
+      // Ekstrak function calling jika dipicu oleh model (part functionCall
+      // pada respons REST — bentuk yang sama seperti yang dibaca SDK).
+      const functionCallParts = parts.filter((p: any) => p.functionCall);
       let normalizedToolCalls: UniversalToolCall[] | undefined = undefined;
 
-      if (functionCallsRaw && functionCallsRaw.length > 0) {
-        const parts = candidate?.content?.parts || [];
-        normalizedToolCalls = functionCallsRaw.map((fc: any, index: number) => {
-          const matchingPart = parts.find((p: any) => p.functionCall && p.functionCall.name === fc.name);
+      if (functionCallParts.length > 0) {
+        normalizedToolCalls = functionCallParts.map((part: any, index: number) => {
+          const fc = part.functionCall;
           return {
-            id: fc.id || `gemini_call_${Date.now()}_${index}`,
+            id: `gemini_call_${Date.now()}_${index}`,
             name: fc.name,
             arguments: fc.args || {},
-            thoughtSignature: (matchingPart as any)?.thoughtSignature,
-            rawPart: matchingPart,
+            thoughtSignature: part.thoughtSignature,
+            rawPart: part,
           };
         });
       }
 
       // Normalisasi Token Usage dari usageMetadata
-      const usageMeta = response.response.usageMetadata;
+      const usageMeta = data?.usageMetadata;
       const promptTokens = Number(usageMeta?.promptTokenCount || 0);
       const completionTokens = Number(usageMeta?.candidatesTokenCount || 0);
       const totalTokens = Number(usageMeta?.totalTokenCount || promptTokens + completionTokens);
@@ -313,8 +416,15 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
     }
 
     try {
+      // S7: pakai endpoint TERKONFIGURASI (tervalidasi SSRF) — sebelumnya
+      // URL resmi Google di-hardcode di sini sehingga endpoint kustom
+      // diabaikan juga saat mengambil daftar model.
+      const endpointUrl = config.apiEndpoint || 'https://generativelanguage.googleapis.com';
+      const endpointValidation = await validateAndPinEndpoint(endpointUrl, 'gemini');
+      const modelsUrl = `${endpointValidation.normalizedUrl}/${GEMINI_REST_API_VERSION}/models`;
+
       // T2: key lewat header, bukan query string.
-      const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models', {
+      const res = await fetch(modelsUrl, {
         headers: { 'x-goog-api-key': config.apiKey.trim() },
         signal: AbortSignal.timeout(8000),
       });
