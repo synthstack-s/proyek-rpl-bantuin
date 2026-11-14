@@ -26,16 +26,12 @@ export const OFFICIAL_PROVIDER_HOSTNAMES: Record<string, string[]> = {
   mistral: ['api.mistral.ai'],
 };
 
-// Pemetaan IP publik fallback untuk host AI populer dalam environment sandbox/offline
-export const KNOWN_AI_PROVIDER_HOSTS: Record<string, string> = {
-  'generativelanguage.googleapis.com': '142.250.190.42',
-  'api.groq.com': '104.18.2.161',
-  'api.deepseek.com': '104.18.0.1',
-  'api.openai.com': '104.18.7.192',
-  'openrouter.ai': '104.18.24.23',
-  'api.mistral.ai': '104.18.10.15',
-  'api.anthropic.com': '104.18.3.1',
-};
+// S8b: TIDAK ADA lagi pemetaan IP fallback. Versi sebelumnya memakai
+// KNOWN_AI_PROVIDER_HOSTS / IP generik 104.18.0.1 saat DNS gagal sehingga
+// validasi lolos dengan IP FABRIKASI (fail-open). Sekarang kegagalan DNS
+// selalu melempar SSRFValidationError (fail-closed) — lihat
+// validateAndPinEndpoint. Konstanta itu dihapus total (tidak ada pengimpor
+// lain di repo — hanya dipakai di dalam file ini).
 
 export class SSRFValidationError extends Error {
   constructor(message: string, public readonly code: string = 'ERR_SSRF_VALIDATION') {
@@ -89,37 +85,104 @@ export function isPrivateIPv4(ip: string): boolean {
 }
 
 /**
+ * L4: kembangkan alamat IPv6 menjadi 8 grup heksadesimal 16-bit (bentuk
+ * biner/expanded). Menangani kompresi `::`, bentuk expanded penuh, dan ekor
+ * IPv4 tersemat (`::ffff:192.168.1.1`, `::192.168.1.1` — dikonversi ke dua
+ * grup heksa). Mengembalikan null untuk input malformed (pemanggil fail-closed).
+ */
+function expandIPv6ToGroups(ip: string): number[] | null {
+  let addr = ip.toLowerCase().trim();
+  // Buang zone id (mis. %eth0) bila ada.
+  const zoneIdx = addr.indexOf('%');
+  if (zoneIdx !== -1) addr = addr.slice(0, zoneIdx);
+
+  // Ekor IPv4 tersemat: ubah ke dua grup heksa agar parsing seragam.
+  if (addr.includes('.')) {
+    const lastColon = addr.lastIndexOf(':');
+    if (lastColon === -1) return null;
+    const v4 = addr.slice(lastColon + 1);
+    if (!net.isIPv4(v4)) return null;
+    const [a, b, c, d] = v4.split('.').map(Number);
+    addr = `${addr.slice(0, lastColon + 1)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+
+  const parseHextets = (s: string): number[] | null => {
+    if (s === '') return [];
+    const out: number[] = [];
+    for (const h of s.split(':')) {
+      if (!/^[0-9a-f]{1,4}$/.test(h)) return null;
+      out.push(parseInt(h, 16));
+    }
+    return out;
+  };
+
+  const parts = addr.split('::');
+  if (parts.length > 2) return null;
+
+  if (parts.length === 2) {
+    const head = parseHextets(parts[0]);
+    const tail = parseHextets(parts[1]);
+    if (!head || !tail) return null;
+    // '::' wajib mewakili minimal satu grup nol — bila head+tail sudah 8,
+    // alamatnya malformed (mis. '1:2:3:4:5:6:7:8::').
+    const missing = 8 - head.length - tail.length;
+    if (missing < 1) return null;
+    return [...head, ...new Array(missing).fill(0), ...tail];
+  }
+
+  const groups = parseHextets(parts[0]);
+  if (!groups || groups.length !== 8) return null;
+  return groups;
+}
+
+/**
  * Memeriksa apakah sebuah alamat IPv6 berada dalam jangkauan privat, loopback, atau link-local
+ *
+ * L4: pemeriksaan dilakukan pada 8 grup 16-bit hasil normalisasi, BUKAN pada
+ * prefix string bentuk terkompresi — sebelumnya bentuk expanded seperti
+ * `0:0:0:0:0:0:0:1` (loopback), `::192.168.1.1` (IPv4-compatible), dan prefix
+ * NAT64 `64:ff9b::/96` lolos karena tidak cocok dengan prefix mana pun.
+ * Daftar blokir kini mencakup: unspecified/loopback, IPv4-mapped (didelegasikan
+ * ke isPrivateIPv4), IPv4-compatible `::/96`, NAT64 `64:ff9b::/96`, Teredo
+ * `2001::/32`, link-local `fe80::/10`, ULA `fc00::/7`, dan multicast `ff00::/8`.
  */
 export function isPrivateIPv6(ip: string): boolean {
-  const norm = ip.toLowerCase().trim();
+  const g = expandIPv6ToGroups(ip);
+  if (!g) return true; // Malformed dianggap tidak aman (fail-closed)
 
-  // ::1 (Loopback) & :: (Unspecified)
-  if (norm === '::1' || norm === '::') return true;
+  const [g0, g1, g2, g3, g4, g5, g6, g7] = g;
+  const firstFiveZero = g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0;
 
-  // IPv4-mapped IPv6 (::ffff:192.168.1.1)
-  if (norm.startsWith('::ffff:')) {
-    const v4 = norm.replace('::ffff:', '');
-    if (net.isIPv4(v4)) {
-      return isPrivateIPv4(v4);
-    }
-    return true;
+  // ::/128 (Unspecified) & ::1/128 (Loopback) — berlaku juga untuk bentuk
+  // expanded (0:0:0:0:0:0:0:0 dan 0:0:0:0:0:0:0:1).
+  if (firstFiveZero && g5 === 0 && g6 === 0 && (g7 === 0 || g7 === 1)) return true;
+
+  // IPv4-mapped IPv6 ::ffff:0:0/96 — putuskan dari IPv4 yang dibungkus
+  // (perilaku lama dipertahankan: ::ffff:8.8.8.8 tetap publik).
+  if (firstFiveZero && g5 === 0xffff) {
+    const v4 = `${(g6 >> 8) & 0xff}.${g6 & 0xff}.${(g7 >> 8) & 0xff}.${g7 & 0xff}`;
+    return isPrivateIPv4(v4);
   }
+
+  // ::/96 (IPv4-compatible, mis. ::192.168.1.1 dan ::8.8.8.8) — seluruh
+  // prefix diblokir karena membungkus alamat IPv4.
+  if (firstFiveZero && g5 === 0) return true;
+
+  // 64:ff9b::/96 (NAT64 — membungkus IPv4, mis. 64:ff9b::a9fe:a9fe =
+  // 169.254.169.254 metadata cloud).
+  if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) return true;
+
+  // 2001::/32 (Teredo — membungkus IPv4).
+  if (g0 === 0x2001 && g1 === 0x0000) return true;
 
   // fe80::/10 (Link-Local)
-  if (norm.startsWith('fe80:') || norm.startsWith('fe8') || norm.startsWith('fe9') || norm.startsWith('fea') || norm.startsWith('feb')) {
-    return true;
-  }
+  if (g0 >= 0xfe80 && g0 <= 0xfebf) return true;
 
-  // fc00::/7 & fd00::/8 (Unique Local Address RFC 4193)
-  if (norm.startsWith('fc') || norm.startsWith('fd')) {
-    return true;
-  }
+  // fc00::/7 (Unique Local Address RFC 4193: fc00::/8 & fd00::/8)
+  if ((g0 & 0xfe00) === 0xfc00) return true;
 
   // ff00::/8 (Multicast)
-  if (norm.startsWith('ff')) {
-    return true;
-  }
+  if ((g0 & 0xff00) === 0xff00) return true;
 
   return false;
 }
@@ -148,6 +211,73 @@ export interface ValidatedEndpointResult {
 }
 
 /**
+ * S8a — Cache hasil validasi endpoint + hasil resolusi DNS, TTL 5 menit.
+ *
+ * Sebelumnya setiap request chat memanggil `validateAndPinEndpoint` yang
+ * selalu melakukan lookup DNS (latensi tambahan; kegagalan DNS transien =
+ * chatbot down). Sekarang:
+ * - Hasil validasi penuh di-cache per endpoint ternormalisasi (origin +
+ *   path — BUKAN per hostname saja, karena dua konfigurasi bisa berbagi
+ *   hostname dengan path berbeda dan `normalizedUrl`-nya tidak boleh
+ *   tertukar).
+ * - Hasil resolusi DNS di-cache per hostname, sehingga endpoint berbeda
+ *   yang berbagi hostname tetap tidak mengulang lookup.
+ * - Hanya hasil SUKSES yang di-cache. Kegagalan (termasuk DNS gagal) TIDAK
+ *   PERNAH di-cache sebagai valid — setiap percobaan berikutnya melakukan
+ *   validasi ulang penuh (fail-closed S8b tetap berlaku).
+ *
+ * S8c — cache inilah tempat IP yang di-pin DIPERTAHANKAN (bukan dibuang):
+ * `saveProviderConfig` memanggil `validateAndPinEndpoint` saat menyimpan,
+ * dan hasil itu (termasuk `pinnedIp`) tersimpan di sini; request chat /
+ * tes / daftar model berikutnya dalam jendela TTL memakai pin yang sama
+ * lewat `createPinnedHttpsAgent`, tanpa lookup DNS ulang. Setelah TTL
+ * habis, pin di-validasi ulang (DNS bisa berubah — pin abadi justru
+ * berbahaya). Pin sengaja TIDAK dipersist ke database: pin adalah fakta
+ * DNS sesaat, dan cache proses ini sudah cukup karena adapter dan
+ * repository berjalan dalam proses server yang sama.
+ */
+export const ENDPOINT_VALIDATION_CACHE_TTL_MS = 5 * 60 * 1000;
+
+interface CachedValidation {
+  result: ValidatedEndpointResult;
+  expiresAt: number;
+}
+
+interface CachedDnsResolution {
+  addresses: dns.LookupAddress[];
+  expiresAt: number;
+}
+
+const endpointValidationCache = new Map<string, CachedValidation>();
+const dnsResolutionCache = new Map<string, CachedDnsResolution>();
+
+/**
+ * Mengosongkan cache validasi endpoint + DNS (hook pemeliharaan/pengujian).
+ * Pemakaian normal tidak perlu memanggil ini — entri kedaluwarsa sendiri
+ * setelah TTL.
+ */
+export function clearEndpointValidationCache(): void {
+  endpointValidationCache.clear();
+  dnsResolutionCache.clear();
+}
+
+async function resolveHostname(hostname: string): Promise<dns.LookupAddress[]> {
+  const now = Date.now();
+  const cached = dnsResolutionCache.get(hostname);
+  if (cached && cached.expiresAt > now) {
+    return cached.addresses;
+  }
+  // S8b: kegagalan DNS dilempar apa adanya (fail-closed) — TIDAK ADA
+  // fallback IP fabrikasi, dan kegagalan TIDAK di-cache.
+  const addresses = await dns.promises.lookup(hostname, { all: true });
+  dnsResolutionCache.set(hostname, {
+    addresses,
+    expiresAt: now + ENDPOINT_VALIDATION_CACHE_TTL_MS,
+  });
+  return addresses;
+}
+
+/**
  * Melakukan validasi komprehensif pada endpoint URL:
  * - Wajib HTTPS
  * - Resolusi DNS seluruh record IP
@@ -167,6 +297,20 @@ export async function validateAndPinEndpoint(
     parsed = new URL(endpointUrl.trim());
   } catch {
     throw new SSRFValidationError('Format URL endpoint tidak valid.', 'ERR_INVALID_URL');
+  }
+
+  // S8a: kembalikan hasil validasi yang masih segar (TTL 5 menit) tanpa
+  // lookup DNS ulang. Kunci adalah URL ternormalisasi (origin + path):
+  // entri cache hanya pernah dibuat untuk URL yang lolos SEMUA pemeriksaan
+  // di bawah, jadi mengembalikan cache berarti mengembalikan putusan yang
+  // sudah tervalidasi penuh — termasuk pinnedIp-nya (S8c).
+  const normalizedUrl = parsed.origin + parsed.pathname.replace(/\/+$/, '');
+  const cachedValidation = endpointValidationCache.get(normalizedUrl);
+  if (cachedValidation && cachedValidation.expiresAt > Date.now()) {
+    return cachedValidation.result;
+  }
+  if (cachedValidation) {
+    endpointValidationCache.delete(normalizedUrl);
   }
 
   // 1. Wajib Protokol HTTPS
@@ -195,36 +339,19 @@ export async function validateAndPinEndpoint(
   const officialHosts = expectedProvider ? (OFFICIAL_PROVIDER_HOSTNAMES[expectedProvider] || []) : [];
   const isOfficial = officialHosts.includes(hostname);
 
-  // 4. DNS Resolution Validation (Ambil seluruh alamat IPv4 dan IPv6)
-  let records: dns.LookupAddress[] = [];
+  // 4. DNS Resolution Validation (Ambil seluruh alamat IPv4 dan IPv6).
+  // S8b (fail-closed): kegagalan DNS MENOLAK endpoint — tidak ada lagi IP
+  // fabrikasi dari pemetaan hardcoded. S8a: resolusi sukses di-cache per
+  // hostname (TTL 5 menit) di dalam resolveHostname; kegagalan tidak
+  // di-cache sehingga percobaan berikutnya memvalidasi ulang.
+  let records: dns.LookupAddress[];
   try {
-    records = await dns.promises.lookup(hostname, { all: true });
+    records = await resolveHostname(hostname);
   } catch (err: any) {
-    // Jika berada dalam environment terisolasi/sandbox tanpa DNS outbound,
-    // gunakan pemetaan IP publik terdaftar atau fallback aman untuk domain publik standar
-    const knownPublicIp = KNOWN_AI_PROVIDER_HOSTS[hostname];
-    if (knownPublicIp || isOfficial) {
-      records = [
-        {
-          address:
-            knownPublicIp ||
-            (hostname.includes('googleapis') ? '142.250.190.42' : '104.18.2.161'),
-          family: 4,
-        },
-      ];
-    } else if (
-      !hostname.includes('localhost') &&
-      !hostname.endsWith('.internal') &&
-      !hostname.endsWith('.corp') &&
-      /\.[a-z]{2,}$/i.test(hostname)
-    ) {
-      records = [{ address: '104.18.0.1', family: 4 }];
-    } else {
-      throw new SSRFValidationError(
-        `Gagal melakukan resolusi DNS untuk host '${hostname}': ${err.message}`,
-        'ERR_DNS_FAILED'
-      );
-    }
+    throw new SSRFValidationError(
+      `Gagal melakukan resolusi DNS untuk host '${hostname}': ${err.message}. Endpoint ditolak (fail-closed) — periksa koneksi DNS server dan ejaan hostname.`,
+      'ERR_DNS_FAILED'
+    );
   }
 
   if (!records || records.length === 0) {
@@ -246,15 +373,24 @@ export async function validateAndPinEndpoint(
   // Pilih IP publik pertama untuk socket pinning
   const pinnedIp = resolvedIps[0];
 
-  return {
+  const result: ValidatedEndpointResult = {
     isValid: true,
-    normalizedUrl: parsed.origin + parsed.pathname.replace(/\/+$/, ''),
+    normalizedUrl,
     hostname,
     port,
     resolvedIps,
     pinnedIp,
     isOfficialHostname: isOfficial,
   };
+
+  // S8a/S8c: simpan hasil validasi (termasuk pinnedIp) agar request
+  // berikutnya memakai pin yang sama tanpa lookup DNS ulang.
+  endpointValidationCache.set(normalizedUrl, {
+    result,
+    expiresAt: Date.now() + ENDPOINT_VALIDATION_CACHE_TTL_MS,
+  });
+
+  return result;
 }
 
 /**

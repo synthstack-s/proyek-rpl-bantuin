@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
@@ -130,21 +130,36 @@ export default function NewRepairOrderPage() {
   }, []);
 
   // Pre-fill dari URL Search Params (misal dialihkan dari Chatbot AI)
+  // F24 — gejala awal TIDAK LAGI dibaca dari query string `symptoms`
+  // (teks bebas di URL tersimpan di riwayat browser dan log server).
+  // Sebagai ganti, halaman memuatnya server-side lewat `ai_session_id`
+  // dari GET /api/chat/session (login + kepemilikan diperiksa server).
+  const symptomsLoadedRef = useRef(false);
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
       const preCategoryId = params.get('category_id');
-      const preSymptoms = params.get('symptoms');
       const preAiSessionId = params.get('ai_session_id');
 
       if (preAiSessionId) {
         setAiSessionId(Number(preAiSessionId));
-      }
-      if (preSymptoms) {
-        setFormData(prev => ({
-          ...prev,
-          problem_description: preSymptoms,
-        }));
+        if (!symptomsLoadedRef.current) {
+          symptomsLoadedRef.current = true;
+          fetch(`/api/chat/session?id=${encodeURIComponent(preAiSessionId)}`)
+            .then((res) => (res.ok ? res.json() : null))
+            .then((data) => {
+              const symptoms = data?.session?.initialSymptoms;
+              if (typeof symptoms === 'string' && symptoms.trim()) {
+                setFormData((prev) => ({
+                  ...prev,
+                  problem_description: symptoms,
+                }));
+              }
+            })
+            .catch((err) => {
+              console.error('Gagal memuat gejala awal dari sesi:', err);
+            });
+        }
       }
       if (preCategoryId && categories.length > 0) {
         const found = categories.find(c => c.id === Number(preCategoryId));

@@ -21,7 +21,14 @@ import {
 import { validateTopicAndSafety, getStandardRefusalMessage } from './guard';
 import * as DataService from './data-service';
 import * as ActionService from './action-service';
-import { resolveConversationContext, updateSessionMemory } from './context-manager';
+import {
+  resolveConversationContext,
+  updateSessionMemory,
+  getPendingTechnicianAction,
+  setPendingTechnicianAction,
+  clearPendingTechnicianAction,
+  setPendingMemorySearchConfirmation,
+} from './context-manager';
 import { buildSystemPrompt } from './prompt-builder';
 import { getRoleBasedSuggestedPrompts } from './suggested-prompts';
 import { executeRoleBasedTool } from './tools';
@@ -29,7 +36,7 @@ import { getRoleFilteredSchemaSummary, getTableSchemaMetadata } from './schema-r
 import { AIProviderManager } from '@/lib/ai/provider-manager';
 import { UniversalToolDeclaration, UniversalChatMessage } from '@/lib/ai/types';
 import {
-  saveChatMessage,
+  saveChatMessageDetailed,
   updateSessionDiagnosis,
   getSessionMessages,
 } from './repository';
@@ -38,6 +45,443 @@ import { query } from '@/lib/db';
 // Ekspor pembantu saran halaman untuk backward compatibility
 export function getPageContextSuggestions(pathname?: string, role: string = 'guest'): QuickSuggestion[] {
   return getRoleBasedSuggestedPrompts(role as any, pathname);
+}
+
+// ============================================================================
+// F10 — Pola jawaban penolakan aksi teknisi (langkah ke-2 two-step
+// verification). Pesan yang diawali "tidak"/"batal" (dan padanannya)
+// membatalkan aksi tertunda di sesi ini; pembatalan tidak memutasi apa pun
+// sehingga polanya boleh longgar. Jawaban AFIRMATIF ("ya") ditangani
+// isTechnicianConfirmationReply (S9g, ketat) — bukan pola awalan semata.
+// ============================================================================
+const TECHNICIAN_CONFIRM_NO_PATTERN =
+  /^(tidak|nggak|gak|ga|batal|batalkan|jangan|tunda)\b/i;
+
+/**
+ * F10 — Menentukan jenis aksi teknisi dari teks pesan (null bila pesan tidak
+ * mengandung perintah aksi). Dipakai cabang konfirmasi untuk memastikan
+ * jawaban "ya, <aksi> <kode>" hanya mengonfirmasi aksi tertunda yang SAMA —
+ * perintah aksi/kode yang berbeda tidak boleh mengeksekusi aksi tertunda
+ * yang salah, melainkan ditangani cabang aksi sebagai permintaan baru.
+ */
+function detectTechnicianActionType(norm: string): 'accept' | 'on_the_way' | 'start_diagnosis' | 'start_repair' | null {
+  if (!/terima\s+tugas|menuju\s+lokasi|mulai\s+diagnosa|mulai\s+perbaikan/i.test(norm)) return null;
+  if (/terima/i.test(norm)) return 'accept';
+  if (/diagnosa/i.test(norm)) return 'start_diagnosis';
+  if (/perbaikan/i.test(norm)) return 'start_repair';
+  return 'on_the_way';
+}
+
+// ============================================================================
+// F6 — Lokasi penyimpanan pesan percakapan. Repository Batch 2 mengembalikan
+// storedIn 'database' | 'memory' via saveChatMessageDetailed; engine memetakan
+// 'database' -> 'db' sesuai kontrak hasil processChatMessage di bawah.
+// 'memory' berarti pesan hanya di fallback in-memory (hilang saat restart);
+// bila salah satu dari pesan pengguna/balasan hanya di memori, hasilnya
+// 'memory' (tidak tahan lama).
+// ============================================================================
+export type MessageStoreLocation = 'db' | 'memory';
+
+export interface ChatbotReply {
+  reply: string;
+  metadata: ChatMessageMetadata;
+  diagnosisCard?: DiagnosisCard | null;
+  /**
+   * F6 — Di mana pesan percakapan ini tersimpan: 'db' (MySQL, tahan lama)
+   * atau 'memory' (hanya fallback in-memory — hilang saat restart; salah
+   * satu dari pesan pengguna/balasan tidak mencapai database).
+   */
+  storedIn: 'db' | 'memory';
+}
+
+async function saveChatMessageTracked(
+  sessionId: number,
+  role: 'user' | 'assistant' | 'system',
+  message: string,
+  metadata?: ChatMessageMetadata | null,
+  tokensUsed?: number,
+  responseTimeMs?: number
+): Promise<MessageStoreLocation> {
+  const result = await saveChatMessageDetailed(sessionId, role, message, metadata, tokensUsed, responseTimeMs);
+  return result.storedIn === 'database' ? 'db' : 'memory';
+}
+
+function combineStoredIn(...locations: MessageStoreLocation[]): MessageStoreLocation {
+  return locations.includes('memory') ? 'memory' : 'db';
+}
+
+// F23 — Pesan generik untuk klien saat AI tidak tersedia. Detail error mentah
+// provider (nama model/endpoint, kuota, potongan respons API) HANYA dicatat
+// di log server dan TIDAK PERNAH dikembalikan ke klien — baik di teks
+// balasan maupun metadata.aiError.
+const AI_UNAVAILABLE_MESSAGE = 'Layanan AI sedang tidak tersedia, coba lagi nanti';
+
+/**
+ * S9a/F13 — Jendela riwayat yang dikirim ke LLM: 20 pesan terakhir saja.
+ * Sesi yang panjang (ratusan pesan) tidak lagi membebani token dan memori
+ * di setiap pesan baru; context-manager hanya memakai 4 pesan terakhir.
+ */
+export const LLM_HISTORY_LIMIT = 20;
+
+// ============================================================================
+// S9e/F16 — Serialisasi pemrosesan per sesi (in-process).
+//
+// Dua pesan yang dikirim hampir bersamaan ke sesi yang sama tidak boleh
+// diproses paralel (riwayat yang belum memuat satu sama lain, urutan simpan
+// tidak dijamin, jawaban tertukar konteks). Rantai promise per sessionId:
+// pemrosesan pesan berikutnya menunggu pesan sebelumnya SELESAI (termasuk
+// bila sebelumnya gagal — rantai tidak pernah rejected). Entri Map dibersihkan
+// saat rantai terakhir selesai dan tidak ada rantai baru yang menggantikannya.
+// CATATAN: lock ini hanya berlaku dalam satu instance proses; deployment
+// multi-instance tetap butuh lock terdistribusi (di luar cakupan ini).
+// ============================================================================
+const sessionProcessingChains = new Map<number, Promise<void>>();
+
+function runSerializedPerSession<T>(sessionId: number, fn: () => Promise<T>): Promise<T> {
+  const prev = sessionProcessingChains.get(sessionId) ?? Promise.resolve();
+  const result = prev.then(fn, fn);
+  const chained = result.then(
+    () => undefined,
+    () => undefined
+  );
+  sessionProcessingChains.set(sessionId, chained);
+  chained.then(() => {
+    if (sessionProcessingChains.get(sessionId) === chained) {
+      sessionProcessingChains.delete(sessionId);
+    }
+  });
+  return result;
+}
+
+// ============================================================================
+// S9g — Konfirmasi aksi teknisi yang KETAT.
+//
+// Pola lama ("pesan diawali ya/iya/...") mengeksekusi aksi tertunda bahkan
+// bila "ya" itu hanya awalan pesan lain ("ya, saya mau tanya soal garansi").
+// Sekarang: setelah kata penegasan, pesan hanya boleh berisi (opsional)
+// frasa aksi yang SAMA dengan aksi tertunda dan/atau kode order yang SAMA
+// — dan tidak ada yang lain. Pesan lain jatuh ke cabang biasa (cabang aksi
+// akan menampilkan prompt konfirmasi baru bila memuat perintah aksi).
+// ============================================================================
+const TECHNICIAN_ACTION_PHRASES: Record<string, string> = {
+  accept: 'terima tugas',
+  on_the_way: 'menuju lokasi',
+  start_diagnosis: 'mulai diagnosa',
+  start_repair: 'mulai perbaikan',
+};
+
+export function isTechnicianConfirmationReply(
+  norm: string,
+  pending: { orderCode: string; action: 'accept' | 'on_the_way' | 'start_diagnosis' | 'start_repair' }
+): boolean {
+  const match = norm.match(
+    /^(ya|iya|yup|betul|benar|lanjut|lanjutkan|konfirmasi|setuju|yakin|oke|ok|silakan|silahkan)\b[,.]?\s*(.*)$/i
+  );
+  if (!match) return false;
+  const rest = (match[2] || '')
+    .toLowerCase()
+    .replace(/[.,!]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (rest === '') return true;
+  const code = pending.orderCode.toLowerCase();
+  const phrase = TECHNICIAN_ACTION_PHRASES[pending.action] || '';
+  return (
+    rest === code ||
+    (phrase !== '' &&
+      (rest === phrase || rest === `${phrase} ${code}` || rest === `${code} ${phrase}`))
+  );
+}
+
+// ============================================================================
+// S9b/S9d — Deteksi permintaan eksplisit atas field PII.
+//
+// Proyeksi hasil tool dan ringkasan konteks membuang nomor telepon, email,
+// alamat, dan UUID — KECUALI pertanyaan saat ini secara eksplisit meminta
+// field itu untuk satu orang/pesanan spesifik ("berapa nomor telepon Budi?").
+// Deteksi berbasis kata kunci pertanyaan, bukan tebakan.
+// ============================================================================
+export interface ExplicitPiiAsks {
+  phone: boolean;
+  email: boolean;
+  address: boolean;
+  uuid: boolean;
+}
+
+export function detectExplicitPiiAsks(norm: string): ExplicitPiiAsks {
+  return {
+    phone: /nomor|telepon|phone|no\s*hp|whatsapp|\bwa\b|kontak|hubungi/i.test(norm),
+    email: /email|e-mail|surat\s+elektronik/i.test(norm),
+    address: /alamat|domisili|tinggal\s+di|lokasi\s+rumah/i.test(norm),
+    uuid: /uuid/i.test(norm),
+  };
+}
+
+// ============================================================================
+// S29/F20 — Klarifikasi target pencarian dari memori.
+//
+// Nilai target ditampilkan TERSAMAR di pertanyaan klarifikasi (nomor telepon
+// dan email adalah PII — cukup petunjuk agar pengguna mengenali targetnya);
+// kode order/invoice bukan PII dan ditampilkan penuh.
+// ============================================================================
+function maskPhoneForClarification(phone: string): string {
+  const digits = phone.replace(/[^0-9+]/g, '');
+  if (digits.length <= 6) return `${digits.slice(0, 2)}…`;
+  return `${digits.slice(0, 4)}…${digits.slice(-2)}`;
+}
+
+function maskEmailForClarification(email: string): string {
+  const at = email.indexOf('@');
+  if (at <= 0) return '…';
+  return `${email[0]}***${email.slice(at)}`;
+}
+
+function maskUuidForClarification(uuid: string): string {
+  return `${uuid.slice(0, 8)}…`;
+}
+
+export function buildMemorySearchClarification(target: {
+  kind: 'phone' | 'email' | 'uuid' | 'order' | 'invoice';
+  value: string;
+}): string {
+  switch (target.kind) {
+    case 'phone':
+      return `Maksud Bos nomor ${maskPhoneForClarification(target.value)} yang tadi? Balas "ya" bila benar, atau sebutkan nomor yang dimaksud.`;
+    case 'email':
+      return `Maksud Bos email ${maskEmailForClarification(target.value)} yang tadi? Balas "ya" bila benar, atau sebutkan email yang dimaksud.`;
+    case 'uuid':
+      return `Maksud Bos pengguna dengan UUID ${maskUuidForClarification(target.value)} yang tadi? Balas "ya" bila benar, atau sebutkan UUID yang dimaksud.`;
+    case 'order':
+      return `Maksud Bos pesanan #${target.value} yang tadi? Balas "ya" bila benar, atau sebutkan kode pesanan yang dimaksud.`;
+    case 'invoice':
+      return `Maksud Bos invoice ${target.value} yang tadi? Balas "ya" bila benar, atau sebutkan nomor invoice yang dimaksud.`;
+    default:
+      return 'Maksud Bos data yang tadi? Balas "ya" bila benar, atau sebutkan yang dimaksud.';
+  }
+}
+
+// ============================================================================
+// S9d — Proyeksi hasil tool sebelum masuk ke prompt LLM.
+//
+// Hasil tool TIDAK LAGI di-JSON-stringify utuh: tiap alat hanya menyumbang
+// kolom yang dibutuhkan jawaban, sesuai aturan LUGAS dan minimasi S9b.
+// Kolom PII (telepon, email, alamat, UUID) hanya disertakan bila pertanyaan
+// saat ini secara eksplisit memintanya (lihat detectExplicitPiiAsks).
+// - searchDatabaseUsers / Invoices / Technicians: allowlist kolom eksplisit.
+// - searchDatabaseOrders / queryDatabase / lainnya: scrub generik (buang
+//   kunci PII + kunci sensitif, pertahankan sisanya) — bentuk barisnya
+//   bervariasi menurut peran/tabel sehingga allowlist kaku tidak cocok.
+//   queryDatabase sendiri sudah dijaga governed layer (kolom sensitif
+//   ditolak, row scoping ditegakkan); scrub di sini adalah lapis kedua.
+// Hasil error ({success: false}) diteruskan utuh (tidak mengandung PII).
+// ============================================================================
+const SENSITIVE_KEY_PATTERN = /password|otp|token|secret|api[_-]?key|hash|credential/i;
+
+/**
+ * S9d — Klasifikasi kunci PII berdasarkan NAMA KUNCI (pola, bukan daftar
+ * eksak): baris queryDatabase memakai nama kolom mentah snake_case
+ * (`phone_number`, `address_text`, `user_uuid`) sementara record search
+ * memakai camelCase (`phoneNumber`, `customerPhone`) — keduanya harus
+ * dikenali sebagai PII yang sama.
+ */
+function piiKeyClass(key: string): 'phone' | 'email' | 'address' | 'uuid' | null {
+  if (/phone|telepon|no_hp|whatsapp/i.test(key)) return 'phone';
+  if (key.toLowerCase() === 'email' || /e_mail/i.test(key)) return 'email';
+  if (/address|alamat/i.test(key)) return 'address';
+  if (/uuid/i.test(key)) return 'uuid';
+  return null;
+}
+
+function scrubRowGenerically(row: any, asks: ExplicitPiiAsks): any {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return row;
+  const out: Record<string, any> = {};
+  for (const [key, value] of Object.entries(row)) {
+    if (SENSITIVE_KEY_PATTERN.test(key)) continue;
+    const piiClass = piiKeyClass(key);
+    if (piiClass === 'phone' && !asks.phone) continue;
+    if (piiClass === 'email' && !asks.email) continue;
+    if (piiClass === 'address' && !asks.address) continue;
+    if (piiClass === 'uuid' && !asks.uuid) continue;
+    // Objek bersarang (mis. technician: {name, rating, phone}) ikut di-scrub.
+    out[key] =
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? scrubRowGenerically(value, asks)
+        : value;
+  }
+  return out;
+}
+
+function projectUserRecordForPrompt(u: any, asks: ExplicitPiiAsks): any {
+  if (!u || typeof u !== 'object') return u;
+  const projected: Record<string, any> = {
+    name: u.fullName ?? u.name ?? null,
+    role: u.role ?? null,
+    status: u.status ?? null,
+  };
+  if (typeof u.isVerified === 'boolean') projected.isVerified = u.isVerified;
+  if (u.registeredAt) projected.registeredAt = u.registeredAt;
+  if (u.technicianDetails && typeof u.technicianDetails === 'object') {
+    projected.technicianDetails = {
+      ratingAvg: u.technicianDetails.ratingAvg ?? null,
+      ratingCount: u.technicianDetails.ratingCount ?? null,
+      yearsOfExperience: u.technicianDetails.yearsOfExperience ?? null,
+      isAvailable: u.technicianDetails.isAvailable ?? null,
+    };
+  }
+  if (asks.phone && u.phoneNumber) projected.phoneNumber = u.phoneNumber;
+  if (asks.email && u.email) projected.email = u.email;
+  if (asks.address) {
+    if (u.address) projected.address = u.address;
+    if (u.city) projected.city = u.city;
+  }
+  if (asks.uuid && u.uuid) projected.uuid = u.uuid;
+  return projected;
+}
+
+function projectInvoiceRecordForPrompt(inv: any, asks: ExplicitPiiAsks): any {
+  if (!inv || typeof inv !== 'object') return inv;
+  const projected: Record<string, any> = {
+    invoiceNumber: inv.invoiceNumber ?? null,
+    orderCode: inv.orderCode ?? null,
+    category: inv.category ?? null,
+    customerName: inv.customerName ?? null,
+    laborCost: inv.laborCost ?? null,
+    partsCost: inv.partsCost ?? null,
+    serviceFee: inv.serviceFee ?? null,
+    totalAmount: inv.totalAmount ?? null,
+    status: inv.status ?? null,
+    dueDate: inv.dueDate ?? null,
+  };
+  if (inv.paidAt) projected.paidAt = inv.paidAt;
+  if (asks.phone && inv.customerPhone) projected.customerPhone = inv.customerPhone;
+  return projected;
+}
+
+function projectTechnicianRecordForPrompt(t: any, asks: ExplicitPiiAsks): any {
+  if (!t || typeof t !== 'object') return t;
+  const projected: Record<string, any> = {
+    name: t.name ?? null,
+    rating: t.rating ?? null,
+    reviewsCount: t.reviewsCount ?? null,
+    experienceYears: t.experienceYears ?? null,
+    isAvailable: t.isAvailable ?? null,
+    verifiedStatus: t.verifiedStatus ?? null,
+    specializations: Array.isArray(t.specializations) ? t.specializations : [],
+  };
+  if (asks.phone && t.phone) projected.phone = t.phone;
+  if (asks.email && t.email) projected.email = t.email;
+  return projected;
+}
+
+export function projectToolResultForPrompt(
+  toolName: string,
+  toolResult: any,
+  norm: string
+): any {
+  if (!toolResult || typeof toolResult !== 'object') return toolResult;
+  if (toolResult.success === false) return toolResult;
+  const data = (toolResult as any).data;
+  if (data === undefined || data === null) return toolResult;
+  const asks = detectExplicitPiiAsks(norm);
+
+  // queryDatabase: { table, rows, rowCount } — scrub tiap baris generik.
+  if (data && typeof data === 'object' && !Array.isArray(data) && Array.isArray((data as any).rows)) {
+    return {
+      ...toolResult,
+      data: {
+        ...data,
+        rows: (data as any).rows.map((row: any) => scrubRowGenerically(row, asks)),
+      },
+    };
+  }
+
+  const projectRow = (row: any): any => {
+    switch (toolName) {
+      case 'searchDatabaseUsers':
+      case 'searchUsers':
+        return projectUserRecordForPrompt(row, asks);
+      case 'searchDatabaseInvoices':
+      case 'searchInvoices':
+        return projectInvoiceRecordForPrompt(row, asks);
+      case 'searchDatabaseTechnicians':
+      case 'searchTechnicians':
+        return projectTechnicianRecordForPrompt(row, asks);
+      default:
+        return scrubRowGenerically(row, asks);
+    }
+  };
+
+  if (Array.isArray(data)) {
+    return { ...toolResult, data: data.map(projectRow) };
+  }
+  if (typeof data === 'object') {
+    return { ...toolResult, data: projectRow(data) };
+  }
+  return toolResult;
+}
+
+// ============================================================================
+// S9f/F19 — Validasi kartu diagnosis dari AI (validasi struktural manual —
+// TANPA dependensi Zod baru; periksa field yang benar-benar dipakai kode).
+// Kartu yang bentuknya tidak valid DITOLAK (null) tanpa membuang balasan AI:
+// kartu hanyalah pelengkap; teks jawaban tetap dikembalikan ke pengguna.
+// ============================================================================
+const DIAGNOSIS_CONFIDENCE_LEVELS = new Set([
+  'Sangat Mungkin',
+  'Kemungkinan Besar',
+  'Perlu Pemeriksaan Langsung',
+]);
+
+export function isValidDiagnosisCard(value: unknown): value is DiagnosisCard {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const card = value as Record<string, unknown>;
+  if (typeof card.deviceCategory !== 'string' || !card.deviceCategory.trim()) return false;
+  if (typeof card.symptomsSummary !== 'string' || !card.symptomsSummary.trim()) return false;
+  if (typeof card.recommendedAction !== 'string' || !card.recommendedAction.trim()) return false;
+  if (
+    !Array.isArray(card.possibleCauses) ||
+    !card.possibleCauses.every((c) => typeof c === 'string')
+  ) {
+    return false;
+  }
+  if (
+    !Array.isArray(card.safeCheckSteps) ||
+    !card.safeCheckSteps.every((s) => typeof s === 'string')
+  ) {
+    return false;
+  }
+  if (
+    card.confidenceLevel !== undefined &&
+    (typeof card.confidenceLevel !== 'string' ||
+      !DIAGNOSIS_CONFIDENCE_LEVELS.has(card.confidenceLevel))
+  ) {
+    return false;
+  }
+  if (card.categorySlug !== undefined && typeof card.categorySlug !== 'string') return false;
+  if (card.categoryId !== undefined && typeof card.categoryId !== 'number') return false;
+  if (
+    card.safetyHazardWarning !== undefined &&
+    card.safetyHazardWarning !== null &&
+    typeof card.safetyHazardWarning !== 'string'
+  ) {
+    return false;
+  }
+  if (
+    card.estimatedLaborCostRange !== undefined &&
+    typeof card.estimatedLaborCostRange !== 'string'
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/** S9f/F19 — Gabung daftar string secara defensif: non-array dinormalisasi ke string, bukan throw. */
+export function joinStringList(value: unknown, separator = '; '): string {
+  if (Array.isArray(value)) {
+    return value.filter((v) => typeof v === 'string').join(separator);
+  }
+  if (typeof value === 'string') return value;
+  return '';
 }
 
 /**
@@ -236,15 +680,83 @@ Silakan ceritakan kendala yang dialami perangkat Anda, atau tanyakan informasi s
 /**
  * PIPELINE UTAMA PEMROSESAN PESAN CHATBOT+
  */
+/**
+ * F18 — Pembungkus processChatMessage dengan try/catch luar. Sebelumnya
+ * exception di luar blok AI (muat riwayat, kueri deterministik, eksekusi
+ * aksi teknisi) merambat ke route sebagai 500 dan pesan pengguna hilang,
+ * karena pesan baru disimpan setelah pipeline selesai. Sekarang: error apa
+ * pun ditangkap, pesan pengguna dipastikan tersimpan (bila belum), balasan
+ * error yang ramah disimpan sebagai pesan asisten, dan respons sukses
+ * dikembalikan agar pengguna mendapat penjelasan, bukan 500 kosong.
+ * Kegagalan panggilan AI sendiri TIDAK sampai ke sini — sudah ditangani di
+ * dalam dengan fallback expert system berlabel "Mode offline".
+ */
 export async function processChatMessage(params: {
   userMessage: string;
   session: ConsultationSession;
   userContext: ChatUserContext;
-}): Promise<{
-  reply: string;
-  metadata: ChatMessageMetadata;
-  diagnosisCard?: DiagnosisCard | null;
-}> {
+}): Promise<ChatbotReply> {
+  // S9e/F16 — proses pesan dalam satu sesi secara BERURUTAN (pesan kedua
+  // menunggu pesan pertama selesai, termasuk penangan error F18 di bawah,
+  // agar urutan riwayat dan konteks selalu konsisten).
+  return runSerializedPerSession(params.session.id, () =>
+    processChatMessageWithRecovery(params)
+  );
+}
+
+async function processChatMessageWithRecovery(params: {
+  userMessage: string;
+  session: ConsultationSession;
+  userContext: ChatUserContext;
+}): Promise<ChatbotReply> {
+  const startTime = Date.now();
+  try {
+    return await processChatMessageInternal(params);
+  } catch (err: any) {
+    console.error('[Chatbot Engine] processChatMessage gagal (ditangkap F18):', err);
+    const { userMessage, session, userContext } = params;
+    const errorReply = 'Maaf, terjadi kesalahan sistem saat memproses pesan Anda. Pesan Anda sudah tersimpan — silakan coba kirim ulang sesaat lagi, atau hubungi dukungan BANTUIN bila masalah berlanjut.';
+    const metadata: ChatMessageMetadata = {
+      model: 'bantuin-error-handler-v1',
+      responseTimeMs: Date.now() - startTime,
+      quickSuggestions: getRoleBasedSuggestedPrompts(userContext.role, userContext.pageContext?.pathname || '/'),
+    };
+    // F6: bila penyimpanan gagal total (persistErr di bawah), storedIn tetap
+    // 'memory' — ketahanan di DB tidak terkonfirmasi. Bila pesan pengguna
+    // sudah tersimpan oleh percobaan sebelumnya (alreadySaved), hanya
+    // penyimpanan balasan yang dilacak (lokasi pesan lama tidak diketahui
+    // wrapper ini).
+    let storedIn: MessageStoreLocation = 'memory';
+    // Best-effort: pastikan pesan pengguna + balasan error tersimpan agar
+    // percakapan tidak berlubang. Cek duplikasi dulu: bila pesan pengguna
+    // sudah tersimpan (error terjadi setelah penyimpanan), jangan simpan
+    // dua kali.
+    try {
+      // S9a/S9e — cukup 20 pesan terakhir: dengan persist-first (S9e),
+      // pesan pengguna adalah pesan TERBARU di sesi ini, jadi dedup tidak
+      // perlu memuat seluruh riwayat.
+      const recent = await getSessionMessages(session.id, { limit: LLM_HISTORY_LIMIT });
+      const alreadySaved = recent.some((m: any) => m.role === 'user' && String(m.message || '').trim() === userMessage.trim());
+      const locations: MessageStoreLocation[] = [];
+      if (!alreadySaved) {
+        locations.push(await saveChatMessageTracked(session.id, 'user', userMessage));
+      }
+      locations.push(await saveChatMessageTracked(session.id, 'assistant', errorReply, metadata, 0, metadata.responseTimeMs));
+      storedIn = combineStoredIn(...locations);
+    } catch (persistErr) {
+      // Penyimpanan pun gagal (mis. DB down total) — tetap kembalikan
+      // balasan ramah; route tidak akan mengembalikan 500.
+      console.error('[Chatbot Engine] F18 gagal menyimpan pesan error:', persistErr);
+    }
+    return { reply: errorReply, metadata, storedIn };
+  }
+}
+
+async function processChatMessageInternal(params: {
+  userMessage: string;
+  session: ConsultationSession;
+  userContext: ChatUserContext;
+}): Promise<ChatbotReply> {
   const { userMessage, session, userContext } = params;
   const startTime = Date.now();
   const currentPath = userContext.pageContext?.pathname || '/';
@@ -262,12 +774,13 @@ export async function processChatMessage(params: {
       quickSuggestions: getRoleBasedSuggestedPrompts(userContext.role, currentPath),
     };
 
-    await saveChatMessage(session.id, 'user', userMessage);
-    await saveChatMessage(session.id, 'assistant', refusalReply, metadata, 0, metadata.responseTimeMs);
+    const refusalUserStored = await saveChatMessageTracked(session.id, 'user', userMessage);
+    const replyStored = await saveChatMessageTracked(session.id, 'assistant', refusalReply, metadata, 0, metadata.responseTimeMs);
 
     return {
       reply: refusalReply,
       metadata,
+      storedIn: combineStoredIn(refusalUserStored, replyStored),
     };
   }
 
@@ -278,8 +791,28 @@ export async function processChatMessage(params: {
   }
 
   // 2. KELOLA MEMORI SESI & RESOLUSI ENTITAS PERCAKAPAN
-  const rawHistory = await getSessionMessages(session.id);
-  const contextEntities = resolveConversationContext(userMessage, rawHistory, session.id);
+  // S9a/F13 — riwayat dibatasi 20 pesan terakhir (jendela LLM); riwayat
+  // dimuat SEBELUM pesan saat ini disimpan (lihat S9e di bawah) agar pesan
+  // saat ini tidak ganda di konteks LLM.
+  // S29/F7 — userId pemanggil diteruskan agar memori konteks diverifikasi
+  // pemiliknya (memori pengguna lain / guest tidak pernah dipakai).
+  const rawHistory = await getSessionMessages(session.id, { limit: LLM_HISTORY_LIMIT });
+  const contextEntities = resolveConversationContext(
+    userMessage,
+    rawHistory,
+    session.id,
+    userContext.userId ?? null
+  );
+
+  // S9e/F16 — SIMPAN PESAN PENGGUNA DULU, sebelum kueri deterministik
+  // maupun panggilan AI. Sebelumnya pesan baru disimpan SETELAH seluruh
+  // pipeline selesai, sehingga kegagalan di tengah jalan menghilangkan
+  // pesan total (lihat F18) dan dua pesan bersamaan saling balap. Semua
+  // jalur kembali di bawah memakai `userStored` ini dan HANYA menyimpan
+  // balasan asisten — pesan pengguna tidak pernah disimpan dua kali.
+  // Komposisi dengan F18: bila error terjadi setelah titik ini, wrapper
+  // F18 menemukan pesan ini lewat dedup dan tidak menyimpannya lagi.
+  const userStored = await saveChatMessageTracked(session.id, 'user', userMessage);
 
   // 3. PENGAMBILAN DATA DATABASE AKTUAL SESUAI PERAN & INTENT PENGGUNA
   let dbContextSummary = '';
@@ -290,6 +823,12 @@ export async function processChatMessage(params: {
 
   // ==========================================================================
   // GLOBAL: DETEKSI PERTANYAAN MODEL & PROVIDER AI (SEMUA ROLE & ADMIN)
+  // N24: blok peran di bawah (guest/customer/technician/admin) adalah
+  // `else if` terhadap cabang ini — jawaban info model tidak boleh ditimpa
+  // cabang peran bila pesan juga cocok dengan pola lain (mis. admin bertanya
+  // "model apa yang dipakai untuk laporan operasional?" harus dijawab info
+  // model, bukan laporan operasional). Peran saling eksklusif sehingga
+  // rantai else-if tidak mengubah perilaku pesan non-model-info.
   // ==========================================================================
   if (
     /model\s+(?:apa|ai|llm)|provider\s+(?:apa|ai)|kamu\s+(?:pakai|menggunakan|ditenagai|berbasis)\s+(?:model|ai|gemini|groq|llm|teknologi)|siapa\s+(?:otak|mesin|model)\s+ai|apa\s+model\s+(?:yang\s+)?(?:dipakai|digunakan|aktif)|model\s+yang\s+(?:sedang\s+)?(?:dipakai|digunakan|aktif)|versi\s+ai|provider\s+aktif|ai\s+provider/i.test(norm)
@@ -306,7 +845,27 @@ export async function processChatMessage(params: {
         ? '🔴 Gangguan Koneksi'
         : '⚪ Disconnected';
 
-    directReply = `🤖 **Informasi Model & Provider AI Aktif (BANTUIN Assistant):**
+    // S9c — detail konfigurasi provider DIBATASI PER PERAN. Sebelumnya
+    // cabang ini menampilkan endpoint, temperature, timeout, dan provider
+    // fallback ke SEMUA peran termasuk guest. Sekarang:
+    // - guest: HANYA nama model (tanpa provider, endpoint, parameter, fallback).
+    // - customer/teknisi: nama model + nama provider + status koneksi.
+    // - admin: detail lengkap seperti sebelumnya.
+    if (userContext.role === 'guest') {
+      directReply = `🤖 Asisten AI BANTUIN saat ini menggunakan model **\`${activeConf.selectedModel}\`**.
+
+Asisten AI BANTUIN siap membantu kebutuhan konsultasi dan operasional servis peralatan rumah tangga Anda.`;
+    } else if (userContext.role !== 'admin') {
+      directReply = `🤖 **Informasi Model AI Aktif (BANTUIN Assistant):**
+
+Saat ini asisten AI BANTUIN aktif beroperasi menggunakan:
+- **Provider AI Aktif:** **${activeConf.name}**
+- **Model yang Digunakan:** **\`${activeConf.selectedModel}\`**
+- **Status Koneksi:** ${statusBadge}
+
+Asisten AI BANTUIN siap membantu kebutuhan konsultasi dan operasional servis peralatan rumah tangga Anda.`;
+    } else {
+      directReply = `🤖 **Informasi Model & Provider AI Aktif (BANTUIN Assistant):**
 
 Saat ini asisten AI BANTUIN aktif beroperasi menggunakan:
 - **Provider AI Aktif:** **${activeConf.name}** (\`${activeConf.provider}\`)
@@ -319,22 +878,44 @@ Saat ini asisten AI BANTUIN aktif beroperasi menggunakan:
   - Request Timeout: \`${activeConf.requestTimeoutMs} ms\`
 - **Fitur Automatic Fallback:** ${global.enableFallback ? `✅ Aktif (Otomatis beralih ke **${global.fallbackProvider.toUpperCase()}** jika provider utama kendala)` : '❌ Nonaktif'}
 
-${userContext.role === 'admin' ? '💡 _Catatan Administrator: Anda dapat mengganti provider aktif, memilih model lain, atau menambah provider kustom kapan saja melalui menu **Pengaturan Sistem → AI Provider Management**._' : 'Asisten AI BANTUIN siap membantu kebutuhan konsultasi dan operasional servis peralatan rumah tangga Anda.'}`;
+💡 _Catatan Administrator: Anda dapat mengganti provider aktif, memilih model lain, atau menambah provider kustom kapan saja melalui menu **Pengaturan Sistem → AI Provider Management**._`;
+    }
   }
 
   // ==========================================================================
   // A. KATEGORI KHUSUS GUEST (TAMU PUBLIK)
   // ==========================================================================
-  if (userContext.role === 'guest') {
+  else if (userContext.role === 'guest') {
     if (/apa\s+itu\s+bantuin|tujuan\s+aplikasi|tentang\s+bantuin/i.test(norm)) {
       const guide = DataService.getAppGuide('tentang');
       directReply = `**${guide.title}**\n\n${guide.content}`;
+    } else if (/daftar\s+(harga|tarif|layanan)|harga|tarif|biaya/i.test(norm)) {
+      // N20: "daftar harga / tarif / layanan" adalah pertanyaan harga —
+      // jawab dari katalog layanan (dengan harga dasar), BUKAN panduan
+      // pendaftaran. Cabang ini HARUS sebelum cabang pendaftaran dan
+      // cabang katalog (pola katalog menangkap kata "katalog", sehingga
+      // "katalog harga" pun harus sampai ke sini).
+      const catalog = await DataService.getPublicCatalog();
+      const allServices = catalog.flatMap((c) => c.services.map((s) => ({ ...s, categoryName: c.categoryName })));
+      if (allServices.length === 0) {
+        directReply = 'Belum ada layanan aktif yang tercatat di katalog BANTUIN.';
+      } else {
+        const shown = allServices.slice(0, 20);
+        directReply = `💰 **Daftar Harga Layanan BANTUIN:**\n\n` +
+          shown.map((s, i) => `**${i + 1}. ${s.name}** (${s.categoryName})\n- Harga Dasar: **Rp ${s.basePrice.toLocaleString('id-ID')}**\n- Estimasi Durasi: ${s.estimatedDurationMin} menit`).join('\n') +
+          (allServices.length > shown.length ? `\n\n_...dan ${allServices.length - shown.length} layanan lainnya._` : '') +
+          `\n\n_Harga di atas adalah tarif dasar. Biaya akhir ditentukan setelah teknisi melakukan diagnosis dan disetujui oleh Anda._`;
+      }
     } else if (/layanan\s+(tersedia|apa\s+saja)|katalog|kategori\s+alat/i.test(norm)) {
       const categories = await DataService.getPublicApplianceCategories();
       directReply = `🏠 **Kategori Peralatan Rumah Tangga yang Dilayani BANTUIN:**\n\n` +
         categories.map((c, i) => `**${i + 1}. ${c.name}**\n${c.description ? `   _${c.description}_\n` : ''}`).join('\n') +
         `\nSemua perbaikan ditangani oleh mitra teknisi profesional tersertifikasi dan bergaransi 30 hari.`;
-    } else if (/daftar|register|cara\s+mendaftar|apakah.*otp/i.test(norm)) {
+    } else if (/cara\s+(mendaftar|daftar)|mendaftar|daftar\s+akun|pendaftaran|register|apakah.*otp/i.test(norm)) {
+      // N20: pola pendaftaran dipersempit — kata bare "daftar" DIHAPUS
+      // karena menangkap "daftar harga/tarif/layanan" (ditangani cabang
+      // harga di atas). Kata kerja "mendaftar" tetap diterima karena tidak
+      // ambigu ("saya mau mendaftar").
       const guide = DataService.getAppGuide('daftar');
       directReply = `**${guide.title}**\n\n${guide.content}`;
     } else if (/login|masuk|cara\s+login/i.test(norm)) {
@@ -362,7 +943,7 @@ ${userContext.role === 'admin' ? '💡 _Catatan Administrator: Anda dapat mengga
   // ==========================================================================
   // B. KATEGORI KHUSUS CUSTOMER (PELANGGAN)
   // ==========================================================================
-  if (userContext.role === 'customer' && userContext.userId) {
+  else if (userContext.role === 'customer' && userContext.userId) {
     const custId = userContext.userId;
 
     // Profil Pelanggan & Pembaruan
@@ -416,8 +997,59 @@ ${userContext.role === 'admin' ? '💡 _Catatan Administrator: Anda dapat mengga
       directReply = `🛡️ **${guide.title}**\n\n${guide.content}`;
     }
 
+    // Harga Layanan dari Katalog (N10) — pertanyaan harga umum ("berapa
+    // biaya perbaikan AC?") dijawab dari katalog layanan, BUKAN dari daftar
+    // invoice milik customer. Cabang ini HARUS sebelum cabang tagihan karena
+    // pola tagihan lama menangkap frasa "biaya perbaikan". Dikecualikan bila
+    // pertanyaan menyangkut tagihan/pesanan milik sendiri (mengandung
+    // "saya"/"tagihan"/"invoice") — itu urusan cabang tagihan/status.
+    else if (
+      /biaya|harga|tarif/i.test(norm) &&
+      !/saya|tagihan|invoice|pesanan\s+saya|order\s+saya/i.test(norm) &&
+      /perbaikan|servis|service|layanan|cuci|pasang|instalasi|ac\b|kulkas|freezer|mesin\s+cuci|kipas|televisi|\btv\b|pompa|kompor|dispenser|vacuum/i.test(norm)
+    ) {
+      const prices = await DataService.getPublicServicePrices();
+      if (prices === null) {
+        directReply = 'Daftar harga layanan tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else if (prices.length === 0) {
+        directReply = 'Belum ada layanan aktif yang tercatat di katalog BANTUIN.';
+      } else {
+        // Cocokkan kata kunci pertanyaan dengan nama layanan/kategori.
+        const stopwords = new Set(['berapa', 'biaya', 'harga', 'tarif', 'perbaikan', 'servis', 'service', 'layanan', 'untuk', 'yang', 'dan', 'atau', 'apa', 'saya', 'di', 'ke', 'dari', 'dengan', 'adalah', 'itu', 'ini', 'ya', 'kak', 'min', 'mau', 'tanya', 'dong', 'sih', 'aja', 'saja', 'kisaran', 'sekitar', 'kira', 'ongkos', 'berapa', 'kalo', 'kalau']);
+        const keywords = norm.split(/[^a-z0-9]+/i).filter((w) => w.length >= 2 && !stopwords.has(w));
+        const matched = prices.filter((p) => {
+          const hay = `${p.name} ${p.categoryName} ${p.slug} ${p.categorySlug}`.toLowerCase();
+          return keywords.some((k) => hay.includes(k));
+        });
+        if (matched.length > 0) {
+          const list = matched.slice(0, 10);
+          directReply = `💰 **Harga Layanan yang Sesuai:**\n\n` +
+            list.map((p, i) => `**${i + 1}. ${p.name}** (${p.categoryName})\n- Harga Dasar: **Rp ${p.basePrice.toLocaleString('id-ID')}**\n- Estimasi Durasi: ${p.estimatedDurationMin} menit`).join('\n') +
+            (matched.length > 10 ? `\n\n_...dan ${matched.length - 10} layanan lainnya yang cocok._` : '') +
+            `\n\n_Harga di atas adalah tarif dasar. Biaya akhir ditentukan setelah teknisi melakukan diagnosis dan disetujui oleh Anda._`;
+        } else {
+          // Tidak ada layanan yang cocok kata kuncinya — tampilkan kisaran
+          // harga per kategori (ringkas) agar pengguna bisa mempersempit.
+          const byCat = new Map<string, { min: number; max: number; count: number }>();
+          for (const p of prices) {
+            const e = byCat.get(p.categoryName) || { min: p.basePrice, max: p.basePrice, count: 0 };
+            e.min = Math.min(e.min, p.basePrice);
+            e.max = Math.max(e.max, p.basePrice);
+            e.count += 1;
+            byCat.set(p.categoryName, e);
+          }
+          directReply = `💰 **Kisaran Harga Layanan BANTUIN:**\n\n` +
+            Array.from(byCat.entries()).map(([cat, r]) => `- **${cat}**: Rp ${r.min.toLocaleString('id-ID')} – Rp ${r.max.toLocaleString('id-ID')} (${r.count} layanan)`).join('\n') +
+            `\n\nTanyakan perangkat yang spesifik (mis. "berapa biaya perbaikan AC?") untuk melihat harga pastinya.`;
+        }
+      }
+    }
+
     // Tagihan & Invoice & Pembayaran
-    else if (/tagihan|invoice|belum\s+dibayar|biaya\s+perbaikan|pembayaran\s+berhasil|riwayat\s+transaksi/i.test(norm)) {
+    // N10: pola "biaya perbaikan" DIHAPUS dari cabang ini — pertanyaan harga
+    // umum ditangani cabang harga di atas; cabang ini hanya untuk tagihan
+    // milik customer sendiri.
+    else if (/tagihan|invoice|belum\s+dibayar|pembayaran\s+berhasil|riwayat\s+transaksi/i.test(norm)) {
       const invoices = await DataService.getCustomerInvoices(custId);
       if (invoices === null) {
         directReply = 'Tagihan Anda tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
@@ -432,15 +1064,31 @@ ${userContext.role === 'admin' ? '💡 _Catatan Administrator: Anda dapat mengga
 
     // Komunikasi & Pesan dari Teknisi
     else if (/pesan\s+terbaru\s+dari\s+teknisi|catatan\s+terbaru|pesan\s+teknisi|hubungi\s+teknisi/i.test(norm)) {
-      const messages = await DataService.getCustomerMessages(custId, contextEntities.activeOrderCode || 1);
-      if (messages === null) {
-        directReply = 'Pesan teknisi tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
-      } else if (messages.length === 0) {
-        directReply = `Belum ada pesan chat terbaru dari teknisi untuk pesanan Anda. Anda dapat mengirim pesan langsung melalui fitur **Chat Pesanan** di aplikasi BANTUIN.`;
-      } else {
-        directReply = `💬 **Pesan Koordinasi Teknisi Terbaru:**\n\n` +
-          messages.map((m, i) => `**${i + 1}. ${m.senderName}:**\n"${m.content}"\n_Waktu: ${new Date(m.createdAt).toLocaleString('id-ID')}_\n`).join('\n') +
-          `\nAnda dapat membalas chat langsung melalui panel chat pesanan di aplikasi.`;
+      // N11: jangan hardcode order id 1 bila tidak ada konteks order — pakai
+      // pesanan terbaru customer; bila belum ada pesanan, katakan terus
+      // terang (bukan menampilkan pesan order yang salah).
+      let orderRef: string | null = contextEntities.activeOrderCode || null;
+      if (!orderRef) {
+        const latest = await DataService.getCustomerRepairs(custId, { limit: 1 });
+        if (latest === null) {
+          directReply = 'Pesan teknisi tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+        } else if (latest.length === 0) {
+          directReply = 'Anda belum memiliki pesanan perbaikan, jadi belum ada pesan dari teknisi. Silakan ajukan pesanan terlebih dahulu.';
+        } else {
+          orderRef = latest[0].orderCode;
+        }
+      }
+      if (orderRef) {
+        const messages = await DataService.getCustomerMessages(custId, orderRef);
+        if (messages === null) {
+          directReply = 'Pesan teknisi tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+        } else if (messages.length === 0) {
+          directReply = `Belum ada pesan chat terbaru dari teknisi untuk pesanan #${orderRef}. Anda dapat mengirim pesan langsung melalui fitur **Chat Pesanan** di aplikasi BANTUIN.`;
+        } else {
+          directReply = `💬 **Pesan Koordinasi Teknisi Terbaru (Pesanan #${orderRef}):**\n\n` +
+            messages.map((m, i) => `**${i + 1}. ${m.senderName}:**\n"${m.content}"\n_Waktu: ${new Date(m.createdAt).toLocaleString('id-ID')}_\n`).join('\n') +
+            `\nAnda dapat membalas chat langsung melalui panel chat pesanan di aplikasi.`;
+        }
       }
     }
 
@@ -504,11 +1152,61 @@ ${orderDetail.invoice ? `- **Status Tagihan:** Rp ${orderDetail.invoice.totalAmo
   // ==========================================================================
   // C. KATEGORI KHUSUS TECHNICIAN (TEKNISI)
   // ==========================================================================
-  if (userContext.role === 'technician' && userContext.userId) {
+  else if (userContext.role === 'technician' && userContext.userId) {
     const techId = userContext.userId;
 
+    // F10 — Jawaban atas aksi tertunda (langkah ke-2 two-step verification).
+    // Cabang ini HARUS berada di awal rantai teknisi agar jawaban "ya" /
+    // "tidak" tidak jatuh ke cabang lain atau ke AI. Pesan menanggapi aksi
+    // tertunda hanya bila (a) ada aksi tertunda dari teknisi yang sama di
+    // sesi ini, dan (b) pesan TIDAK memerintahkan aksi/kode yang berbeda
+    // (perintah baru ditangani cabang aksi di bawah dan menggantikan aksi
+    // tertunda lama).
+    const pendingAction = getPendingTechnicianAction(session.id);
+    const messageActionType = detectTechnicianActionType(norm);
+    const messageOrderCode = contextEntities.orderCodeFromCurrentMessage === true
+      ? contextEntities.activeOrderCode
+      : null;
+    const messageTargetsPending = Boolean(
+      pendingAction &&
+      pendingAction.userId === userContext.userId &&
+      (!messageActionType || messageActionType === pendingAction.action) &&
+      (!messageOrderCode || messageOrderCode === pendingAction.orderCode)
+    );
+
+    // S9g — konfirmasi harus KETAT (lihat isTechnicianConfirmationReply):
+    // "ya" yang diikuti isi lain ("ya, saya mau tanya soal garansi") BUKAN
+    // konfirmasi aksi — pesan itu jatuh ke cabang biasa, dan aksi tertunda
+    // tetap menunggu jawaban "ya" yang sesungguhnya.
+    if (pendingAction && messageTargetsPending && isTechnicianConfirmationReply(norm, pendingAction)) {
+      // Konfirmasi afirmatif: eksekusi aksi tertunda dengan confirmed: true.
+      // State machine di action-service memvalidasi ulang status saat ini,
+      // jadi konfirmasi yang sudah basi secara status ditolak dengan aman.
+      const confirmedResult = await ActionService.executeTechnicianTaskStatusUpdate(userContext, {
+        orderCodeOrId: pendingAction.orderCode,
+        newStatus: pendingAction.action,
+        notes: userMessage,
+        confirmed: true,
+      });
+      if (confirmedResult.requiresConfirmation && confirmedResult.confirmationPrompt) {
+        // Tidak seharusnya terjadi (confirmed: true), tetapi bila terjadi,
+        // simpan lagi aksinya dan tampilkan prompt baru.
+        setPendingTechnicianAction(session.id, { ...pendingAction, createdAt: Date.now() });
+        directReply = confirmedResult.confirmationPrompt;
+      } else {
+        clearPendingTechnicianAction(session.id);
+        directReply = confirmedResult.success
+          ? `✅ **Berhasil:** ${confirmedResult.message}`
+          : `⚠️ **Gagal:** ${confirmedResult.message}`;
+      }
+    } else if (pendingAction && messageTargetsPending && TECHNICIAN_CONFIRM_NO_PATTERN.test(norm)) {
+      const actionLabel = ActionService.TECHNICIAN_TASK_TRANSITIONS?.[pendingAction.action]?.label || pendingAction.action;
+      clearPendingTechnicianAction(session.id);
+      directReply = `Baik, aksi ${actionLabel} untuk pesanan #${pendingAction.orderCode} dibatalkan. Tidak ada perubahan yang disimpan.`;
+    }
+
     // Profil & Riwayat Kinerja Teknisi
-    if (/siapa\s+nama\s+saya|profil\s+saya/i.test(norm)) {
+    else if (/siapa\s+nama\s+saya|profil\s+saya/i.test(norm)) {
       const [profile, metrics] = await Promise.all([
         DataService.getTechnicianProfile(techId),
         DataService.getTechnicianPerformanceMetrics(techId),
@@ -612,22 +1310,44 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
         ? contextEntities.activeOrderCode
         : null;
       if (!explicitOrderCode) {
-        directReply = 'Untuk memperbarui status tugas, sebutkan kode ordernya di pesan yang sama, contoh: "terima tugas REP-2026-0001".';
+        // N18: intent aksi tanpa kode order (dan tanpa kode yang disebut
+        // eksplisit di pesan ini) — jawab deterministik; jangan diam lalu
+        // melempar ke AI yang tidak punya tool aksi.
+        directReply = 'Tugas yang mana? Sebutkan kode pesanannya (mis. BAN-…)';
       } else {
-        let actionType: 'accept' | 'on_the_way' | 'start_diagnosis' | 'start_repair' = 'on_the_way';
-        if (/terima/i.test(norm)) actionType = 'accept';
-        else if (/diagnosa/i.test(norm)) actionType = 'start_diagnosis';
-        else if (/perbaikan/i.test(norm)) actionType = 'start_repair';
+        const actionType = detectTechnicianActionType(norm) || 'on_the_way';
 
+        // F10 — Panggilan pertama tanpa confirmed: action-service
+        // mengembalikan requiresConfirmation + prompt TANPA memutasi.
+        // Simpan aksi sebagai tertunda dan tampilkan prompt ke teknisi;
+        // eksekusi terjadi saat teknisi membalas "ya" (cabang konfirmasi
+        // di awal rantai teknisi). Pesan satu langkah ("ya, terima tugas
+        // BAN-...") yang cocok dengan aksi tertunda sudah ditangani cabang
+        // konfirmasi di atas, sehingga ke sini selalu tanpa confirmed.
         const actionResult = await ActionService.executeTechnicianTaskStatusUpdate(userContext, {
           orderCodeOrId: explicitOrderCode,
           newStatus: actionType,
           notes: userMessage,
         });
 
-        directReply = actionResult.success
-          ? `✅ **Berhasil:** ${actionResult.message}`
-          : `⚠️ **Gagal:** ${actionResult.message}`;
+        if (actionResult.requiresConfirmation && actionResult.confirmationPrompt) {
+          setPendingTechnicianAction(session.id, {
+            orderCode: explicitOrderCode,
+            action: actionType,
+            userId: userContext.userId,
+            createdAt: Date.now(),
+          });
+          directReply = actionResult.confirmationPrompt;
+        } else {
+          // Aksi dieksekusi atau ditolak definitif (mis. state machine):
+          // aksi tertunda yang sama (bila ada) sudah tidak berlaku.
+          if (pendingAction && pendingAction.orderCode === explicitOrderCode && pendingAction.action === actionType) {
+            clearPendingTechnicianAction(session.id);
+          }
+          directReply = actionResult.success
+            ? `✅ **Berhasil:** ${actionResult.message}`
+            : `⚠️ **Gagal:** ${actionResult.message}`;
+        }
       }
     }
   }
@@ -635,7 +1355,7 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
   // ==========================================================================
   // D. KATEGORI KHUSUS ADMINISTRATOR (ADMIN)
   // ==========================================================================
-  if (userContext.role === 'admin') {
+  else if (userContext.role === 'admin') {
     // 0. Metrik tunggal yang lugas (jawab hanya angka yang ditanya)
     const singleMetric = norm.replace(/[?!.]+$/g, '').trim();
     if (/^(berapa\s+)?total\s+pendapatan$/.test(singleMetric) || singleMetric === 'pendapatan') {
@@ -665,22 +1385,31 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
     }
 
     // 0a. Daftar nama pengguna (mode list lugas: "siapa saja nama customer" -> list nama saja)
+    // N21: pola memakai (?:nama(?:-nama)?\s+)? agar reduplikasi "nama-nama"
+    // ("siapa aja nama-nama customer") ikut cocok — tanda hubung mematahkan
+    // filler \w+ sehingga frasa itu dulu lolos dari 0a maupun D#12.
     else if (
-      /siapa\s+(?:\w+\s+){0,2}(?:nama\s+)?(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|daftar\s+(?:nama\s+)?(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|list\s+(?:nama\s+)?(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)/i.test(norm) &&
+      /siapa\s+(?:\w+\s+){0,2}(?:nama(?:-nama)?\s+)?(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|daftar\s+(?:nama(?:-nama)?\s+)?(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|list\s+(?:nama(?:-nama)?\s+)?(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)/i.test(norm) &&
       !contextEntities.activePhoneNumber && !contextEntities.activeEmail && !contextEntities.activeUserUuid && !/\d{8,15}/.test(norm)
     ) {
-      const listRoleMatch = norm.match(/(?:siapa\s+(?:\w+\s+){0,2}(?:nama\s+)?|daftar\s+(?:nama\s+)?|list\s+(?:nama\s+)?)(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)/i);
+      const listRoleMatch = norm.match(/(?:siapa\s+(?:\w+\s+){0,2}(?:nama(?:-nama)?\s+)?|daftar\s+(?:nama(?:-nama)?\s+)?|list\s+(?:nama(?:-nama)?\s+)?)(pengguna|user|customer|pelanggan|teknisi|pemilik|akun)/i);
       const roleWord = (listRoleMatch?.[1] || '').toLowerCase();
       const listRole = roleWord === 'customer' || roleWord === 'pelanggan' ? 'customer' : roleWord === 'teknisi' ? 'technician' : null;
       const roleLabel = listRole === 'customer' ? 'customer' : listRole === 'technician' ? 'teknisi' : 'pengguna';
       const wantsActiveOnly = /\baktif\b/i.test(norm) && !/tidak\s+aktif|nonaktif/i.test(norm);
-      const names = await DataService.getUserNameList(listRole, 50, wantsActiveOnly ? 'active' : undefined);
-      if (names === null) {
+      // N22: pakai getUserNameListWithTotal agar pemotongan di 50 nama
+      // terlihat ("menampilkan 50 terbaru dari N total") — jangan biarkan
+      // admin mengira 50 nama itu seluruh pengguna.
+      const nameList = await DataService.getUserNameListWithTotal(listRole, 50, wantsActiveOnly ? 'active' : undefined);
+      if (nameList === null) {
         directReply = 'Tidak dapat membaca daftar nama saat ini (database tidak dapat diakses). Coba lagi nanti.';
-      } else if (names.length === 0) {
+      } else if (nameList.names.length === 0) {
         directReply = wantsActiveOnly ? `Belum ada ${roleLabel} aktif terdaftar.` : `Belum ada ${roleLabel} terdaftar.`;
       } else {
-        directReply = names.map((n, i) => `${i + 1}. ${n}`).join('\n');
+        directReply = nameList.names.map((n, i) => `${i + 1}. ${n}`).join('\n');
+        if (nameList.total > nameList.names.length) {
+          directReply += `\n\n_(menampilkan ${nameList.names.length} terbaru dari ${nameList.total} total)_`;
+        }
       }
     }
 
@@ -689,13 +1418,24 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
       const overview = await DataService.getAdminOperationalOverview();
       if (overview === null) {
         directReply = 'Ringkasan operasional tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+      } else if (/pesanan\s+hari\s+ini/i.test(norm)) {
+        // N6: jawab dengan hitungan berfilter tanggal — bukan total all-time.
+        directReply = `Pesanan Hari Ini: ${overview.orders.today} pesanan`;
+      } else if (/pesanan\s+bulan\s+ini/i.test(norm)) {
+        // N6: jawab dengan hitungan bulan kalender berjalan.
+        directReply = `Pesanan Bulan Ini: ${overview.orders.thisMonth} pesanan`;
       } else {
         directReply = `📊 **Ringkasan Operasional & Total Pesanan BANTUIN (Admin Dashboard):**
 - **Total Seluruh Pesanan:** **${overview.orders.total} pesanan**
+- **Pesanan Hari Ini:** **${overview.orders.today} pesanan**
+- **Pesanan Bulan Ini:** **${overview.orders.thisMonth} pesanan**
+- **Draf (Draft):** **${overview.orders.draft}**
 - **Menunggu Penugasan (Submitted):** **${overview.orders.submitted}**
 - **Penugasan Diterima (Assigned):** **${overview.orders.assigned}**
 - **Terjadwal Kunjungan (Scheduled):** **${overview.orders.scheduled}**
 - **Sedang Diagnosa (In Diagnosis):** **${overview.orders.inDiagnosis}**
+- **Estimasi Biaya (Estimated):** **${overview.orders.estimated}**
+- **Menunggu Persetujuan Pelanggan (Customer Approved):** **${overview.orders.customerApproved}**
 - **Dalam Pengerjaan (In Repair):** **${overview.orders.inRepair}**
 - **Selesai Tuntas (Completed):** **${overview.orders.completed}**
 - **Pesanan Dibatalkan (Cancelled):** **${overview.orders.cancelled}**
@@ -706,7 +1446,11 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
     }
 
     // 2. Analitik Customer / Pelanggan
-    else if (/customer|pelanggan/i.test(norm) && /daftar|terbaru|baru|sering|terbanyak|belum\s+selesai|riwayat|total/i.test(norm)) {
+    // N25: pesan berawalan "cari" adalah intent pencarian eksplisit — jangan
+    // biarkan D#2 (blok analitik) membayanginya; biarkan jatuh ke D#12.
+    // (D#12 tidak dipindah ke depan D#2 karena "data customer terbaru"
+    // lebih tepat dijawab blok analitik daripada pencarian.)
+    else if (!/^\s*cari\b/i.test(norm) && /customer|pelanggan/i.test(norm) && /daftar|terbaru|baru|sering|terbanyak|belum\s+selesai|riwayat|total/i.test(norm)) {
       const custData = await DataService.getAdminCustomerAnalytics();
       if (custData === null) {
         directReply = 'Analitik pelanggan tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
@@ -841,26 +1585,64 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
       } else {
         directReply = `👥 **Statistik Pengguna Sistem BANTUIN:**
 - **Total Pengguna Terdaftar:** **${stats.totalUsers}**
-- **Pelanggan (Customer):** ${stats.customers.total} (${stats.customers.active} Aktif, ${stats.customers.pending} Menunggu OTP)
-- **Mitra Teknisi:** ${stats.technicians.total} (${stats.technicians.active} Aktif, ${stats.technicians.pending} Menunggu Verifikasi)
+- **Pelanggan (Customer):** ${stats.customers.total} (${stats.customers.active} Aktif, ${stats.customers.pending} Menunggu OTP, ${stats.customers.inactive} Tidak Aktif)
+- **Mitra Teknisi:** ${stats.technicians.total} (${stats.technicians.active} Aktif, ${stats.technicians.pending} Menunggu Verifikasi, ${stats.technicians.inactive} Tidak Aktif)
 - **Administrator:** ${stats.admins.total} Akun`;
       }
     }
 
     // 12. Pencarian Pengguna Berdasarkan Nomor Telepon, Email, UUID, atau Nama (Admin User Search)
+    // N21: pola memakai (?:nama(?:-nama)?\s+)? seperti 0a — "siapa aja
+    // nama-nama customer" harus mencapai D#12 bila guard 0a tidak lolos.
     else if (
-      /siapa\s+(?:\w+\s+){0,2}(?:nama\s+)?(?:pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|nama\s+pengguna|pemilik\s+(?:nomor|no|email|akun)|cari\s+(?:pengguna|user|customer|pelanggan|teknisi)|data\s+(?:pengguna|user|customer|pelanggan|teknisi)/i.test(norm) ||
+      /siapa\s+(?:\w+\s+){0,2}(?:nama(?:-nama)?\s+)?(?:pengguna|user|customer|pelanggan|teknisi|pemilik|akun)|nama\s+pengguna|pemilik\s+(?:nomor|no|email|akun)|cari\s+(?:pengguna|user|customer|pelanggan|teknisi)|data\s+(?:pengguna|user|customer|pelanggan|teknisi)/i.test(norm) ||
       ((norm.includes('telepon') || norm.includes('phone') || norm.includes('no hp') || norm.includes('nomor') || norm.includes('email') || norm.includes('uuid')) &&
         Boolean(contextEntities.activePhoneNumber || contextEntities.activeEmail || contextEntities.activeUserUuid || /\d{8,15}/.test(norm)))
     ) {
+      // N9: strip awalan perintah + kata peran + kata pengisi secara seragam
+      // sebelum dipakai sebagai searchTerm. Pola lama hanya men-strip "siapa
+      // nama pengguna" dan "cari <peran tanpa pelanggan>" — "cari pelanggan
+      // Budi" menjadi searchTerm "cari pelanggan Budi" (dicari harfiah,
+      // selalu tidak ketemu) dan "data customer Budi" tidak di-strip sama
+      // sekali. Satu regex berulang men-strip semua awalan tersebut.
+      // N21: "nama-nama" ikut di-strip (nama(?:-nama)?) agar "siapa aja
+      // nama-nama customer Budi" menghasilkan searchTerm "Budi".
+      const strippedName = userMessage
+        .replace(/^\s*(?:siapa\s+(?:saja\s+|aja\s+)?|cari\s+|data\s+|tampilkan\s+|tunjukkan\s+|lihat\s+|nama(?:-nama)?\s+|pengguna\s+|user\s+|customer\s+|pelanggan\s+|teknisi\s+|pemilik\s+|akun\s+|dengan\s+|nomor\s+telepon\s+|email\s+|uuid\s+|yang\s+|bernama\s+)+/i, '')
+        .replace(/[?!.]+$/g, '')
+        .trim();
       const searchTerm = contextEntities.activePhoneNumber ||
         contextEntities.activeEmail ||
         contextEntities.activeUserUuid ||
         norm.match(/\b\d{8,15}\b/)?.[0] ||
-        userMessage.replace(/siapa\s+nama\s+pengguna\s+(?:dengan\s+)?(?:nomor\s+telepon|email|uuid|nama)?/i, '').replace(/cari\s+(?:pengguna|user|customer|teknisi)/i, '').trim();
+        strippedName;
 
-      const matchedUsers = await DataService.searchDatabaseUsers(searchTerm, { limit: 5 });
-      if (matchedUsers.length === 0) {
+      // S29/F20 — bila target pencarian berasal dari MEMORI (bukan disebut
+      // di pesan ini) dan belum dikonfirmasi, JANGAN mencari dulu: tanyakan
+      // klarifikasi dan simpan targetnya sebagai tertunda. Jawaban "ya"
+      // pada pesan berikutnya menjalankan pencarian ini (resolve
+      // mengembalikan memorySearchConfirmed). Target dari pesan saat ini
+      // (termasuk angka yang diketik langsung) tidak perlu konfirmasi.
+      const memoryTarget = contextEntities.memorySearchTarget;
+      const searchTermFromMemory = Boolean(
+        memoryTarget &&
+        searchTerm === memoryTarget.value &&
+        (memoryTarget.kind === 'phone' || memoryTarget.kind === 'email' || memoryTarget.kind === 'uuid')
+      );
+
+      if (searchTermFromMemory && memoryTarget) {
+        setPendingMemorySearchConfirmation(session.id, {
+          kind: memoryTarget.kind,
+          value: memoryTarget.value,
+          userId: userContext.userId ?? null,
+          createdAt: Date.now(),
+        });
+        directReply = buildMemorySearchClarification(memoryTarget);
+      } else if (!searchTerm) {
+        directReply = 'Sebutkan nama, nomor telepon, email, atau UUID pengguna yang ingin dicari (mis. "cari pelanggan Budi").';
+      } else {
+        const matchedUsers = await DataService.searchDatabaseUsers(searchTerm, { limit: 5 });
+        if (matchedUsers.length === 0) {
         directReply = `🔍 **Hasil Pencarian Basis Data Pengguna:**\n\nBerdasarkan pencarian pada sistem BANTUIN, data pengguna dengan kata kunci \`${searchTerm}\` **tidak ditemukan** dalam database pengguna aktif maupun arsip.\n\nPastikan nomor telepon, alamat email, atau UUID yang dimasukkan sudah benar dan terdaftar di BANTUIN.`;
       } else {
         directReply = `👤 **Hasil Pencarian Basis Data Pengguna (Admin Console):**\n\n` +
@@ -879,13 +1661,25 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
 - **Terdaftar Pada:** ${new Date(u.registeredAt).toLocaleDateString('id-ID', { dateStyle: 'long' })}`;
           }).join('\n\n') +
           `\n\n💡 _Catatan Admin: Untuk mengelola status akun, verifikasi, atau riwayat transaksi pengguna ini, silakan buka menu **Manajemen Pengguna** di Admin Console._`;
+        }
       }
     }
 
     // 13. Pencarian & Detail Pesanan Spesifik (Order Lookup)
     else if (contextEntities.activeOrderCode || /detail\s+pesanan|cari\s+pesanan|status\s+order|lacak\s+order/i.test(norm)) {
       const orderSearchTerm = contextEntities.activeOrderCode || norm.match(/\b(?:REP|BAN|ORD)-[A-Za-z0-9-]+\b/i)?.[0] || '';
-      if (orderSearchTerm) {
+      // S29/F20 — kode order dari memori (bukan dari pesan ini) wajib
+      // dikonfirmasi dulu (lihat D#12). Kode dari pesan saat ini — atau
+      // yang sudah dikonfirmasi ("ya" atas klarifikasi) — langsung dicari.
+      if (contextEntities.orderCodeFromMemory && !contextEntities.memorySearchConfirmed && orderSearchTerm) {
+        setPendingMemorySearchConfirmation(session.id, {
+          kind: 'order',
+          value: orderSearchTerm,
+          userId: userContext.userId ?? null,
+          createdAt: Date.now(),
+        });
+        directReply = buildMemorySearchClarification({ kind: 'order', value: orderSearchTerm });
+      } else if (orderSearchTerm) {
         const orders = await DataService.searchDatabaseOrders(orderSearchTerm, { limit: 3 });
         if (orders.length > 0) {
           directReply = `📋 **Rincian Pesanan Perbaikan Basis Data (Admin Intelligence):**\n\n` +
@@ -898,14 +1692,30 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
 - **Teknisi Bertugas:** **${o.technicianName}** ${o.technicianRating ? `(⭐ ${o.technicianRating.toFixed(1)})` : ''}
 - **Tagihan Invoice:** ${o.invoiceNumber ? `\`${o.invoiceNumber}\` - Rp ${o.totalAmount?.toLocaleString('id-ID')} [${o.invoiceStatus.toUpperCase()}]` : 'Belum Diterbitkan'}
 - **Waktu Diajukan:** ${new Date(o.createdAt).toLocaleString('id-ID')}`).join('\n\n');
+        } else {
+          // N13: jawab eksplisit bila tidak ditemukan — jangan diam lalu
+          // melempar ke AI yang tidak punya data order tersebut (AI dapat
+          // berhalusinasi menjawab seolah order itu ada).
+          directReply = `Pesanan dengan kode \`${orderSearchTerm}\` tidak ditemukan di database BANTUIN. Pastikan kode pesanan sudah benar (format: BAN-YYYYMMDD-XXXXX).`;
         }
+      } else {
+        directReply = 'Sebutkan kode pesanan yang ingin dicari (mis. "detail pesanan BAN-20261113-00001").';
       }
     }
 
     // 14. Pencarian Tagihan Invoice Spesifik (Invoice Lookup)
     else if (contextEntities.activeInvoiceNumber || /tagihan\s+invoice|cek\s+invoice|nomor\s+invoice/i.test(norm)) {
       const invSearchTerm = contextEntities.activeInvoiceNumber || norm.match(/\bINV-[A-Za-z0-9-]+\b/i)?.[0] || '';
-      if (invSearchTerm) {
+      // S29/F20 — nomor invoice dari memori wajib dikonfirmasi dulu (lihat D#12).
+      if (contextEntities.invoiceNumberFromMemory && !contextEntities.memorySearchConfirmed && invSearchTerm) {
+        setPendingMemorySearchConfirmation(session.id, {
+          kind: 'invoice',
+          value: invSearchTerm,
+          userId: userContext.userId ?? null,
+          createdAt: Date.now(),
+        });
+        directReply = buildMemorySearchClarification({ kind: 'invoice', value: invSearchTerm });
+      } else if (invSearchTerm) {
         const invoices = await DataService.searchDatabaseInvoices(invSearchTerm, { limit: 3 });
         if (invoices.length > 0) {
           directReply = `📋 **Data Tagihan Invoice Basis Data (Admin View):**\n\n` +
@@ -916,7 +1726,12 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
 - **Total Pembayaran:** **Rp ${inv.totalAmount.toLocaleString('id-ID')}**
 - **Status Tagihan:** **${inv.status.toUpperCase()}**
 - **Jatuh Tempo:** ${new Date(inv.dueDate).toLocaleDateString('id-ID')}`).join('\n\n');
+        } else {
+          // N13: jawab eksplisit bila tidak ditemukan (lihat D#13).
+          directReply = `Invoice dengan nomor \`${invSearchTerm}\` tidak ditemukan di database BANTUIN. Pastikan nomor invoice sudah benar (format: INV-YYYYMMDD-XXXXX).`;
         }
+      } else {
+        directReply = 'Sebutkan nomor invoice yang ingin dicari (mis. "cek invoice INV-20261113-00001").';
       }
     }
 
@@ -925,6 +1740,32 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
       const schemaSummary = getRoleFilteredSchemaSummary('admin');
       directReply = `🗄️ **Arsitektur & Skema Basis Data BANTUIN (MySQL 8.0):**\n\n${schemaSummary}\n\n💡 Seluruh akses query pada BANTUIN diproteksi oleh Row-Level Security, parameterized queries, dan whitelist column projection untuk menjamin integritas data dan kepatuhan UU PDP.`;
     }
+  }
+
+  // S29/F20 — pertanyaan lanjutan admin yang targetnya HANYA ada di memori
+  // dan tidak tertangkap cabang deterministik di atas (mis. "siapa namanya?"
+  // setelah menyebut nomor telepon) TIDAK BOLEH jatuh ke AI dengan target
+  // memori tersuntik diam-diam: tampilkan klarifikasi deterministik.
+  // (Cabang customer tidak digerakkan ke sini: target memori customer hanya
+  // memilih di antara pesanan MILIKNYA SENDIRI — salah pilih merugikan
+  // kenyamanan, bukan membocorkan data orang lain — dan alur follow-up
+  // "pesanan tadi" adalah UX yang dimaksudkan. Cabang teknisi memakai
+  // tugas milik sendiri, dan aksi status sudah mewajibkan kode eksplisit.)
+  if (
+    !directReply &&
+    userContext.role === 'admin' &&
+    contextEntities.hasUnconfirmedMemorySearchTarget &&
+    contextEntities.memorySearchTarget &&
+    contextEntities.isFollowUpLike
+  ) {
+    const target = contextEntities.memorySearchTarget;
+    setPendingMemorySearchConfirmation(session.id, {
+      kind: target.kind,
+      value: target.value,
+      userId: userContext.userId ?? null,
+      createdAt: Date.now(),
+    });
+    directReply = buildMemorySearchClarification(target);
   }
 
   // JIKA DATA DAPAT DIJAWAB LANGSUNG SECARA DETERMINISTIK OLEH DATA SERVICE
@@ -936,12 +1777,14 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
       quickSuggestions: dynamicSuggestions,
     };
 
-    await saveChatMessage(session.id, 'user', userMessage);
-    await saveChatMessage(session.id, 'assistant', finalReply, metadata, 0, metadata.responseTimeMs);
+    // S9e — pesan pengguna sudah tersimpan di awal (userStored); di sini
+    // hanya balasan yang disimpan.
+    const replyStored = await saveChatMessageTracked(session.id, 'assistant', finalReply, metadata, 0, metadata.responseTimeMs);
 
     return {
       reply: finalReply,
       metadata,
+      storedIn: combineStoredIn(userStored, replyStored),
     };
   }
 
@@ -973,7 +1816,12 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
           if (repairs === null || invoices === null) {
             dbContextSummary += 'Data pesanan/tagihan tidak dapat dibaca saat ini (database tidak dapat diakses).\n';
           }
-          dbContextSummary += `Profil Customer: Nama: ${profile?.fullName || '-'}, Telp: ${profile?.phoneNumber || '-'}, Alamat: ${profile?.defaultAddress || '-'}\n`;
+          // S9b — ringkasan konteks LLM TIDAK memuat nomor telepon maupun
+          // alamat lengkap pelanggan (keduanya PII yang tidak dibutuhkan
+          // untuk sebagian besar jawaban; bila pengguna menanyakan
+          // profilnya sendiri, cabang deterministik yang menjawab — bukan
+          // jalur AI ini).
+          dbContextSummary += `Profil Customer: Nama: ${profile?.fullName || '-'}\n`;
           dbContextSummary += `Pesanan Terkini: ${repairsList.length} pesanan tercatat.\n`;
           repairsList.forEach(r => {
             dbContextSummary += `  - Order #${r.orderCode}: Alat: ${r.device} (${r.categoryName}), Status: ${r.status}, Teknisi: ${r.technician?.name || 'Belum ada'}\n`;
@@ -986,8 +1834,12 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
             dbContextSummary += 'Data tugas tidak dapat dibaca saat ini (database tidak dapat diakses).\n';
           }
           dbContextSummary += `Tugas Aktif Teknisi: ${tasksList.length} penugasan.\n`;
+          // S9b — alamat lengkap pelanggan TIDAK disuntik ke prompt LLM
+          // (nama pelanggan dipertahankan: teknisi perlu membedakan
+          // tugas-tugasnya; alamat kunjungan tersedia di dashboard tugas
+          // dan cabang deterministik bila ditanyakan).
           tasksList.forEach(t => {
-            dbContextSummary += `  - Order #${t.orderCode}: Pelanggan: ${t.customerName}, Status: ${t.assignmentStatus}, Alamat: ${t.address}\n`;
+            dbContextSummary += `  - Order #${t.orderCode}: Pelanggan: ${t.customerName}, Status: ${t.assignmentStatus}\n`;
           });
         } else if (userContext.role === 'admin') {
           const [overview, workload, finance, userStats] = await Promise.all([
@@ -1001,26 +1853,67 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
             dbContextSummary += 'Ringkasan admin tidak dapat dibaca saat ini (database tidak dapat diakses).\n';
           } else {
             const totalActiveUsers = userStats.customers.active + userStats.technicians.active + userStats.admins.active;
-            dbContextSummary += `Ringkasan Admin: Total Pesanan: ${overview.orders.total}, Menunggu: ${overview.orders.submitted}, Dikerjakan: ${overview.orders.inRepair}, Selesai: ${overview.orders.completed}, Mitra Teknisi Aktif: ${overview.technicians.active}, Pelanggan Aktif: ${overview.customers.active}, Total Pengguna Aktif: ${totalActiveUsers}, Total Pengguna Terdaftar: ${userStats.totalUsers}\n`;
+            // N26: sertakan status pesanan antara (assigned/scheduled/
+            // in_diagnosis/estimated/customer_approved) agar AI yang ditanya
+            // "berapa pesanan sedang diproses" tidak menjawab inRepair saja
+            // dan mengecilkan angka.
+            dbContextSummary += `Ringkasan Admin: Total Pesanan: ${overview.orders.total}, Menunggu: ${overview.orders.submitted}, Ditugaskan: ${overview.orders.assigned}, Terjadwal: ${overview.orders.scheduled}, Diagnosis: ${overview.orders.inDiagnosis}, Estimasi: ${overview.orders.estimated}, Menunggu Persetujuan: ${overview.orders.customerApproved}, Dikerjakan: ${overview.orders.inRepair}, Selesai: ${overview.orders.completed}, Mitra Teknisi Aktif: ${overview.technicians.active}, Pelanggan Aktif: ${overview.customers.active}, Total Pengguna Aktif: ${totalActiveUsers}, Total Pengguna Terdaftar: ${userStats.totalUsers}\n`;
             dbContextSummary += `Keuangan: Total Pendapatan: Rp ${finance.totalRevenuePaid.toLocaleString('id-ID')}, Piutang Tertunggak: Rp ${finance.totalUnpaidAmount.toLocaleString('id-ID')}, Total Invoice: ${finance.totalInvoices}\n`;
           }
           dbContextSummary += `Teknisi: ${(workload || []).length} mitra teknisi aktif terdaftar.\n`;
 
-          if (currentPath.includes('/admin/users') || contextEntities.activePhoneNumber || contextEntities.activeEmail || contextEntities.activeUserUuid) {
-            const userRecords = await DataService.searchDatabaseUsers(
-              contextEntities.activePhoneNumber || contextEntities.activeEmail || contextEntities.activeUserUuid || '',
-              { limit: 6 }
-            );
+          // S29/F20 — blok konteks pengguna/pesanan di bawah TIDAK disuntik
+          // bila targetnya berasal dari memori dan belum dikonfirmasi
+          // (klarifikasi deterministik sudah ditampilkan di atas; AI tidak
+          // boleh menjawab dari data target yang belum pasti). Target dari
+          // pesan saat ini — atau yang sudah dikonfirmasi — tetap dipakai.
+          const userSearchTerm = contextEntities.activePhoneNumber || contextEntities.activeEmail || contextEntities.activeUserUuid || '';
+          const userTermFromMemoryUnconfirmed = Boolean(
+            userSearchTerm &&
+            !contextEntities.memorySearchConfirmed &&
+            ((contextEntities.phoneNumberFromMemory && userSearchTerm === contextEntities.activePhoneNumber) ||
+              (contextEntities.emailFromMemory && userSearchTerm === contextEntities.activeEmail) ||
+              (contextEntities.userUuidFromMemory && userSearchTerm === contextEntities.activeUserUuid))
+          );
+          if (
+            !userTermFromMemoryUnconfirmed &&
+            (currentPath.includes('/admin/users') || contextEntities.activePhoneNumber || contextEntities.activeEmail || contextEntities.activeUserUuid)
+          ) {
+            const userRecords = await DataService.searchDatabaseUsers(userSearchTerm, { limit: 6 });
             if (userRecords.length > 0) {
+              // S9b — daftar pengguna di prompt HANYA memuat nama/peran/
+              // status; email/telepon/UUID/alamat dibuang, KECUALI
+              // pertanyaan saat ini secara eksplisit meminta field itu
+              // untuk satu orang spesifik (lihat detectExplicitPiiAsks).
+              const asks = detectExplicitPiiAsks(norm);
               dbContextSummary += `\nDaftar Pengguna Relevan Basis Data:\n` +
-                userRecords.map(u => `  - ID #${u.id} (${u.fullName}): Role: ${u.role}, Email: ${u.email}, Telp: ${u.phoneNumber}, Status: ${u.status}, UUID: ${u.uuid}`).join('\n') + '\n';
+                userRecords.map((u) => {
+                  const projected = projectUserRecordForPrompt(u, asks);
+                  const extra: string[] = [];
+                  if (projected.phoneNumber) extra.push(`Telp: ${projected.phoneNumber}`);
+                  if (projected.email) extra.push(`Email: ${projected.email}`);
+                  if (projected.address) extra.push(`Alamat: ${projected.address}`);
+                  if (projected.uuid) extra.push(`UUID: ${projected.uuid}`);
+                  return `  - ${projected.name}: Role: ${projected.role}, Status: ${projected.status}${extra.length > 0 ? `, ${extra.join(', ')}` : ''}`;
+                }).join('\n') + '\n';
             }
           }
-          if (currentPath.includes('/admin/repairs') || contextEntities.activeOrderCode) {
+          const orderTermFromMemoryUnconfirmed = Boolean(
+            contextEntities.activeOrderCode &&
+            contextEntities.orderCodeFromMemory &&
+            !contextEntities.memorySearchConfirmed
+          );
+          if (
+            !orderTermFromMemoryUnconfirmed &&
+            (currentPath.includes('/admin/repairs') || contextEntities.activeOrderCode)
+          ) {
             const orderRecords = await DataService.searchDatabaseOrders(contextEntities.activeOrderCode || '', { limit: 5 });
             if (orderRecords.length > 0) {
+              // S9b — nomor telepon pelanggan dibuang kecuali pertanyaan
+              // saat ini secara eksplisit memintanya.
+              const asks = detectExplicitPiiAsks(norm);
               dbContextSummary += `\nDaftar Pesanan Relevan Basis Data:\n` +
-                orderRecords.map(o => `  - Order #${o.orderCode}: Alat: ${o.device} (${o.category}), Status: ${o.status}, Pelanggan: ${o.customerName} (${o.customerPhone})`).join('\n') + '\n';
+                orderRecords.map(o => `  - Order #${o.orderCode}: Alat: ${o.device} (${o.category}), Status: ${o.status}, Pelanggan: ${o.customerName}${asks.phone && o.customerPhone ? ` (${o.customerPhone})` : ''}`).join('\n') + '\n';
             }
           }
         }
@@ -1085,7 +1978,7 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
               properties: {
                 table: { type: 'string', description: 'Nama tabel (misal: repair_requests, invoices, users, customer_profiles, technician_profiles, payments, services)' },
                 columns: { type: 'string', description: 'Kolom yang diambil, dipisah koma (misal: "full_name,email" atau "customer_profiles.full_name"). Kosongkan untuk semua kolom non-sensitif.' },
-                joins: { type: 'string', description: 'Tabel yang di-JOIN, dipisah koma (relasi harus ada di skema; misal: "customer_profiles" saat tabel dasar repair_requests)' },
+                joins: { type: 'string', description: 'Tabel yang di-JOIN, dipisah koma (relasi harus ada di skema; misal: "customer_profiles" saat tabel dasar repair_requests). Bila dua tabel punya lebih dari satu relasi, pilih FK-nya dengan sintaks "tabel:foreignKey" (misal: "users:technician_id" saat tabel dasar repair_reviews, agar JOIN memakai teknisi yang diulas, bukan pelanggan pemberi ulasan).' },
                 filterColumn: { type: 'string', description: 'Kolom filter pertama (misal: "current_status" atau "invoices.status")' },
                 filterOperator: { type: 'string', enum: ['=', '!=', '>', '>=', '<', '<=', 'LIKE', 'IN'], description: 'Operator filter pertama' },
                 filterValue: { type: 'string', description: 'Nilai filter pertama. Untuk LIKE: substring yang dicari. Untuk IN: beberapa nilai dipisah koma.' },
@@ -1147,12 +2040,18 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
           universalMessages.push(assistantTurn);
 
           for (const tc of aiResponse.toolCalls) {
-            const toolResult = await executeRoleBasedTool(tc.name, tc.arguments, userContext);
+            // S9g — session.id diteruskan agar tool aksi teknisi dapat
+            // menyimpan aksi tertundanya untuk alur konfirmasi dua langkah.
+            const toolResult = await executeRoleBasedTool(tc.name, tc.arguments, userContext, session.id);
+            // S9d — hasil tool DIPROYEKSI dulu (hanya kolom yang dibutuhkan
+            // jawaban; PII dibuang kecuali diminta eksplisit) — jangan
+            // pernah JSON-stringify utuh ke prompt.
+            const projectedResult = projectToolResultForPrompt(tc.name, toolResult, norm);
             universalMessages.push({
               role: 'tool',
               toolCallId: tc.id,
               name: tc.name,
-              content: typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult),
+              content: typeof projectedResult === 'string' ? projectedResult : JSON.stringify(projectedResult),
             });
           }
 
@@ -1175,7 +2074,16 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
           try {
             const parsed = JSON.parse(jsonMatch[1]);
             if (parsed.diagnosisCard) {
-              extractedCard = parsed.diagnosisCard;
+              // S9f/F19 — validasi bentuk kartu SEGERA setelah parse.
+              // Kartu tidak valid ditolak (bukan dipakai lalu throw di
+              // `.join`); balasan AI tetap dipakai — kartu hanyalah pelengkap.
+              // Blok JSON selalu dihapus dari teks jawaban (data mesin,
+              // bukan prosa untuk pengguna), valid atau tidak.
+              if (isValidDiagnosisCard(parsed.diagnosisCard)) {
+                extractedCard = parsed.diagnosisCard;
+              } else {
+                console.warn('[Chatbot Engine] diagnosisCard AI ditolak: bentuk tidak valid.');
+              }
               cleanedText = fullText.replace(jsonMatch[0], '').trim();
             }
           } catch {
@@ -1183,45 +2091,76 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
           }
         }
 
-        const finalReply = `${safetyAlertPrefix}${cleanedText}`;
-        const metadata: ChatMessageMetadata = {
-          model: `${aiResponse.provider}:${aiResponse.model}${aiResponse.isFallback ? ' (fallback)' : ''}`,
-          responseTimeMs: aiResponse.latencyMs,
-          diagnosisCard: extractedCard,
-          quickSuggestions: dynamicSuggestions,
-        };
+        // N29: respons AI kosong (konten terpotong/difilter tanpa error) —
+        // anggap GAGAL dan jatuh ke fallback expert system berlabel offline
+        // di bawah (aiGatewayError terisi -> offlineNotice muncul); jangan
+        // pernah mengembalikan balasan kosong ke pengguna.
+        if (!cleanedText.trim()) {
+          aiGatewayError = 'Respons AI kosong';
+          console.warn('[Chatbot Engine] Respons AI kosong — memakai fallback expert system.');
+        } else {
+          const finalReply = `${safetyAlertPrefix}${cleanedText}`;
+          const metadata: ChatMessageMetadata = {
+            model: `${aiResponse.provider}:${aiResponse.model}${aiResponse.isFallback ? ' (fallback)' : ''}`,
+            responseTimeMs: aiResponse.latencyMs,
+            diagnosisCard: extractedCard,
+            quickSuggestions: dynamicSuggestions,
+          };
 
-        await saveChatMessage(session.id, 'user', userMessage);
-        await saveChatMessage(session.id, 'assistant', finalReply, metadata, 0, metadata.responseTimeMs);
+          // S9e — pesan pengguna sudah tersimpan di awal (userStored); di sini
+          // hanya balasan yang disimpan.
+          const replyStored = await saveChatMessageTracked(session.id, 'assistant', finalReply, metadata, 0, metadata.responseTimeMs);
 
-        if (extractedCard) {
-          let catId = session.categoryId;
-          if (!catId && extractedCard.categorySlug) {
-            const catRows = await query<any[]>(
-              `SELECT id FROM appliance_categories WHERE slug = ? LIMIT 1`,
-              [extractedCard.categorySlug]
-            );
-            if (catRows.length > 0) catId = Number(catRows[0].id);
+          if (extractedCard) {
+            // S9f/F19 — persistensi diagnosis NON-FATAL: kegagalan apa pun
+            // di sini (termasuk kueri kategori yang bisa throw saat DB
+            // down) tidak boleh membuang balasan AI yang sudah valid dan
+            // tidak boleh memicu jalur fallback (yang dulu menyimpan ulang
+            // pesan). `.join` defensif meski kartu sudah divalidasi.
+            try {
+              let catId = session.categoryId;
+              if (!catId && extractedCard.categorySlug) {
+                const catRows = await query<any[]>(
+                  `SELECT id FROM appliance_categories WHERE slug = ? LIMIT 1`,
+                  [extractedCard.categorySlug]
+                );
+                if (catRows.length > 0) catId = Number(catRows[0].id);
+              }
+
+              await updateSessionDiagnosis(session.id, {
+                categoryId: catId,
+                initialSymptoms: extractedCard.symptomsSummary,
+                preliminaryDiagnosis: joinStringList(extractedCard.possibleCauses),
+                recommendedAction: extractedCard.recommendedAction,
+              });
+            } catch (diagErr) {
+              console.error('[Chatbot Engine] Gagal menyimpan diagnosis sesi (non-fatal):', diagErr);
+            }
           }
 
-          await updateSessionDiagnosis(session.id, {
-            categoryId: catId,
-            initialSymptoms: extractedCard.symptomsSummary,
-            preliminaryDiagnosis: extractedCard.possibleCauses.join('; '),
-            recommendedAction: extractedCard.recommendedAction,
-          });
+          return {
+            reply: finalReply,
+            metadata,
+            diagnosisCard: extractedCard,
+            storedIn: combineStoredIn(userStored, replyStored),
+          };
         }
-
-        return {
-          reply: finalReply,
-          metadata,
-          diagnosisCard: extractedCard,
-        };
+      } else {
+        // N7 — Tidak ada API key sama sekali: blok AI dilewati tanpa
+        // exception, jadi tanpa baris ini aiGatewayError tetap null dan
+        // jawaban expert system disajikan TANPA label "Mode offline"
+        // (fallback diam-diam yang sama seperti yang diperbaiki PR #2
+        // untuk jalur exception).
+        aiGatewayError = 'Tidak ada API key provider AI yang terkonfigurasi';
       }
     } catch (err: any) {
       aiGatewayError = err?.message || String(err);
       console.warn('[AI Provider Gateway] Menggunakan fallback BANTUIN Database Expert System:', aiGatewayError);
     }
+  } else {
+    // N7 — Mode offline dipaksa via env: beri label pada jawaban expert
+    // system di bawah, seperti jalur gagalnya AI.
+    aiGatewayError = 'Mode offline dipaksa via FORCE_OFFLINE_AI';
   }
 
   // ==========================================================================
@@ -1236,8 +2175,12 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
   // Jika AI sempat dicoba tetapi gagal, JANGAN menyajikan jawaban expert system
   // seolah-olah berasal dari AI. Beri label yang jelas beserta alasannya, agar
   // admin dan pengguna tahu provider AI sedang tidak terhubung.
+  // F23: teks yang ditampilkan ke klien adalah pesan GENERIK — alasan mentah
+  // (aiGatewayError) hanya dipakai sebagai penanda bahwa AI gagal dan hanya
+  // tercatat di log server (lihat catch di atas); tidak pernah disisipkan
+  // ke balasan maupun metadata.
   const offlineNotice = aiGatewayError
-    ? `⚠️ *Mode offline:* layanan AI sedang tidak tersedia (${aiGatewayError}), jadi jawaban berikut berasal dari sistem pakar BANTUIN, bukan dari AI.\n\n`
+    ? `⚠️ *Mode offline:* ${AI_UNAVAILABLE_MESSAGE}. Jawaban berikut berasal dari sistem pakar BANTUIN, bukan dari AI.\n\n`
     : '';
   const finalReply = `${safetyAlertPrefix}${offlineNotice}${fallback.reply}`;
   const metadata: ChatMessageMetadata = {
@@ -1245,18 +2188,19 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
     responseTimeMs: Date.now() - startTime,
     diagnosisCard: fallback.card || null,
     quickSuggestions: fallback.quickSuggestions,
-    aiError: aiGatewayError,
+    aiError: aiGatewayError ? AI_UNAVAILABLE_MESSAGE : null,
   };
 
-  await saveChatMessage(session.id, 'user', userMessage);
-  await saveChatMessage(session.id, 'assistant', finalReply, metadata, 0, metadata.responseTimeMs);
+  // S9e — pesan pengguna sudah tersimpan di awal (userStored); di sini
+  // hanya balasan yang disimpan.
+  const replyStored = await saveChatMessageTracked(session.id, 'assistant', finalReply, metadata, 0, metadata.responseTimeMs);
 
   if (fallback.card) {
     const targetCatId = session.categoryId || fallback.detectedCategoryId;
     await updateSessionDiagnosis(session.id, {
       categoryId: targetCatId,
       initialSymptoms: fallback.card.symptomsSummary,
-      preliminaryDiagnosis: fallback.card.possibleCauses.join('; '),
+      preliminaryDiagnosis: joinStringList(fallback.card.possibleCauses),
       recommendedAction: fallback.card.recommendedAction,
     });
   }
@@ -1265,5 +2209,6 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
     reply: finalReply,
     metadata,
     diagnosisCard: fallback.card || null,
+    storedIn: combineStoredIn(userStored, replyStored),
   };
 }

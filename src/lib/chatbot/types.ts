@@ -11,6 +11,13 @@ export interface ChatUserContext {
   name?: string;
   email?: string;
   phoneNumber?: string;
+  /**
+   * F21 — IP klien asal request, disetel oleh route handler dari header
+   * x-forwarded-for (entri pertama, tervalidasi). Hanya untuk log audit;
+   * TIDAK PERNAH dibaca dari argumen tool AI (bisa dipalsukan). Null bila
+   * tidak ada konteks request (pemanggilan langsung / job latar).
+   */
+  clientIp?: string | null;
   pageContext?: {
     pathname: string;
     pageTitle?: string;
@@ -66,6 +73,13 @@ export interface StoredChatMessage {
   responseTimeMs?: number | null;
   rawMetadata?: ChatMessageMetadata | null;
   createdAt: string;
+  /**
+   * F6 — Dari mana pesan ini berasal: 'database' (tersimpan di MySQL) atau
+   * 'memory' (hanya di fallback in-memory selama DB tidak dapat dijangkau).
+   * Dipakai pemanggil untuk membedakan tulisan yang tahan lama dari yang
+   * hanya di memori (hilang saat restart).
+   */
+  storedIn?: 'database' | 'memory';
 }
 
 export interface ConsultationSession {
@@ -81,4 +95,10 @@ export interface ConsultationSession {
   isConvertedToOrder: boolean;
   createdAt: string;
   updatedAt: string;
+  /**
+   * F6 — Dari mana sesi ini berasal: 'database' (baris MySQL) atau 'memory'
+   * (sesi fallback in-memory selama DB tidak dapat dijangkau; hilang saat
+   * restart). Sesi fallback selalu ber-ID negatif (F15).
+   */
+  storedIn?: 'database' | 'memory';
 }

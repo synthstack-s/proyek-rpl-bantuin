@@ -20,6 +20,7 @@ import {
   AIChatResponse,
   AIConnectionTestResult,
   AIModelInfo,
+  AIModelListResult,
   NormalizedAIError,
   UniversalToolCall,
 } from '../types';
@@ -31,6 +32,38 @@ interface PinnedHttpResponse {
   statusText: string;
   text: () => Promise<string>;
   json: () => Promise<any>;
+}
+
+/**
+ * S8g: batas maksimum ukuran body respons provider (10 MB). Tanpa batas,
+ * chunk respons diakumulasi tanpa henti sebelum Buffer.concat — satu
+ * respons raksasa (atau server jahat) bisa menghabiskan memori proses.
+ */
+export const MAX_PROVIDER_RESPONSE_BYTES = 10 * 1024 * 1024;
+
+/**
+ * S8e: ekstrak tool calls format OpenAI ke bentuk universal. Dipakai
+ * BERSAMA oleh jalur normal dan jalur auto-heal — sebelumnya jalur heal
+ * mengembalikan `toolCalls: undefined` sehingga tool call yang diminta
+ * model hasil heal dibuang diam-diam (model "memanggil tool" tetapi
+ * tidak ada yang dieksekusi dan tidak ada error).
+ */
+function extractOpenAIToolCalls(message: any): UniversalToolCall[] | undefined {
+  const rawCalls = message?.tool_calls;
+  if (!Array.isArray(rawCalls) || rawCalls.length === 0) return undefined;
+  return rawCalls.map((tc: any) => {
+    let args: Record<string, any> = {};
+    try {
+      args = typeof tc.function.arguments === 'string' ? JSON.parse(tc.function.arguments) : tc.function.arguments;
+    } catch {
+      args = {};
+    }
+    return {
+      id: tc.id,
+      name: tc.function.name,
+      arguments: args,
+    };
+  });
 }
 
 function makeHttpsRequest(
@@ -58,8 +91,31 @@ function makeHttpsRequest(
       },
       (res) => {
         const chunks: Buffer[] = [];
-        res.on('data', (c) => chunks.push(c));
+        let totalBytes = 0;
+        let aborted = false;
+        const failOnce = (err: Error) => {
+          if (aborted) return;
+          aborted = true;
+          reject(err);
+        };
+        res.on('data', (c: Buffer) => {
+          if (aborted) return;
+          totalBytes += c.length;
+          // S8g: batalkan request begitu akumulasi melewati batas — jangan
+          // menunggu seluruh body selesai diunduh.
+          if (totalBytes > MAX_PROVIDER_RESPONSE_BYTES) {
+            failOnce(
+              new Error(
+                `Respons provider melebihi batas ukuran maksimum ${MAX_PROVIDER_RESPONSE_BYTES / 1024 / 1024} MB (${totalBytes} byte diterima) — request dibatalkan untuk melindungi memori server.`
+              )
+            );
+            req.destroy();
+            return;
+          }
+          chunks.push(c);
+        });
         res.on('end', () => {
+          if (aborted) return;
           const bodyText = Buffer.concat(chunks).toString('utf8');
           const status = res.statusCode || 200;
           resolve({
@@ -67,9 +123,21 @@ function makeHttpsRequest(
             ok: status >= 200 && status < 300,
             statusText: res.statusMessage || '',
             text: async () => bodyText,
-            json: async () => JSON.parse(bodyText),
+            // S8e: JSON.parse atas respons provider WAJIB berpenjaga —
+            // SyntaxError mentah ("Unexpected token...") tidak menjelaskan
+            // apa-apa; lempar pesan yang menyebut provider-nya.
+            json: async () => {
+              try {
+                return JSON.parse(bodyText);
+              } catch {
+                throw new Error(
+                  `Respons provider bukan JSON yang valid (HTTP ${status}) — tidak dapat membaca body respons.`
+                );
+              }
+            },
           });
         });
+        res.on('error', (err) => failOnce(err));
       }
     );
 
@@ -103,6 +171,21 @@ export class GroqProviderAdapter implements AIProviderAdapter {
     const endpointToTest = config.apiEndpoint || (this.providerName === 'groq' ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1');
     const modelToTest = config.selectedModel || config.defaultModel || (this.providerName === 'groq' ? 'openai/gpt-oss-120b' : 'default-model');
 
+    // L7: timeout probe memakai requestTimeoutMs dari konfigurasi (form) —
+    // sebelumnya hardcoded 10s (/models) dan 15s (chat), sehingga pengaturan
+    // timeout admin diabaikan saat tes koneksi. Dijepit 5s–120s; default 15s
+    // bila konfigurasi tidak membawa nilai yang valid.
+    const probeTimeoutMs = Number.isFinite(Number(config.requestTimeoutMs))
+      ? Math.max(5000, Math.min(120000, Number(config.requestTimeoutMs)))
+      : 15000;
+
+    // L2: model yang BENAR-BENAR diuji. Bila auto-heal berhasil (model yang
+    // diminta tidak tersedia, diganti model default), testedModel berubah ke
+    // model pengganti dan healedModel mengisinya agar UI bisa menawarkan
+    // untuk menyimpan model pengganti — model tersimpan TIDAK diubah di sini.
+    let testedModel = modelToTest;
+    let healedModel: string | null = null;
+
     try {
       // 1. Validasi SSRF & Pin DNS IP
       const endpointValidation = await validateAndPinEndpoint(
@@ -135,7 +218,7 @@ export class GroqProviderAdapter implements AIProviderAdapter {
           Authorization: `Bearer ${config.apiKey.trim()}`,
         },
         agent,
-        timeoutMs: 10000,
+        timeoutMs: probeTimeoutMs,
       });
 
       // Auto-heal path: jika 404 dan belum berakhiran /v1, coba /v1/models
@@ -147,7 +230,7 @@ export class GroqProviderAdapter implements AIProviderAdapter {
             Authorization: `Bearer ${config.apiKey.trim()}`,
           },
           agent,
-          timeoutMs: 10000,
+          timeoutMs: probeTimeoutMs,
         });
         if (v1Res.ok) {
           normalizedBase = `${normalizedBase}/v1`;
@@ -183,7 +266,7 @@ export class GroqProviderAdapter implements AIProviderAdapter {
           max_tokens: 1,
         }),
         agent,
-        timeoutMs: 15000,
+        timeoutMs: probeTimeoutMs,
       });
 
       const latencyMs = Date.now() - startTime;
@@ -208,11 +291,14 @@ export class GroqProviderAdapter implements AIProviderAdapter {
               max_tokens: 1,
             }),
             agent,
-            timeoutMs: 15000,
+            timeoutMs: probeTimeoutMs,
           });
 
           if (healRes.ok) {
             config.selectedModel = 'openai/gpt-oss-120b';
+            // L2: catat model pengganti sebagai model yang benar-benar diuji.
+            testedModel = 'openai/gpt-oss-120b';
+            healedModel = 'openai/gpt-oss-120b';
             chatRes = healRes;
           }
         } catch {}
@@ -223,7 +309,10 @@ export class GroqProviderAdapter implements AIProviderAdapter {
         return {
           provider: this.providerName,
           endpoint: endpointToTest,
-          modelTested: modelToTest,
+          // L2: laporkan model yang BENAR-BENAR diuji (bisa model hasil heal,
+          // bukan model asli yang diminta).
+          modelTested: testedModel,
+          healedModel,
           status: 'success',
           httpStatusCode: 200,
           responseTimeMs: latencyMs,
@@ -243,9 +332,10 @@ export class GroqProviderAdapter implements AIProviderAdapter {
       // Saldo/kuota habis (402): API key memang valid, tetapi provider TIDAK BISA
       // melayani chat sama sekali. JANGAN laporkan sebagai 'success' — status
       // 'connected' yang menutupi saldo 0 membuat admin mengira provider sehat
-      // padahal setiap percakapan gagal. Laporkan sebagai rate_limit_exceeded
-      // agar tersimpan sebagai 'connection_error' dan UI menampilkan badge
-      // "Saldo Habis (402)".
+      // padahal setiap percakapan gagal. L1: status disamakan dengan
+      // normalizeError ('provider_error' + pesan "Saldo Habis") — sebelumnya
+      // jalur ini memakai 'rate_limit_exceeded' sementara normalizeError
+      // memakai 'provider_error' untuk kondisi 402 yang sama.
       if (
         chatRes.status === 402 ||
         errorDetail.toLowerCase().includes('insufficient balance') ||
@@ -255,11 +345,29 @@ export class GroqProviderAdapter implements AIProviderAdapter {
           provider: this.providerName,
           endpoint: endpointToTest,
           modelTested: modelToTest,
-          status: 'rate_limit_exceeded',
+          status: 'provider_error',
           httpStatusCode: 402,
           responseTimeMs: latencyMs,
           testedAt: new Date().toISOString(),
           errorMessage: 'Saldo akun AI habis (402 Insufficient Balance). API key valid, tetapi provider tidak dapat melayani percakapan sampai saldo diisi ulang di console provider.',
+        };
+      }
+
+      // L15: bila /models DAN /chat/completions sama-sama 404, masalahnya
+      // adalah endpoint (salah total), bukan model — laporkan invalid_endpoint
+      // agar admin memeriksa URL endpoint. Sebelumnya kode jatuh ke
+      // normalizeError({ status: 404 }) → model_not_available, yang menyuruh
+      // admin memeriksa model padahal endpoint-lah yang salah.
+      if (chatRes.status === 404 && modelsRes.status === 404) {
+        return {
+          provider: this.providerName,
+          endpoint: endpointToTest,
+          modelTested: modelToTest,
+          status: 'invalid_endpoint',
+          httpStatusCode: 404,
+          responseTimeMs: latencyMs,
+          testedAt: new Date().toISOString(),
+          errorMessage: 'Endpoint tidak ditemukan (404 pada /models dan /chat/completions) — periksa URL endpoint.',
         };
       }
 
@@ -391,7 +499,7 @@ export class GroqProviderAdapter implements AIProviderAdapter {
         payload.tool_choice = 'auto';
       }
 
-      const res = await makeHttpsRequest(url, {
+      let res = await makeHttpsRequest(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -402,8 +510,42 @@ export class GroqProviderAdapter implements AIProviderAdapter {
         timeoutMs,
       });
 
-      const latencyMs = Date.now() - startTime;
-      const resText = await res.text();
+      let latencyMs = Date.now() - startTime;
+      let resText = await res.text();
+
+      // M3 (opsi a): terapkan auto-heal `/v1` yang SAMA dengan testConnection.
+      // Sebelumnya tes koneksi diam-diam mencoba `{base}/v1/...` bila `/models`
+      // 404, tetapi chat memakai endpoint tersimpan apa adanya — provider yang
+      // endpoint-nya disimpan tanpa `/v1` lolos tes tetapi setiap chat gagal
+      // 404 selamanya. Bila chat 404 dan base belum berakhiran `/v1`, coba
+      // sekali dengan `/v1/chat/completions`. Bila percobaan itu berhasil,
+      // pakai responsnya; bila gagal dengan status non-404 (mis. 401 — key
+      // salah), pakai respons itu karena lebih informatif; bila tetap 404,
+      // laporkan respons aslinya (endpoint tersimpan-lah yang bermasalah).
+      // Endpoint tersimpan TIDAK diubah — heal bersifat per-request, sama
+      // seperti di testConnection.
+      if (res.status === 404 && !endpointValidation.normalizedUrl.endsWith('/v1')) {
+        try {
+          const v1Url = `${endpointValidation.normalizedUrl}/v1/chat/completions`;
+          const v1Res = await makeHttpsRequest(v1Url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${config.apiKey.trim()}`,
+            },
+            body: JSON.stringify(payload),
+            agent,
+            timeoutMs,
+          });
+          if (v1Res.ok || v1Res.status !== 404) {
+            res = v1Res;
+            resText = await v1Res.text();
+            latencyMs = Date.now() - startTime;
+          }
+        } catch {
+          // Gagal menghubungi /v1 — lanjut dengan respons aslinya.
+        }
+      }
 
       if (!res.ok) {
         let errJson: any = null;
@@ -434,12 +576,25 @@ export class GroqProviderAdapter implements AIProviderAdapter {
 
           if (healRes.ok) {
             const healText = await healRes.text();
-            const healData = JSON.parse(healText);
+            // S8e: JSON.parse atas respons heal WAJIB berpenjaga — bila
+            // provider mengembalikan 200 non-JSON, lempar error yang jelas
+            // (bukan SyntaxError mentah yang menjadi unknown_error).
+            let healData: any;
+            try {
+              healData = JSON.parse(healText);
+            } catch {
+              throw new Error(
+                'Respons auto-heal provider bukan JSON yang valid — tidak dapat membaca hasil percobaan model pengganti.'
+              );
+            }
             const healChoice = healData.choices?.[0];
             const healMsg = healChoice?.message;
             return {
               content: healMsg?.content || '',
-              toolCalls: undefined,
+              // S8e: JANGAN buang tool calls hasil heal — ekstrak dengan
+              // helper yang sama seperti jalur normal, agar tool yang
+              // diminta model pengganti tetap dieksekusi.
+              toolCalls: extractOpenAIToolCalls(healMsg),
               usage: {
                 promptTokens: Number(healData.usage?.prompt_tokens || 0),
                 completionTokens: Number(healData.usage?.completion_tokens || 0),
@@ -460,27 +615,24 @@ export class GroqProviderAdapter implements AIProviderAdapter {
         }, config.apiKey);
       }
 
-      const data = JSON.parse(resText);
+      // S8e: JSON.parse atas respons chat WAJIB berpenjaga — provider yang
+      // mengembalikan 200 non-JSON sebelumnya menghasilkan SyntaxError
+      // mentah (unknown_error). Lempar pesan yang jelas; catch di bawah
+      // menormalkannya.
+      let data: any;
+      try {
+        data = JSON.parse(resText);
+      } catch {
+        throw new Error(
+          'Respons provider bukan JSON yang valid — tidak dapat membaca hasil chat completion.'
+        );
+      }
       const choice = data.choices?.[0];
       const message = choice?.message;
 
-      // Ekstrak function/tool calling jika ada
-      let normalizedToolCalls: UniversalToolCall[] | undefined = undefined;
-      if (message?.tool_calls && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
-        normalizedToolCalls = message.tool_calls.map((tc: any) => {
-          let args: Record<string, any> = {};
-          try {
-            args = typeof tc.function.arguments === 'string' ? JSON.parse(tc.function.arguments) : tc.function.arguments;
-          } catch {
-            args = {};
-          }
-          return {
-            id: tc.id,
-            name: tc.function.name,
-            arguments: args,
-          };
-        });
-      }
+      // Ekstrak function/tool calling jika ada (helper yang sama dipakai
+      // jalur auto-heal — S8e).
+      const normalizedToolCalls = extractOpenAIToolCalls(message);
 
       // Normalisasi Token Usage
       const promptTokens = Number(data.usage?.prompt_tokens || 0);
@@ -510,9 +662,19 @@ export class GroqProviderAdapter implements AIProviderAdapter {
   }
 
   /**
-   * Mengambil daftar model yang tersedia melalui endpoint /models
+   * Mengambil daftar model yang tersedia melalui endpoint /models.
+   *
+   * M4: bila pengambilan live gagal (termasuk 401 — key tidak valid),
+   * kembalikan daftar cadangan dengan `isLive: false` + pesan error, BUKAN
+   * daftar hardcoded yang tampak seperti data live. UI menampilkan
+   * "daftar cadangan — pengambilan live gagal" untuk kasus ini. Untuk
+   * provider kustom, daftar cadangan tetap [] (perilaku PR #2).
+   *
+   * M3: heal `/v1` yang sama seperti testConnection diterapkan di sini —
+   * bila `/models` 404 dan base belum berakhiran `/v1`, coba `/v1/models`
+   * agar endpoint yang lolos tes tidak dilaporkan gagal mengambil model.
    */
-  async fetchAvailableModels(config: ProviderRuntimeConfig): Promise<AIModelInfo[]> {
+  async fetchAvailableModels(config: ProviderRuntimeConfig): Promise<AIModelListResult> {
     // Daftar model fallback hanya berlaku untuk Groq. Provider kustom TIDAK BOLEH
     // menerima daftar model Groq — model yang salah membuat admin memilih model
     // yang tidak ada di provider tersebut, lalu chat gagal 404 ("tidak terkoneksi").
@@ -526,18 +688,25 @@ export class GroqProviderAdapter implements AIProviderAdapter {
           ]
         : [];
 
+    const fallback = (error: string): AIModelListResult => ({
+      models: fallbackModels,
+      isLive: false,
+      error,
+    });
+
     if (!config.apiKey || !config.apiKey.trim()) {
-      return fallbackModels;
+      return fallback(`API key ${this.providerName} belum dikonfigurasi — daftar model tidak dapat diambil dari provider.`);
     }
 
     try {
       const endpointUrl = config.apiEndpoint || (this.providerName === 'groq' ? 'https://api.groq.com/openai/v1' : '');
-      if (!endpointUrl) return fallbackModels;
+      if (!endpointUrl) return fallback('Endpoint provider belum dikonfigurasi.');
       const endpointValidation = await validateAndPinEndpoint(endpointUrl, this.providerName === 'groq' ? 'groq' : undefined);
       const agent = createPinnedHttpsAgent(endpointValidation.hostname, endpointValidation.pinnedIp);
-      const url = `${endpointValidation.normalizedUrl}/models`;
+      const normalizedBase = endpointValidation.normalizedUrl;
+      const url = `${normalizedBase}/models`;
 
-      const res = await makeHttpsRequest(url, {
+      let res = await makeHttpsRequest(url, {
         method: 'GET',
         headers: {
           Authorization: `Bearer ${config.apiKey.trim()}`,
@@ -546,8 +715,31 @@ export class GroqProviderAdapter implements AIProviderAdapter {
         timeoutMs: 8000,
       });
 
+      // M3: heal /v1 seperti testConnection.
+      if (res.status === 404 && !normalizedBase.endsWith('/v1')) {
+        try {
+          const v1Res = await makeHttpsRequest(`${normalizedBase}/v1/models`, {
+            method: 'GET',
+            headers: {
+              Authorization: `Bearer ${config.apiKey.trim()}`,
+            },
+            agent,
+            timeoutMs: 8000,
+          });
+          if (v1Res.ok || v1Res.status !== 404) {
+            res = v1Res;
+          }
+        } catch {
+          // Gagal menghubungi /v1 — lanjut dengan respons aslinya.
+        }
+      }
+
       if (!res.ok) {
-        return fallbackModels;
+        const detail =
+          res.status === 401
+            ? 'API key ditolak provider (401 Unauthorized) — periksa kembali key yang tersimpan.'
+            : `Provider mengembalikan HTTP ${res.status} saat mengambil daftar model.`;
+        return fallback(detail);
       }
 
       const data = await res.json();
@@ -561,13 +753,15 @@ export class GroqProviderAdapter implements AIProviderAdapter {
             isDefault: m.id === (config.selectedModel || 'llama-3.3-70b-versatile'),
           }));
 
-        return models.length > 0 ? models : fallbackModels;
+        if (models.length > 0) {
+          return { models, isLive: true, error: null };
+        }
+        return fallback('Provider tidak mengembalikan model apa pun.');
       }
-    } catch {
-      // Fallback
+      return fallback('Respons daftar model provider tidak dikenali.');
+    } catch (err: any) {
+      return fallback(`Gagal menghubungi provider untuk daftar model: ${err?.message || 'error jaringan'}`);
     }
-
-    return fallbackModels;
   }
 
   /**
@@ -588,7 +782,29 @@ export class GroqProviderAdapter implements AIProviderAdapter {
 
     const lower = sanitizedMsg.toLowerCase();
 
-    if (lower.includes('invalid api key') || lower.includes('unauthorized') || lower.includes('authentication') || httpStatusCode === 401) {
+    // M5: error jaringan transient (tanpa respons HTTP sama sekali). Sinyal
+    // diambil dari pesan + kode error Node (error.code / cause.code), karena
+    // fetch yang gagal DNS/koneksi sering hanya membawa pesan generik
+    // "fetch failed" dengan kode di cause. Tanpa cabang ini semua error
+    // jaringan jatuh ke unknown_error dan tidak pernah memicu retry/fallback
+    // — padahal inilah kasus paling layak untuk keduanya. Cabang ini HARUS
+    // pertama: tidak ada respons HTTP berarti tidak ada status 4xx/5xx yang
+    // bisa diklaim dari substring pesan.
+    const networkSignal = `${lower} ${typeof error?.code === 'string' ? error.code : ''} ${typeof error?.cause?.code === 'string' ? error.cause.code : ''} ${typeof error?.cause?.message === 'string' ? error.cause.message : ''}`.toLowerCase();
+    const isNetworkError =
+      networkSignal.includes('enotfound') ||
+      networkSignal.includes('econnrefused') ||
+      networkSignal.includes('econnreset') ||
+      networkSignal.includes('eai_again') ||
+      networkSignal.includes('socket hang up') ||
+      networkSignal.includes('fetch failed');
+
+    if (isNetworkError) {
+      status = 'provider_error';
+      httpStatusCode = null; // tidak ada respons HTTP yang diterima
+      isRetryable = true;
+      isFallbackEligible = true;
+    } else if (lower.includes('invalid api key') || lower.includes('unauthorized') || lower.includes('authentication') || httpStatusCode === 401) {
       status = 'invalid_api_key';
       httpStatusCode = 401;
       isRetryable = false;

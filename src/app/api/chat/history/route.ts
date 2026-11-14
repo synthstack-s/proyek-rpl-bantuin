@@ -1,9 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getUserSession, getAdminSession } from '@/lib/auth';
-import { getSessionByUuid, getSessionMessages } from '@/lib/chatbot/repository';
+import { checkChatRateLimit } from '@/lib/rate-limiter';
+import { getSessionByUuid, getSessionMessagesPage } from '@/lib/chatbot/repository';
 
 export async function GET(req: NextRequest) {
   try {
+    // F9: batasi pembacaan riwayat per IP (30/menit, sama dengan route
+    // message) — tanpa ini, endpoint bisa dipakai untuk enumerasi/brute
+    // force UUID sesi tanpa batas.
+    const ip = req.headers.get('x-forwarded-for') || '127.0.0.1';
+    const rateLimit = checkChatRateLimit(`history:${ip}`, 30);
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: `Terlalu banyak permintaan riwayat. Silakan tunggu ${rateLimit.retryAfterSeconds} detik sebelum mencoba lagi.`,
+        },
+        { status: 429 }
+      );
+    }
+
     const { searchParams } = new URL(req.url);
     const sessionUuid = searchParams.get('uuid');
 
@@ -51,18 +67,53 @@ export async function GET(req: NextRequest) {
     // browser) bisa membaca riwayatnya. Mitigasi penuh (token klaim/akses per
     // sesi guest) berada di luar cakupan Batch 1 dan dicatat di REPORT.md.
 
-    const messages = await getSessionMessages(session.id);
+    // S9a/F13 — paginasi berbasis cursor: seluruh riwayat TIDAK LAGI
+    // dikembalikan sekaligus. `limit` = ukuran halaman (default 50, maks
+    // 100); `before` = cursor ID pesan (ambil halaman pesan yang LEBIH LAMA
+    // dari ID itu — isi dengan `pagination.nextCursor` dari respons
+    // sebelumnya). Halaman pertama berisi pesan-pesan terbaru.
+    const limitParam = searchParams.get('limit');
+    const beforeParam = searchParams.get('before');
+    let limit = 50;
+    if (limitParam !== null) {
+      const parsed = Number.parseInt(limitParam, 10);
+      if (!Number.isInteger(parsed) || parsed < 1) {
+        return NextResponse.json(
+          { success: false, message: 'Parameter limit harus berupa bilangan bulat positif.' },
+          { status: 400 }
+        );
+      }
+      limit = Math.min(100, parsed);
+    }
+    let beforeId: number | null = null;
+    if (beforeParam !== null) {
+      const parsed = Number.parseInt(beforeParam, 10);
+      if (!Number.isInteger(parsed)) {
+        return NextResponse.json(
+          { success: false, message: 'Parameter before harus berupa ID pesan (bilangan bulat).' },
+          { status: 400 }
+        );
+      }
+      beforeId = parsed;
+    }
+
+    const page = await getSessionMessagesPage(session.id, { limit, beforeId });
 
     return NextResponse.json({
       success: true,
       session,
-      messages: messages.map(m => ({
+      messages: page.messages.map(m => ({
         id: m.id,
         role: m.role,
         message: m.message,
         metadata: m.rawMetadata,
         createdAt: m.createdAt,
       })),
+      pagination: {
+        limit,
+        hasMore: page.hasMore,
+        nextCursor: page.nextCursor,
+      },
     });
   } catch (error: any) {
     console.error('Error in GET /api/chat/history:', error);

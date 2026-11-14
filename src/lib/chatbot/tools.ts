@@ -10,6 +10,7 @@
 import { ChatUserContext } from './types';
 import * as DataService from './data-service';
 import * as ActionService from './action-service';
+import { setPendingTechnicianAction } from './context-manager';
 
 // Re-ekspor seluruh fungsi data service
 export * from './data-service';
@@ -37,14 +38,50 @@ function dbResult(data: any): { success: boolean; data?: any; error?: string } {
 }
 
 /**
+ * T8 — Tampilan publik teknisi: nama, rating, spesialisasi, pengalaman, dan
+ * ketersediaan saja — TANPA nomor telepon, email, atau ID pengguna internal.
+ * Dipakai untuk tamu dan peran non-admin. Kontak teknisi tetap tersedia
+ * lewat jalur berizin yang sudah ada (pesanan/tugas milik sendiri, mis.
+ * getCustomerRepairs / getTechnicianAssignedTasks) — bukan lewat pencarian
+ * bebas ini. Admin mendapat rekaman lengkap (lihat case searchTechnicians).
+ */
+export function toPublicTechnicianView(t: any): {
+  name: string;
+  rating: number;
+  reviewsCount: number;
+  experienceYears: number;
+  isAvailable: boolean;
+  verifiedStatus: string;
+  specializations: string[];
+} {
+  return {
+    name: t?.name,
+    rating: Number(t?.rating || 0),
+    reviewsCount: Number(t?.reviewsCount || 0),
+    experienceYears: Number(t?.experienceYears || 0),
+    isAvailable: Boolean(t?.isAvailable),
+    verifiedStatus: t?.verifiedStatus,
+    specializations: Array.isArray(t?.specializations) ? t.specializations : [],
+  };
+}
+
+/**
  * Eksekusi tool berbasis peran pengguna (Role-Based Access Control)
  * Memvalidasi apakah peran pengguna diizinkan memanggil fungsi tersebut
  * dan menyuntikkan ID sesi tepercaya untuk mencegah eksfiltrasi data orang lain (Anti-IDOR).
+ *
+ * S9g — `sessionId` opsional (ID numerik sesi chat): bila diisi, aksi
+ * teknisi yang mengembalikan `requiresConfirmation` disimpan sebagai aksi
+ * tertunda di sesi itu, sehingga jawaban "ya" teknisi dapat mengeksekusinya
+ * lewat cabang konfirmasi engine. Tanpa `sessionId`, alur konfirmasi
+ * tool tidak dapat diselesaikan (pemanggil wajib mengopernya bila tool
+ * aksi dideklarasikan ke AI).
  */
 export async function executeRoleBasedTool(
   toolName: string,
   args: any,
-  userContext: ChatUserContext
+  userContext: ChatUserContext,
+  sessionId?: number
 ): Promise<{ success: boolean; data?: any; error?: string }> {
   try {
     switch (toolName) {
@@ -164,7 +201,39 @@ export async function executeRoleBasedTool(
             error: 'Akses ditolak: Hanya teknisi yang dapat memperbarui status tugas.',
           };
         }
-        return await ActionService.executeTechnicianTaskStatusUpdate(userContext, args);
+        // F10 + S9g: hasil action-service diteruskan utuh — termasuk
+        // requiresConfirmation + confirmationPrompt pada panggilan pertama
+        // tanpa confirmed — agar AI dapat menanyakan konfirmasi ke teknisi.
+        // `confirmed` dari argumen AI SELALU DIBUANG: model AI tidak boleh
+        // mengonfirmasi atas nama teknisi (bila tidak, satu tool call AI
+        // bisa mengeksekusi mutasi status tanpa teknisi pernah menjawab
+        // "ya"). Eksekusi hanya terjadi lewat cabang konfirmasi engine,
+        // yang memanggil action-service langsung dengan confirmed: true
+        // setelah teknisi menjawab "ya" — dan cabang itu memakai aksi
+        // tertunda yang disimpan di bawah (bila sessionId tersedia).
+        // (Tool ini saat ini tidak dideklarasikan ke AI di engine.ts, jadi
+        // jalur ini dorman sampai dideklarasikan; alur konfirmasi utama
+        // adalah jalur regex di engine.ts.)
+        const { confirmed: _ignoredConfirmed, ...technicianActionArgs } = args || {};
+        const technicianActionResult = await ActionService.executeTechnicianTaskStatusUpdate(
+          userContext,
+          technicianActionArgs
+        );
+        if (
+          technicianActionResult.requiresConfirmation &&
+          typeof sessionId === 'number' &&
+          userContext.userId &&
+          technicianActionResult.data?.orderCode &&
+          technicianActionResult.data?.action
+        ) {
+          setPendingTechnicianAction(sessionId, {
+            orderCode: String(technicianActionResult.data.orderCode),
+            action: technicianActionResult.data.action,
+            userId: userContext.userId,
+            createdAt: Date.now(),
+          });
+        }
+        return technicianActionResult;
 
       // ----------------------------------------------------------------------
       // TOOL KHUSUS ADMINISTRATOR (Hanya Admin Terautentikasi)
@@ -285,7 +354,12 @@ export async function executeRoleBasedTool(
             error: 'Akses ditolak: Hanya administrator yang dapat membuat snapshot operasional.',
           };
         }
-        return await ActionService.executeAdminCreateOperationalSnapshot(userContext, args);
+        // S9g (pengerasan sekeluarga): `confirmed` dari argumen AI dibuang
+        // — model tidak boleh mengonfirmasi pembuatan snapshot atas nama
+        // admin; konfirmasi harus datang dari admin sendiri lewat alur
+        // dua langkah action-service.
+        const { confirmed: _ignoredSnapshotConfirmed, ...snapshotArgs } = args || {};
+        return await ActionService.executeAdminCreateOperationalSnapshot(userContext, snapshotArgs);
 
       // ----------------------------------------------------------------------
       // TOOL DATABASE INTELLIGENCE LINTAS TABEL (Role-Governed)
@@ -299,6 +373,19 @@ export async function executeRoleBasedTool(
           if (typeof v === 'string' && v.trim()) return v.split(',').map((x) => x.trim()).filter(Boolean);
           return undefined;
         };
+        // N23: entri JOIN boleh menyebut FK eksplisit dengan sintaks
+        // "tabel:foreignKey" (mis. "users:technician_id") untuk memilih
+        // relasi kedua bila dua tabel punya lebih dari satu relasi.
+        // Entri tanpa ':' berperilaku seperti sebelumnya (relasi pertama).
+        const splitJoins = (v: any): DataService.GovernedQuerySpec['joins'] => {
+          const list = splitList(v);
+          if (!list) return undefined;
+          return list.map((entry) => {
+            const idx = entry.indexOf(':');
+            if (idx === -1) return entry;
+            return { table: entry.slice(0, idx).trim(), via: entry.slice(idx + 1).trim() };
+          });
+        };
         const filters: DataService.GovernedQueryFilter[] = [];
         if (args?.filterColumn && args?.filterOperator) {
           filters.push({ column: args.filterColumn, operator: args.filterOperator, value: args.filterValue ?? '' });
@@ -309,7 +396,7 @@ export async function executeRoleBasedTool(
         const spec: DataService.GovernedQuerySpec = {
           table: args?.table,
           columns: splitList(args?.columns),
-          joins: splitList(args?.joins),
+          joins: splitJoins(args?.joins),
           filters: filters.length > 0 ? filters : undefined,
           aggregate: args?.aggregateFunction
             ? { function: args.aggregateFunction, column: args?.aggregateColumn }
@@ -376,17 +463,30 @@ export async function executeRoleBasedTool(
         };
 
       case 'searchTechnicians':
-      case 'searchDatabaseTechnicians':
+      case 'searchDatabaseTechnicians': {
         const techQuery = typeof args === 'string'
           ? args
           : (args?.query || args?.searchTerm || args?.name || args?.q || '');
-        return {
-          success: true,
-          data: await DataService.searchDatabaseTechnicians(techQuery, {
-            categoryName: args?.categoryName,
-            limit: args?.limit,
-          }),
-        };
+        // N16: opsi includeUnverified HANYA diisi untuk admin yang secara
+        // eksplisit memintanya — nilai mentah dari argumen AI tidak pernah
+        // diteruskan langsung, agar tamu tidak bisa meminta daftar teknisi
+        // pending/rejected/suspended.
+        const technicians = await DataService.searchDatabaseTechnicians(techQuery, {
+          categoryName: args?.categoryName,
+          limit: args?.limit,
+          includeUnverified: userContext.role === 'admin' && args?.includeUnverified === true,
+        });
+        // T8: admin mendapat rekaman lengkap (termasuk kontak) untuk
+        // keperluan operasional; semua peran lain — tamu, customer,
+        // teknisi — hanya mendapat tampilan publik tanpa PII kontak.
+        // Tidak ada aturan RBAC yang memberi peran non-admin hak atas
+        // kontak teknisi sembarang; kontak teknisi yang ditugaskan tetap
+        // tersedia lewat pesanan/tugas milik sendiri.
+        if (userContext.role === 'admin') {
+          return { success: true, data: technicians };
+        }
+        return { success: true, data: technicians.map(toPublicTechnicianView) };
+      }
 
       case 'searchInvoices':
       case 'searchDatabaseInvoices':

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAdminSession } from '@/lib/auth';
 import { AIProviderManager } from '@/lib/ai/provider-manager';
 import { getProviderRuntimeConfig } from '@/lib/ai/repository';
+import { checkAdminAiRateLimit } from '@/lib/rate-limiter';
 import { AIProviderType } from '@/lib/ai/types';
 
 /**
@@ -19,12 +20,31 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    const { provider, apiEndpoint, apiKey, selectedModel, usesStoredCredentials } = body;
+    const { provider, apiEndpoint, apiKey, selectedModel, usesStoredCredentials, requestTimeoutMs } = body;
 
     if (!provider || typeof provider !== 'string' || !provider.trim()) {
       return NextResponse.json(
         { success: false, message: "Parameter 'provider' wajib diisi." },
         { status: 400 }
+      );
+    }
+
+    // M2: normalisasi slug provider (trim + lowercase) agar konsisten dengan
+    // slug tersimpan di database.
+    const normalizedProvider = provider.trim().toLowerCase() as AIProviderType;
+
+    // L8: batasi tes koneksi per admin per provider (10 tes/menit) — setiap
+    // tes melakukan lookup DNS + 2 request HTTPS ke provider dan menulis
+    // baris log ke DB. Dicek SEBELUM inferensi kredensial (yang membaca DB)
+    // agar panggilan yang dibatasi tidak membebani DB sama sekali.
+    const rateLimit = checkAdminAiRateLimit(`ai-test:${adminSession.userId}:${normalizedProvider}`, 10);
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: `Terlalu banyak tes koneksi untuk provider ${normalizedProvider}. Silakan tunggu ${rateLimit.retryAfterSeconds} detik sebelum mencoba lagi.`,
+        },
+        { status: 429 }
       );
     }
 
@@ -43,7 +63,7 @@ export async function POST(req: NextRequest) {
     if (typeof usesStoredCredentials === 'boolean') {
       storedCredentialsTest = usesStoredCredentials;
     } else {
-      const stored = await getProviderRuntimeConfig(provider as AIProviderType);
+      const stored = await getProviderRuntimeConfig(normalizedProvider);
       const keyDiffers =
         typeof apiKey === 'string' && apiKey.trim().length > 0 &&
         apiKey.trim() !== (stored.apiKey || '').trim();
@@ -58,11 +78,14 @@ export async function POST(req: NextRequest) {
 
     const manager = AIProviderManager.getInstance();
     const result = await manager.testProviderConnection(
-      provider as AIProviderType,
+      normalizedProvider,
       {
         apiEndpoint,
         apiKey,
         selectedModel,
+        // L7: teruskan timeout dari form ke probe adapter (manager menjepit
+        // ke 5s–120s; nilai non-numerik/tidak ada memakai timeout tersimpan).
+        requestTimeoutMs,
       },
       adminSession.userId,
       { usesStoredCredentials: storedCredentialsTest }
