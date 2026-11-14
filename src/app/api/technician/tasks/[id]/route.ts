@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getUserSession } from '@/lib/auth';
 import { query } from '@/lib/db';
+import { notifyOrderStatusChange } from '@/lib/wa-notifications';
 
 interface RouteContext {
   params: Promise<{ id: string }>;
@@ -125,6 +126,15 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
           ]
         );
 
+        // Notifikasi WhatsApp ke pelanggan (best-effort; no-op dilewati layanan).
+        await notifyOrderStatusChange({
+          repairRequestId: repairId,
+          orderCode: task.order_code,
+          customerId: task.customer_id,
+          prevStatus: task.current_status,
+          newStatus: 'assigned',
+        });
+
         return NextResponse.json({
           success: true,
           message: 'Tugas perbaikan berhasil diterima.',
@@ -153,6 +163,17 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
            VALUES (?, ?, 'submitted', ?, 'technician', ?)`,
           [repairId, task.current_status, session.userId, `Teknisi berhalangan: ${reason}`]
         );
+
+        // Notifikasi WhatsApp ke pelanggan: teknisi berhalangan, pesanan
+        // kembali mengantre (best-effort; no-op dilewati layanan).
+        await notifyOrderStatusChange({
+          repairRequestId: repairId,
+          orderCode: task.order_code,
+          customerId: task.customer_id,
+          prevStatus: task.current_status,
+          newStatus: 'submitted',
+          variant: 'technician_declined',
+        });
 
         return NextResponse.json({
           success: true,
@@ -183,6 +204,15 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
           ]
         );
 
+        // Notifikasi WhatsApp ke pelanggan (best-effort; no-op dilewati layanan).
+        await notifyOrderStatusChange({
+          repairRequestId: repairId,
+          orderCode: task.order_code,
+          customerId: task.customer_id,
+          prevStatus: task.current_status,
+          newStatus: 'scheduled',
+        });
+
         return NextResponse.json({
           success: true,
           message: 'Status diperbarui: Dalam perjalanan ke lokasi.',
@@ -201,6 +231,15 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
            VALUES (?, ?, 'in_diagnosis', ?, 'technician', 'Teknisi tiba di lokasi dan memulai inspeksi fisik unit')`,
           [repairId, task.current_status, session.userId]
         );
+
+        // Notifikasi WhatsApp ke pelanggan (best-effort; no-op dilewati layanan).
+        await notifyOrderStatusChange({
+          repairRequestId: repairId,
+          orderCode: task.order_code,
+          customerId: task.customer_id,
+          prevStatus: task.current_status,
+          newStatus: 'in_diagnosis',
+        });
 
         return NextResponse.json({
           success: true,
@@ -272,6 +311,16 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
           ]
         );
 
+        // Notifikasi WhatsApp ke pelanggan (best-effort; no-op dilewati layanan).
+        await notifyOrderStatusChange({
+          repairRequestId: repairId,
+          orderCode: task.order_code,
+          customerId: task.customer_id,
+          prevStatus: task.current_status,
+          newStatus: 'estimated',
+          totalEstimate: total,
+        });
+
         return NextResponse.json({
           success: true,
           message: 'Estimasi biaya berhasil diajukan ke pelanggan.',
@@ -290,6 +339,15 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
            VALUES (?, ?, 'in_repair', ?, 'technician', 'Teknisi memulai pengerjaan fisik perbaikan unit')`,
           [repairId, task.current_status, session.userId]
         );
+
+        // Notifikasi WhatsApp ke pelanggan (best-effort; no-op dilewati layanan).
+        await notifyOrderStatusChange({
+          repairRequestId: repairId,
+          orderCode: task.order_code,
+          customerId: task.customer_id,
+          prevStatus: task.current_status,
+          newStatus: 'in_repair',
+        });
 
         return NextResponse.json({
           success: true,
@@ -362,6 +420,17 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
             repairId,
           ]
         );
+
+        // Notifikasi WhatsApp ke pelanggan (best-effort; no-op dilewati layanan).
+        await notifyOrderStatusChange({
+          repairRequestId: repairId,
+          orderCode: task.order_code,
+          customerId: task.customer_id,
+          prevStatus: task.current_status,
+          newStatus: 'completed',
+          invoiceNumber: invNumber,
+          grandTotal,
+        });
 
         return NextResponse.json({
           success: true,

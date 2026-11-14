@@ -1,6 +1,8 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import WhatsAppSendModal from '@/components/admin/WhatsAppSendModal';
+import WhatsAppHistorySection from '@/components/admin/WhatsAppHistorySection';
 import {
   Bell,
   Send,
@@ -131,6 +133,10 @@ export default function NotificationsAdminPage() {
   const [isBroadcastModalOpen, setIsBroadcastModalOpen] = useState<boolean>(false);
   const [detailItem, setDetailItem] = useState<NotificationItem | null>(null);
   const [isSendingBroadcast, setIsSendingBroadcast] = useState<boolean>(false);
+
+  // WhatsApp manual: modal kirim + kunci refresh riwayat
+  const [isWaModalOpen, setIsWaModalOpen] = useState<boolean>(false);
+  const [waHistoryRefreshKey, setWaHistoryRefreshKey] = useState<number>(0);
 
   // Broadcast Form State
   const [broadcastForm, setBroadcastForm] = useState({
@@ -375,6 +381,14 @@ export default function NotificationsAdminPage() {
             <Send className="w-3.5 h-3.5" />
             Kirim Pengumuman
           </button>
+
+          <button
+            onClick={() => setIsWaModalOpen(true)}
+            className="px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-[#11120D] text-xs font-bold shadow-md flex items-center gap-2 transition hover:scale-105 active:scale-95"
+          >
+            <MessageSquare className="w-3.5 h-3.5" />
+            Kirim WhatsApp
+          </button>
         </div>
       </div>
 
@@ -426,6 +440,9 @@ export default function NotificationsAdminPage() {
           <span className="text-[11px] text-[#8B8878]">Order & invoice transaksi</span>
         </div>
       </div>
+
+      {/* Riwayat WhatsApp (manual & otomatis) */}
+      <WhatsAppHistorySection refreshKey={waHistoryRefreshKey} />
 
       {/* Filter & Search Bar */}
       <div className="bg-[#181913]/90 p-4 rounded-2xl border border-[#D8CFBC]/15 shadow-sm backdrop-blur-xl space-y-3">
@@ -866,6 +883,14 @@ export default function NotificationsAdminPage() {
           </div>
         </div>
       )}
+
+      {/* Modal Kirim WhatsApp Manual */}
+      <WhatsAppSendModal
+        isOpen={isWaModalOpen}
+        onClose={() => setIsWaModalOpen(false)}
+        onSent={() => setWaHistoryRefreshKey((k) => k + 1)}
+        showToast={showToast}
+      />
 
       {/* Modal Detail Notifikasi */}
       {detailItem && (
