@@ -421,13 +421,13 @@ export async function executeRoleBasedTool(
         const userQuery = typeof args === 'string'
           ? args
           : (args?.query || args?.searchTerm || args?.phone || args?.phoneNumber || args?.email || args?.name || args?.q || '');
-        return {
-          success: true,
-          data: await DataService.searchDatabaseUsers(userQuery, {
-            role: args?.role,
-            limit: args?.limit,
-          }),
-        };
+        // A16 — getter pencarian mengembalikan null saat DB error (tiga
+        // keadaan); dbResult mengubahnya menjadi error bersih, bukan
+        // success:true dengan data null.
+        return dbResult(await DataService.searchDatabaseUsers(userQuery, {
+          role: args?.role,
+          limit: args?.limit,
+        }));
 
       case 'searchOrders':
       case 'searchDatabaseOrders':
@@ -435,13 +435,11 @@ export async function executeRoleBasedTool(
           ? args
           : (args?.query || args?.searchTerm || args?.orderCode || args?.orderId || args?.device || args?.q || '');
         if (userContext.role === 'admin') {
-          return {
-            success: true,
-            data: await DataService.searchDatabaseOrders(orderQuery, {
-              status: args?.status,
-              limit: args?.limit,
-            }),
-          };
+          // A16 — null = DB error; dbResult mengubahnya menjadi error bersih.
+          return dbResult(await DataService.searchDatabaseOrders(orderQuery, {
+            status: args?.status,
+            limit: args?.limit,
+          }));
         } else if (userContext.role === 'customer' && userContext.userId) {
           return dbResult(
             await DataService.getCustomerRepairs(userContext.userId, {
@@ -476,6 +474,9 @@ export async function executeRoleBasedTool(
           limit: args?.limit,
           includeUnverified: userContext.role === 'admin' && args?.includeUnverified === true,
         });
+        // A16 — null = DB error (bukan "tidak ada teknisi"); tanpa penjaga
+        // ini, `.map(...)` di bawah melempar TypeError untuk peran non-admin.
+        if (technicians === null) return dbResult(null);
         // T8: admin mendapat rekaman lengkap (termasuk kontak) untuk
         // keperluan operasional; semua peran lain — tamu, customer,
         // teknisi — hanya mendapat tampilan publik tanpa PII kontak.
@@ -494,13 +495,11 @@ export async function executeRoleBasedTool(
           ? args
           : (args?.query || args?.searchTerm || args?.invoiceNumber || args?.orderCode || args?.q || '');
         if (userContext.role === 'admin') {
-          return {
-            success: true,
-            data: await DataService.searchDatabaseInvoices(invoiceQuery, {
-              status: args?.status,
-              limit: args?.limit,
-            }),
-          };
+          // A16 — null = DB error; dbResult mengubahnya menjadi error bersih.
+          return dbResult(await DataService.searchDatabaseInvoices(invoiceQuery, {
+            status: args?.status,
+            limit: args?.limit,
+          }));
         } else if (userContext.role === 'customer' && userContext.userId) {
           return dbResult(
             await DataService.getCustomerInvoices(userContext.userId, {
