@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAdminSession } from '@/lib/auth';
 import { query } from '@/lib/db';
 import { recordAdminAudit } from '@/lib/audit';
+import { notifyAssignmentOffered, notifyOrderStatusChange } from '@/lib/wa-notifications';
 
 /**
  * GET /api/admin/assignments
@@ -248,6 +249,22 @@ export async function POST(request: NextRequest) {
       newValues: { repair_request_id: repairId, technician_id: techId, technician_name: tech.full_name, notes },
       ipAddress: request.headers.get('x-forwarded-for') || null,
       userAgent: request.headers.get('user-agent') || null,
+    });
+
+    // 9. Notifikasi WhatsApp (best-effort — kegagalan tidak membatalkan
+    // penugasan): teknisi diberitahu tawaran baru; pelanggan diberitahu
+    // bila status pesanan ikut berubah (draft/submitted -> assigned).
+    await notifyAssignmentOffered({
+      repairRequestId: repairId,
+      orderCode: order.order_code,
+      technicianId: techId,
+    });
+    await notifyOrderStatusChange({
+      repairRequestId: repairId,
+      orderCode: order.order_code,
+      customerId: order.customer_id,
+      prevStatus,
+      newStatus: nextStatus,
     });
 
     return NextResponse.json({

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAdminSession } from '@/lib/auth';
 import { query } from '@/lib/db';
 import { recordAdminAudit } from '@/lib/audit';
+import { notifyOrderCreated } from '@/lib/wa-notifications';
 import { generateOrderCode } from '@/lib/validations/repair';
 
 /**
@@ -246,6 +247,15 @@ export async function POST(request: NextRequest) {
       newValues: { orderCode, customer_id, category_id, service_id, device_brand, device_model },
       ipAddress: request.headers.get('x-forwarded-for') || null,
       userAgent: request.headers.get('user-agent') || null,
+    });
+
+    // Notifikasi WhatsApp ke pelanggan: pesanan ini dibuatkan oleh admin,
+    // jadi pelanggan perlu diberi tahu (best-effort — kegagalan tidak
+    // membatalkan pembuatan pesanan).
+    await notifyOrderCreated({
+      repairRequestId: newRepairId,
+      orderCode,
+      customerId: Number(customer_id),
     });
 
     return NextResponse.json({

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getUserSession, getAdminSession } from '@/lib/auth';
 import { query } from '@/lib/db';
 import { createScheduleSchema } from '@/lib/validations/schedule';
+import { notifyScheduleSet } from '@/lib/wa-notifications';
 
 interface RouteContext {
   params: Promise<{ id: string }>;
@@ -177,6 +178,20 @@ export async function POST(request: NextRequest, context: RouteContext) {
         `Pesanan #${order.order_code}: Teknisi ${order.technician_name || 'mitra'} dijadwalkan berkunjung pada ${scheduled_date} pukul ${time_slot_start} - ${time_slot_end} WIB.`,
       ]
     );
+
+    // 5. Notifikasi WhatsApp ke pelanggan (best-effort — kegagalan tidak
+    // membatalkan penyimpanan jadwal). Bukan perubahan status pesanan,
+    // tetapi peristiwa pesanan yang sama pentingnya bagi pelanggan.
+    await notifyScheduleSet({
+      repairRequestId: repairId,
+      orderCode: order.order_code,
+      customerId: order.customer_id,
+      technicianName: order.technician_name,
+      scheduledDate: scheduled_date,
+      timeSlotStart: time_slot_start,
+      timeSlotEnd: time_slot_end,
+      rescheduled: scheduleStatus === 'rescheduled',
+    });
 
     return NextResponse.json({
       success: true,

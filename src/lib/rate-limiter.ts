@@ -184,6 +184,10 @@ const chatRateLimitMap = new Map<string, { count: number; resetAt: number }>();
 // pemakaian normal admin tidak boleh berbagi kuota dengan rate limit chat.
 const adminAiRateLimitMap = new Map<string, { count: number; resetAt: number }>();
 
+// Map terpisah untuk pengiriman WhatsApp manual admin — mengikuti pola L8:
+// kuota WA tidak boleh berbagi dengan chat maupun endpoint admin AI.
+const adminWaRateLimitMap = new Map<string, { count: number; resetAt: number }>();
+
 // Helper jendela geser per-menit yang dipakai checkChatRateLimit dan
 // checkAdminAiRateLimit (logika yang sama, map terpisah). Panggilan yang
 // lolos ikut dihitung; panggilan yang dibatasi TIDAK menambah hitungan.
@@ -231,5 +235,20 @@ export function checkAdminAiRateLimit(identifier: string, maxRequestsPerMinute =
   retryAfterSeconds?: number;
 } {
   return checkWindowedRateLimit(adminAiRateLimitMap, identifier, maxRequestsPerMinute);
+}
+
+/**
+ * Rate limit per-admin untuk pengiriman WhatsApp manual (route
+ * /api/admin/whatsapp/send). Default 10/menit per admin — pemakaian normal
+ * jauh di bawah ini, sementara sesi admin yang dicuri / skrip berulang
+ * tidak bisa membanjiri penerima atau menghabiskan kuota Fonnte.
+ * Notifikasi OTOMATIS (perubahan status pesanan) tidak memakai limit ini:
+ * ia sudah dibatasi satu pesan per transisi + dedupe di wa-notifications.
+ */
+export function checkAdminWaRateLimit(identifier: string, maxRequestsPerMinute = 10): {
+  allowed: boolean;
+  retryAfterSeconds?: number;
+} {
+  return checkWindowedRateLimit(adminWaRateLimitMap, identifier, maxRequestsPerMinute);
 }
 

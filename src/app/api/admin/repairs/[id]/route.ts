@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAdminSession } from '@/lib/auth';
 import { query } from '@/lib/db';
 import { recordAdminAudit } from '@/lib/audit';
+import { notifyAssignmentOffered, notifyOrderStatusChange } from '@/lib/wa-notifications';
 
 interface RouteContext {
   params: Promise<{ id: string }>;
@@ -241,6 +242,23 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
         userAgent: request.headers.get('user-agent') || null,
       });
 
+      // Notifikasi WhatsApp (best-effort — kegagalan tidak membatalkan
+      // penugasan): teknisi selalu diberitahu tawaran baru; pelanggan
+      // diberitahu bila status pesanan ikut berubah (draft/submitted ->
+      // assigned; transisi no-op dilewati layanan).
+      await notifyAssignmentOffered({
+        repairRequestId: repairId,
+        orderCode: currentOrder.order_code,
+        technicianId: techId,
+      });
+      await notifyOrderStatusChange({
+        repairRequestId: repairId,
+        orderCode: currentOrder.order_code,
+        customerId: currentOrder.customer_id,
+        prevStatus,
+        newStatus: nextStatus,
+      });
+
       return NextResponse.json({
         success: true,
         message: `Teknisi ${techInfo.full_name} berhasil ditugaskan ke pesanan ${currentOrder.order_code}`,
@@ -296,6 +314,16 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
         newValues: { current_status: status, notes },
         ipAddress: request.headers.get('x-forwarded-for') || null,
         userAgent: request.headers.get('user-agent') || null,
+      });
+
+      // Notifikasi WhatsApp ke pelanggan (best-effort; transisi no-op
+      // dilewati layanan — status yang sama tidak mengirim pesan).
+      await notifyOrderStatusChange({
+        repairRequestId: repairId,
+        orderCode: currentOrder.order_code,
+        customerId: currentOrder.customer_id,
+        prevStatus,
+        newStatus: status,
       });
 
       return NextResponse.json({
