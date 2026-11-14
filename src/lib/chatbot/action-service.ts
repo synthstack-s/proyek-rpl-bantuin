@@ -20,6 +20,7 @@
 
 import { query, pool } from '@/lib/db';
 import { ChatUserContext } from './types';
+import { notifyOrderStatusChange } from '@/lib/wa-notifications';
 
 export interface ActionExecutionResult {
   success: boolean;
@@ -308,6 +309,19 @@ export async function executeTechnicianTaskStatusUpdate(
   } finally {
     if (conn) conn.release();
   }
+
+  // Notifikasi WhatsApp ke pelanggan — SETELAH commit berhasil (bukan di
+  // dalam transaksi; best-effort, tidak pernah throw). Bila transisi yang
+  // sama juga dipicu lewat route HTTP, dedupe 5 menit di layanan mencegah
+  // pesan ganda; transisi no-op (mis. accept saat pesanan sudah 'assigned'
+  // karena penugasan ulang) dilewati layanan.
+  await notifyOrderStatusChange({
+    repairRequestId: repairId,
+    orderCode,
+    customerId: task.customer_id,
+    prevStatus: task.current_status,
+    newStatus: transition.repairTo,
+  });
 
   return {
     success: true,

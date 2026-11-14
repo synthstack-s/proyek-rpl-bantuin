@@ -527,7 +527,7 @@ export function getExpertSystemDiagnosis(
         ],
         safetyHazardWarning: 'Jangan biarkan tetesan air mengenai stopkontak listrik atau kabel di dinding!',
         recommendedAction: 'Lakukan cuci servis AC dan flushing pipa drainase oleh teknisi resmi BANTUIN.',
-        estimatedLaborCostRange: 'Rp 65.000 - Rp 100.000',
+        estimatedLaborCostRange: 'Rp 65.000 - Rp 100.000 (perkiraan kasar, bukan tarif resmi)',
       };
       return {
         reply: `Halo! Tetesan air dari unit indoor AC umumnya disebabkan oleh **saluran pembuangan (drainase) yang tersumbat** kotoran atau lumut, sehingga air kondensasi meluap.
@@ -567,7 +567,7 @@ Untuk mengatasi sumbatan saluran secara tuntas, teknisi BANTUIN dapat melakukan 
       ],
       safetyHazardWarning: null,
       recommendedAction: 'Jadwalkan inspeksi teknisi BANTUIN untuk pengecekan ampere kompresor dan tekanan freon.',
-      estimatedLaborCostRange: 'Rp 75.000 - Rp 150.000',
+      estimatedLaborCostRange: 'Rp 75.000 - Rp 150.000 (perkiraan kasar, bukan tarif resmi)',
     };
     return {
       reply: `Halo! Keluhan AC tidak dingin atau hanya mengeluarkan angin adalah kasus yang sangat umum pada pendingin ruangan.
@@ -614,7 +614,7 @@ Jika setelah membersihkan filter udara tetap tidak dingin, kemungkinan besar fre
       ],
       safetyHazardWarning: 'Jangan mencongkel bunga es pada evaporator menggunakan pisau atau benda tajam!',
       recommendedAction: 'Jadwalkan pemeriksaan sistem defrost atau kelistrikan kulkas oleh mitra teknisi BANTUIN.',
-      estimatedLaborCostRange: 'Rp 80.000 - Rp 180.000',
+      estimatedLaborCostRange: 'Rp 80.000 - Rp 180.000 (perkiraan kasar, bukan tarif resmi)',
     };
     return {
       reply: `Halo! Masalah kulkas tidak dingin atau penumpukan bunga es yang tidak merata biasanya berkaitan dengan sistem sirkulasi udara atau komponen pengatur suhu (defrost system).
@@ -654,7 +654,7 @@ Teknisi BANTUIN dapat melakukan pengecekan relay kompresor, sensor defrost, dan 
       ],
       safetyHazardWarning: 'Cabut steker dari stopkontak sebelum memeriksa saluran air atau bagian belakang unit!',
       recommendedAction: 'Gunakan layanan perbaikan mesin cuci resmi BANTUIN untuk pengecekan mekanikal dan modul.',
-      estimatedLaborCostRange: 'Rp 85.000 - Rp 200.000',
+      estimatedLaborCostRange: 'Rp 85.000 - Rp 200.000 (perkiraan kasar, bukan tarif resmi)',
     };
     return {
       reply: `Halo! Gangguan pada mesin cuci umumnya terjadi pada saluran pembuangan yang tersumbat atau komponen mekanikal motor penggerak.
@@ -973,8 +973,16 @@ Saat ini asisten AI BANTUIN aktif beroperasi menggunakan:
       // pendaftaran. Cabang ini HARUS sebelum cabang pendaftaran dan
       // cabang katalog (pola katalog menangkap kata "katalog", sehingga
       // "katalog harga" pun harus sampai ke sini).
-      const catalog = await DataService.getPublicCatalog();
-      const allServices = catalog.flatMap((c) => c.services.map((s) => ({ ...s, categoryName: c.categoryName })));
+      const catalog = await DataService.getPublicCatalogWithSource();
+      const allServices = catalog.items.flatMap((c) => c.services.map((s) => ({ ...s, categoryName: c.categoryName })));
+      // A25 — katalog fallback statis (DB offline/kosong) hanya memuat 7
+      // layanan dari 15 seed: beri label agar tamu tidak mengira daftarnya
+      // lengkap dan harganya terkini.
+      const catalogNote = catalog.source === 'fallback-offline'
+        ? '\n\n_(data katalog tersimpan — database tidak dapat diakses saat ini)_'
+        : catalog.source === 'fallback-empty'
+        ? '\n\n_(katalog di database masih kosong — menampilkan data katalog tersimpan)_'
+        : '';
       if (allServices.length === 0) {
         directReply = 'Belum ada layanan aktif yang tercatat di katalog BANTUIN.';
       } else {
@@ -982,13 +990,21 @@ Saat ini asisten AI BANTUIN aktif beroperasi menggunakan:
         directReply = `💰 **Daftar Harga Layanan BANTUIN:**\n\n` +
           shown.map((s, i) => `**${i + 1}. ${s.name}** (${s.categoryName})\n- Harga Dasar: **Rp ${s.basePrice.toLocaleString('id-ID')}**\n- Estimasi Durasi: ${s.estimatedDurationMin} menit`).join('\n') +
           (allServices.length > shown.length ? `\n\n_...dan ${allServices.length - shown.length} layanan lainnya._` : '') +
-          `\n\n_Harga di atas adalah tarif dasar. Biaya akhir ditentukan setelah teknisi melakukan diagnosis dan disetujui oleh Anda._`;
+          `\n\n_Harga di atas adalah tarif dasar. Biaya akhir ditentukan setelah teknisi melakukan diagnosis dan disetujui oleh Anda._` +
+          catalogNote;
       }
     } else if (/layanan\s+(tersedia|apa\s+saja)|katalog|kategori\s+alat/i.test(norm)) {
-      const categories = await DataService.getPublicApplianceCategories();
+      const categories = await DataService.getPublicApplianceCategoriesWithSource();
+      // A25 — label yang sama bila daftar kategori berasal dari fallback.
+      const categoriesNote = categories.source === 'fallback-offline'
+        ? '\n\n_(data katalog tersimpan — database tidak dapat diakses saat ini)_'
+        : categories.source === 'fallback-empty'
+        ? '\n\n_(katalog di database masih kosong — menampilkan data katalog tersimpan)_'
+        : '';
       directReply = `🏠 **Kategori Peralatan Rumah Tangga yang Dilayani BANTUIN:**\n\n` +
-        categories.map((c, i) => `**${i + 1}. ${c.name}**\n${c.description ? `   _${c.description}_\n` : ''}`).join('\n') +
-        `\nSemua perbaikan ditangani oleh mitra teknisi profesional tersertifikasi dan bergaransi 30 hari.`;
+        categories.items.map((c, i) => `**${i + 1}. ${c.name}**\n${c.description ? `   _${c.description}_\n` : ''}`).join('\n') +
+        `\nSemua perbaikan ditangani oleh mitra teknisi profesional tersertifikasi dan bergaransi 30 hari.` +
+        categoriesNote;
     } else if (/cara\s+(mendaftar|daftar)|mendaftar|daftar\s+akun|pendaftaran|register|apakah.*otp/i.test(norm)) {
       // N20: pola pendaftaran dipersempit — kata bare "daftar" DIHAPUS
       // karena menangkap "daftar harga/tarif/layanan" (ditangani cabang
@@ -1057,10 +1073,17 @@ Saat ini asisten AI BANTUIN aktif beroperasi menggunakan:
 
     // Layanan yang tersedia
     else if (/layanan\s+apa\s+saja|katalog\s+layanan/i.test(norm)) {
-      const categories = await DataService.getPublicApplianceCategories();
+      const categories = await DataService.getPublicApplianceCategoriesWithSource();
+      // A25 — label yang sama bila daftar kategori berasal dari fallback.
+      const categoriesNote = categories.source === 'fallback-offline'
+        ? '\n\n_(data katalog tersimpan — database tidak dapat diakses saat ini)_'
+        : categories.source === 'fallback-empty'
+        ? '\n\n_(katalog di database masih kosong — menampilkan data katalog tersimpan)_'
+        : '';
       directReply = `🏠 **Kategori Peralatan yang Dilayani BANTUIN:**\n\n` +
-        categories.map((c, i) => `**${i + 1}. ${c.name}**\n${c.description ? `   _${c.description}_\n` : ''}`).join('\n') +
-        `\nSilakan pilih layanan yang sesuai untuk mengajukan pemesanan teknisi resmi.`;
+        categories.items.map((c, i) => `**${i + 1}. ${c.name}**\n${c.description ? `   _${c.description}_\n` : ''}`).join('\n') +
+        `\nSilakan pilih layanan yang sesuai untuk mengajukan pemesanan teknisi resmi.` +
+        categoriesNote;
     }
 
     // Pembatalan Pesanan
@@ -1128,14 +1151,28 @@ Saat ini asisten AI BANTUIN aktif beroperasi menggunakan:
     // umum ditangani cabang harga di atas; cabang ini hanya untuk tagihan
     // milik customer sendiri.
     else if (/tagihan|invoice|belum\s+dibayar|pembayaran\s+berhasil|riwayat\s+transaksi/i.test(norm)) {
-      const invoices = await DataService.getCustomerInvoices(custId);
+      // A10 — pertanyaan berfilter dijawab dengan daftar BERFILTER:
+      // "belum dibayar" -> unpaid saja, "pembayaran berhasil / sudah
+      // dibayar" -> paid saja. Tanpa filter, 10 invoice terbaru bisa
+      // semuanya paid sehingga customer menyimpulkan tidak ada tunggakan
+      // padahal invoice unpaid ke-11 tidak tampil.
+      const wantsUnpaid = /belum\s+dibayar/i.test(norm);
+      const wantsPaid = /pembayaran\s+berhasil|sudah\s+dibayar/i.test(norm);
+      const invoiceStatus = wantsUnpaid ? 'unpaid' as const : wantsPaid ? 'paid' as const : undefined;
+      const invoices = await DataService.getCustomerInvoices(custId, invoiceStatus ? { status: invoiceStatus } : {});
       if (invoices === null) {
         directReply = 'Tagihan Anda tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
       } else if (invoices.length === 0) {
-        directReply = `Saat ini tidak ada tagihan invoice aktif di akun Anda. Tagihan resmi baru akan diterbitkan secara transparan setelah teknisi menyelesaikan inspeksi/perbaikan dan disetujui oleh Anda.`;
+        directReply = wantsUnpaid
+          ? `Tidak ada tagihan yang belum dibayar di akun Anda. Semua tagihan Anda sudah lunas.`
+          : wantsPaid
+          ? `Belum ada tagihan yang sudah dibayar di akun Anda.`
+          : `Saat ini tidak ada tagihan invoice aktif di akun Anda. Tagihan resmi baru akan diterbitkan secara transparan setelah teknisi menyelesaikan inspeksi/perbaikan dan disetujui oleh Anda.`;
       } else {
         directReply = `📋 **Data Tagihan Invoice Anda:**\n\n` +
           invoices.map((inv, i) => `**${i + 1}. Invoice ${inv.invoiceNumber}** (Order #${inv.orderCode})\n- Kategori: ${inv.categoryName}\n- Total Tagihan: **Rp ${inv.totalAmount.toLocaleString('id-ID')}**\n- Status Pembayaran: **${inv.status.toUpperCase()}**\n- Metode Pembayaran: ${inv.paymentMethod}\n- Jatuh Tempo: ${new Date(inv.dueDate).toLocaleDateString('id-ID')}\n`).join('\n') +
+          // A24 — daftar dibatasi 10 TERBARU (bukan seluruh tagihan).
+          (invoices.length === 10 ? `\n_(menampilkan 10 tagihan terbaru)_` : '') +
           `\nPembayaran dapat dilakukan aman menggunakan QRIS otomatis atau Transfer Virtual Account melalui aplikasi.`;
       }
     }
@@ -1182,7 +1219,7 @@ Saat ini asisten AI BANTUIN aktif beroperasi menggunakan:
         if (r.technician) {
           directReply = `👨‍🔧 **Mitra Teknisi untuk Pesanan #${r.orderCode}:**
 - **Nama Teknisi:** ${r.technician.name}
-- **Rating Kepuasan:** ⭐ ${r.technician.rating.toFixed(1)} / 5.0
+- **Rating Kepuasan:** ${r.technician.ratingCount > 0 ? `⭐ ${r.technician.rating.toFixed(1)} / 5.0 (${r.technician.ratingCount} ulasan)` : 'belum ada ulasan'}
 - **Status Pesanan:** ${r.status.toUpperCase()}
 ${r.technician.phone ? `- **Nomor Telepon Koordinasi:** ${r.technician.phone}` : ''}
 
@@ -1203,13 +1240,39 @@ Anda dapat berkomunikasi secara langsung dengan teknisi melalui fitur **Chat Pes
       }
 
       if (!orderDetail) {
-        const repairs = await DataService.getCustomerRepairs(custId, { limit: 3 });
+        // A11 — "sudah selesai" -> completed saja; "belum diproses" ->
+        // submitted saja. Tanpa filter, 3 pesanan terbaru bisa tidak
+        // mengandung satu pun pesanan yang ditanyakan.
+        // (Filter hanya dipakai bila tidak ada kode spesifik: bila kode
+        // disebut, kueri ini hanya menjadi probe keterbacaan DB untuk A12.)
+        const wantsCompleted = !specificOrderCode && /sudah\s+selesai/i.test(norm);
+        const wantsSubmitted = !specificOrderCode && /belum\s+diproses/i.test(norm);
+        const repairs = await DataService.getCustomerRepairs(custId, {
+          limit: 3,
+          ...(wantsCompleted ? { status: 'completed' } : wantsSubmitted ? { status: 'submitted' } : {}),
+        });
         if (repairs === null) {
           directReply = 'Pesanan Anda tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+        } else if (specificOrderCode) {
+          // A12 — DB terbukti bisa dibaca (repairs bukan null), jadi kode
+          // ini memang tidak ada di akun customer (salah ketik / milik
+          // orang lain): katakan terus terang, jangan diam-diam
+          // menampilkan pesanan lain seolah-olah itu yang ditanyakan.
+          directReply = `Pesanan dengan kode \`${specificOrderCode}\` tidak ditemukan di akun Anda. Pastikan kode pesanan sudah benar (format: BAN-YYYYMMDD-XXXXX), atau tanyakan "pesanan saya" untuk melihat daftar pesanan Anda.`;
         } else if (repairs.length === 0) {
-          directReply = `Saat ini Anda belum memiliki pesanan perbaikan aktif di database BANTUIN. Jika membutuhkan perbaikan AC, Kulkas, atau peralatan rumah tangga lainnya, silakan klik tombol **Pesan Layanan** di aplikasi.`;
+          directReply = wantsCompleted
+            ? `Anda belum memiliki pesanan perbaikan yang sudah selesai.`
+            : wantsSubmitted
+            ? `Saat ini tidak ada pesanan Anda yang belum diproses.`
+            : `Saat ini Anda belum memiliki pesanan perbaikan aktif di database BANTUIN. Jika membutuhkan perbaikan AC, Kulkas, atau peralatan rumah tangga lainnya, silakan klik tombol **Pesan Layanan** di aplikasi.`;
         } else {
-          directReply = `📋 **Daftar Pesanan Perbaikan Anda:**\n\n` +
+          // A24 — daftar ini dibatasi 3 TERBARU (bukan seluruh pesanan).
+          const listTitle = wantsCompleted
+            ? '📋 **Pesanan Anda yang Sudah Selesai (3 terbaru):**'
+            : wantsSubmitted
+            ? '📋 **Pesanan Anda yang Belum Diproses (3 terbaru):**'
+            : '📋 **Daftar Pesanan Perbaikan Terbaru Anda (3 terbaru):**';
+          directReply = `${listTitle}\n\n` +
             repairs.map((r, i) => `**${i + 1}. Pesanan #${r.orderCode}** (${r.categoryName})\n- Perangkat: ${r.device}\n- Status: **${r.status.toUpperCase()}**\n- Keluhan: ${r.problem}\n- Teknisi: ${r.technician?.name || 'Menunggu Penugasan'}\n- Estimasi/Biaya: ${r.diagnosis?.estimate ? `Rp ${r.diagnosis.estimate.toLocaleString('id-ID')}` : 'Menunggu Inspeksi'}\n`).join('\n') +
             `\nUntuk melihat linimasa lengkap atau live chat teknisi, silakan buka menu **Pesanan Saya**.`;
         }
@@ -1326,13 +1389,32 @@ ${orderDetail.invoice ? `- **Status Tagihan:** Rp ${orderDetail.invoice.totalAmo
 
     // Manajemen Tugas & Tugas Hari Ini
     else if (/tugas\s+hari\s+ini|apa\s+saja\s+tugas|tugas\s+mana\s+yang\s+paling\s+mendesak|paling\s+mendesak|deadline|pekerjaan\s+terlambat|detail\s+perangkat|siapa\s+customer/i.test(norm)) {
-      const tasks = await DataService.getTechnicianAssignedTasks(techId, { limit: 5 });
+      // A14 — "tugas hari ini" -> hanya yang terjadwal hari ini;
+      // "paling mendesak" -> hanya yang terjadwal dalam 24 jam ke depan,
+      // diurutkan jadwal terdekat. Tanpa filter, jawaban mencampur tugas
+      // minggu depan dan tugas tanpa jadwal — dan tugas offered minggu
+      // depan tampil sebelum tugas accepted hari ini pukul 09:00.
+      const wantsToday = /tugas\s+hari\s+ini/i.test(norm);
+      const wantsUrgent = !wantsToday && /paling\s+mendesak|deadline|pekerjaan\s+terlambat/i.test(norm);
+      const tasks = await DataService.getTechnicianAssignedTasks(techId, {
+        limit: 5,
+        ...(wantsToday ? { todayOnly: true } : wantsUrgent ? { urgentOnly: true } : {}),
+      });
       if (tasks === null) {
         directReply = 'Daftar tugas Anda tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
       } else if (tasks.length === 0) {
-        directReply = `Halo Rekan Teknisi! Saat ini tidak ada tugas perbaikan aktif yang ditugaskan kepada Anda. Tetap pantau dashboard teknisi Anda.`;
+        directReply = wantsToday
+          ? `Halo Rekan Teknisi! Tidak ada tugas yang terjadwal hari ini.`
+          : wantsUrgent
+          ? `Halo Rekan Teknisi! Tidak ada tugas mendesak (terjadwal dalam 24 jam ke depan) saat ini.`
+          : `Halo Rekan Teknisi! Saat ini tidak ada tugas perbaikan aktif yang ditugaskan kepada Anda. Tetap pantau dashboard teknisi Anda.`;
       } else {
-        directReply = `🛠️ **Daftar Tugas Perbaikan Anda:**\n\n` +
+        const listTitle = wantsToday
+          ? '🛠️ **Daftar Tugas Hari Ini:**'
+          : wantsUrgent
+          ? '🛠️ **Tugas Paling Mendesak (terjadwal 24 jam ke depan):**'
+          : '🛠️ **Daftar Tugas Perbaikan Anda:**';
+        directReply = `${listTitle}\n\n` +
           tasks.map((t, i) => `**${i + 1}. Order #${t.orderCode}** (${t.categoryName} - ${t.device})\n- Status Tugas: **${t.assignmentStatus.toUpperCase()}** (Order: ${t.orderStatus})\n- Pelanggan: **${t.customerName}** (${t.customerPhone})\n- Alamat: ${t.address}\n- Keluhan: ${t.problem}\n- Jadwal: **${t.schedule}**\n- Urgensi: ${t.assignmentStatus === 'offered' ? '🔴 Butuh Konfirmasi Cepat' : '🟡 Dalam Jadwal'}\n`).join('\n') +
           `\nAnda dapat memperbarui status kunjungan langsung melalui asisten ini atau dashboard teknisi.`;
       }
@@ -1340,11 +1422,17 @@ ${orderDetail.invoice ? `- **Status Tagihan:** Rp ${orderDetail.invoice.totalAmo
 
     // Diagnosis & Pemeriksaan Awal
     else if (/keluhan\s+customer|riwayat\s+kerusakan|penyebab\s+kerusakan|pemeriksaan\s+awal|rekomendasi\s+tindakan|catatan\s+diagnosis/i.test(norm)) {
-      const tasks = await DataService.getTechnicianAssignedTasks(techId, { limit: 1 });
+      // A15 — bila kode pesanan disebut (konteks sesi), jawab tentang
+      // TUGAS ITU — bukan tugas pertama dalam antrean (yang bisa pesanan
+      // yang sama sekali berbeda).
+      const orderCode = contextEntities.activeOrderCode;
+      const tasks = await DataService.getTechnicianAssignedTasks(techId, orderCode ? { orderCode, limit: 1 } : { limit: 1 });
       if (tasks === null) {
         directReply = 'Data tugas Anda tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
       } else if (tasks.length === 0) {
-        directReply = `Belum ada tugas aktif untuk menampilkan data diagnosis.`;
+        directReply = orderCode
+          ? `Tugas dengan kode pesanan #${orderCode} tidak ditemukan di antara tugas aktif Anda. Pastikan kode pesanan sudah benar.`
+          : `Belum ada tugas aktif untuk menampilkan data diagnosis.`;
       } else {
         const t = tasks[0];
         directReply = `🔍 **Data Diagnosis & Keluhan Tugas #${t.orderCode}:**
@@ -1357,11 +1445,15 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
 
     // Komunikasi dengan Customer
     else if (/customer\s+yang\s+harus\s+dihubungi|pesan\s+terbaru\s+dari\s+customer|informasi\s+yang\s+perlu\s+disampaikan/i.test(norm)) {
-      const tasks = await DataService.getTechnicianAssignedTasks(techId, { limit: 1 });
+      // A15 — sama seperti cabang diagnosis: hormati kode pesanan dari konteks.
+      const orderCode = contextEntities.activeOrderCode;
+      const tasks = await DataService.getTechnicianAssignedTasks(techId, orderCode ? { orderCode, limit: 1 } : { limit: 1 });
       if (tasks === null) {
         directReply = 'Data tugas Anda tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
       } else if (tasks.length === 0) {
-        directReply = `Saat ini tidak ada customer dari tugas aktif yang perlu Anda hubungi.`;
+        directReply = orderCode
+          ? `Tugas dengan kode pesanan #${orderCode} tidak ditemukan di antara tugas aktif Anda. Pastikan kode pesanan sudah benar.`
+          : `Saat ini tidak ada customer dari tugas aktif yang perlu Anda hubungi.`;
       } else {
         const t = tasks[0];
         directReply = `📞 **Customer Tugas Aktif Anda (#${t.orderCode}):**
@@ -1475,14 +1567,19 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
       const listRole = roleWord === 'customer' || roleWord === 'pelanggan' ? 'customer' : roleWord === 'teknisi' ? 'technician' : null;
       const roleLabel = listRole === 'customer' ? 'customer' : listRole === 'technician' ? 'teknisi' : 'pengguna';
       const wantsActiveOnly = /\baktif\b/i.test(norm) && !/tidak\s+aktif|nonaktif/i.test(norm);
+      // A23 — "tidak aktif"/"nonaktif" memfilter status 'inactive'
+      // (sebelumnya tidak ada jalurnya sehingga semua customer tampil
+      // tanpa penanda status).
+      const wantsInactiveOnly = /tidak\s+aktif|nonaktif/i.test(norm);
+      const listStatus = wantsActiveOnly ? 'active' as const : wantsInactiveOnly ? 'inactive' as const : undefined;
       // N22: pakai getUserNameListWithTotal agar pemotongan di 50 nama
       // terlihat ("menampilkan 50 terbaru dari N total") — jangan biarkan
       // admin mengira 50 nama itu seluruh pengguna.
-      const nameList = await DataService.getUserNameListWithTotal(listRole, 50, wantsActiveOnly ? 'active' : undefined);
+      const nameList = await DataService.getUserNameListWithTotal(listRole, 50, listStatus);
       if (nameList === null) {
         directReply = 'Tidak dapat membaca daftar nama saat ini (database tidak dapat diakses). Coba lagi nanti.';
       } else if (nameList.names.length === 0) {
-        directReply = wantsActiveOnly ? `Belum ada ${roleLabel} aktif terdaftar.` : `Belum ada ${roleLabel} terdaftar.`;
+        directReply = wantsActiveOnly ? `Belum ada ${roleLabel} aktif terdaftar.` : wantsInactiveOnly ? `Belum ada ${roleLabel} tidak aktif terdaftar.` : `Belum ada ${roleLabel} terdaftar.`;
       } else {
         directReply = nameList.names.map((n, i) => `${i + 1}. ${n}`).join('\n');
         if (nameList.total > nameList.names.length) {
@@ -1522,11 +1619,14 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
     - Penugasan Diterima (Assigned): **${overview.orders.assigned}**
     - Terjadwal Kunjungan (Scheduled): **${overview.orders.scheduled}**
     - Sedang Diagnosa (In Diagnosis): **${overview.orders.inDiagnosis}**
-    - Estimasi Biaya (Estimated): **${overview.orders.estimated}**
-    - Menunggu Persetujuan Pelanggan (Customer Approved): **${overview.orders.customerApproved}**
+    - Estimasi Diterbitkan — Menunggu Persetujuan Pelanggan (Estimated): **${overview.orders.estimated}**
+    - Disetujui Pelanggan / Menunggu Pengerjaan Dimulai (Customer Approved): **${overview.orders.customerApproved}**
     - Dalam Pengerjaan (In Repair): **${overview.orders.inRepair}**
     - Selesai Tuntas: **${overview.orders.completed}**
     - Dibatalkan: **${overview.orders.cancelled}**
+    - Dikomplain (Complained): **${overview.orders.complained}**
+  * **Pesanan Hari Ini:** **${overview.orders.today} pesanan**
+  * **Pesanan Bulan Ini:** **${overview.orders.thisMonth} pesanan**
   * **Total Pendapatan Terkonfirmasi (Lunas):** **${finance ? `Rp ${finance.totalRevenuePaid.toLocaleString('id-ID')}` : 'tidak dapat dibaca saat ini'}**
   * **Piutang Invoice Belum Bayar:** **${finance ? `Rp ${finance.totalUnpaidAmount.toLocaleString('id-ID')}` : 'tidak dapat dibaca saat ini'}**
   * **Mitra Teknisi Terdaftar:** **${workload ? `${workload.length} orang` : 'tidak dapat dibaca saat ini'}** (Rata-rata Rating: ⭐ ${avgRating})
@@ -1535,7 +1635,7 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
 
 - **Pertanggungjawaban Data:**
   * Angka pesanan bersumber langsung dari kueri tabel \`repair_orders\` sesuai status terkini.
-  * Angka keuangan dihitung dari tabel \`invoices\` berdasarkan status \`paid\` dan \`unpaid\`.
+  * Angka keuangan dihitung dari pembayaran berstatus settlement dikurangi refund.
   * Seluruh data tersinkronisasi langsung dengan kartu statistik di layar dashboard.`;
       }
     }
@@ -1550,13 +1650,21 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
       if (custData === null) {
         directReply = 'Analitik pelanggan tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
       } else {
+        // A24 — kedua daftar dibatasi 5 TERBARU: beri tahu totalnya agar
+        // admin tidak mengira 5 baris itu seluruh data.
+        const recentNote = custData.totalCustomers > custData.recentCustomers.length
+          ? ` (menampilkan ${custData.recentCustomers.length} terbaru dari ${custData.totalCustomers} total pelanggan)`
+          : '';
+        const pendingNote = custData.pendingOrdersTotal > custData.pendingOrders.length
+          ? ` (menampilkan ${custData.pendingOrders.length} terbaru dari ${custData.pendingOrdersTotal} total pesanan berjalan)`
+          : '';
         directReply = `👥 **Analisis Pelanggan BANTUIN (Customer Intelligence):**
 - **Total Pelanggan Terdaftar:** **${custData.totalCustomers} akun**
 - **Pelanggan Baru Bulan Ini:** **${custData.newCustomersThisMonth} pelanggan**
 
-**Daftar Pelanggan Terbaru:**\n` +
+**Daftar Pelanggan Terbaru${recentNote}:**\n` +
         custData.recentCustomers.map((c, i) => `${i + 1}. **${c.name}** (${c.phone}) - Kota: ${c.city} - _Daftar: ${c.registeredAt}_`).join('\n') +
-        `\n\n**Pelanggan dengan Pesanan Sedang Berjalan:**\n` +
+        `\n\n**Pelanggan dengan Pesanan Sedang Berjalan${pendingNote}:**\n` +
         custData.pendingOrders.map((p, i) => `${i + 1}. **${p.customerName}** (Order #${p.orderCode}) - ${p.category} [${p.status.toUpperCase()}]`).join('\n');
       }
     }
@@ -1569,22 +1677,52 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
       } else if (workload.length === 0) {
         directReply = 'Belum ada data teknisi yang tercatat di database BANTUIN.';
       } else {
-        directReply = `👨‍🔧 **Analitik Kinerja & Beban Kerja Mitra Teknisi:**\n\n| No | Nama Teknisi | Rating | Tugas Aktif | Pekerjaan Selesai | Kesiapan |\n| :--- | :--- | :---: | :---: | :---: | :---: |\n` +
-          workload.map((w, i) => `| ${i + 1} | ${w.name} | ⭐ ${w.ratingAvg.toFixed(1)} (${w.ratingCount}) | **${w.activeTasks}** | ${w.completedTasks} | ${w.isAvailable ? 'Aktif' : 'Sibuk'} |`).join('\n') +
+        // B30/A29 — "Tugas Aktif" hanya penugasan yang sudah DITERIMA
+        // (accepted); penawaran yang belum dijawab (offered) dilaporkan
+        // terpisah sebagai "Penawaran Menunggu". Kolom Status Akun
+        // menampilkan status akun + verifikasi dokumen (teknisi suspended
+        // / belum terverifikasi tetap tampil — jangan disembunyikan).
+        // is_available berarti kesiapan menerima order baru: "Siap terima
+        // order" / "Tidak menerima order" — false BUKAN berarti "Sibuk".
+        const techStatusLabel = (w: { accountStatus: string; verifiedStatus: string }): string => {
+          const account = w.accountStatus === 'active' ? 'Aktif'
+            : w.accountStatus === 'suspended' ? 'Ditangguhkan'
+            : w.accountStatus === 'inactive' ? 'Tidak Aktif'
+            : w.accountStatus === 'pending_verification' ? 'Menunggu Verifikasi Akun'
+            : w.accountStatus;
+          const verified = w.verifiedStatus === 'verified' ? ''
+            : w.verifiedStatus === 'pending' ? ' (verifikasi dokumen pending)'
+            : w.verifiedStatus === 'rejected' ? ' (verifikasi dokumen ditolak)'
+            : w.verifiedStatus === 'suspended' ? ' (verifikasi ditangguhkan)'
+            : '';
+          return `${account}${verified}`;
+        };
+        directReply = `👨‍🔧 **Analitik Kinerja & Beban Kerja Mitra Teknisi:**\n\n| No | Nama Teknisi | Rating | Tugas Aktif | Penawaran Menunggu | Pekerjaan Selesai | Status Akun | Kesiapan |\n| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |\n` +
+          workload.map((w, i) => `| ${i + 1} | ${w.name} | ⭐ ${w.ratingAvg.toFixed(1)} (${w.ratingCount}) | **${w.activeTasks}** | ${w.offeredTasks} | ${w.completedTasks} | ${techStatusLabel(w)} | ${w.isAvailable ? 'Siap terima order' : 'Tidak menerima order'} |`).join('\n') +
+          // B29/A24 — daftar ini hanya 10 teratas berdasarkan beban kerja.
+          (workload.length === 10 ? `\n\n_(menampilkan 10 teknisi teratas berdasarkan beban kerja — daftar lengkap di Admin Console)_` : '') +
           `\n_Catatan: Teknisi dengan beban kerja tertinggi diprioritaskan untuk penyeimbangan kuota order terdekat._`;
       }
     }
 
     // 4. Perbaikan Tertunda / Keterlambatan / Belum Diproses
     else if (/belum\s+diproses|belum\s+dapat\s+teknisi|belum\s+mendapatkan\s+teknisi|terlambat|keterlambatan|penyebab\s+keterlambatan|perbaikan\s+tertunda/i.test(norm)) {
-      const delayed = await DataService.getAdminDelayedRepairs();
+      const [delayed, delayedTotal] = await Promise.all([
+        DataService.getAdminDelayedRepairs(),
+        DataService.countAdminDelayedRepairs(),
+      ]);
       if (delayed === null) {
         directReply = 'Data perbaikan tertunda tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
       } else if (delayed.length === 0) {
         directReply = `✅ **Status Aman:** Saat ini tidak ada pesanan perbaikan yang terdeteksi mengalami keterlambatan atau penundaan kritis di sistem BANTUIN.`;
       } else {
-        directReply = `⚠️ **Daftar Pesanan Memerlukan Perhatian (Tertunda / Unassigned):**\n\n` +
-          delayed.map((d, i) => `**${i + 1}. Order #${d.orderCode}** (${d.categoryName})\n- Status: **${d.status.toUpperCase()}**\n- Durasi Tunggu: **${d.elapsedHours} jam**\n- Teknisi: ${d.technician}\n- Penyebab Keterlambatan: ${d.cause}\n`).join('\n');
+        // B-X3 — judul lama "(Tertunda / Unassigned)" salah: daftar ini
+        // mencakup pesanan assigned/scheduled/in_diagnosis/estimated/
+        // in_repair yang SUDAH punya teknisi.
+        directReply = `⚠️ **Daftar Pesanan Tertunda / Memerlukan Perhatian:**\n\n` +
+          delayed.map((d, i) => `**${i + 1}. Order #${d.orderCode}** (${d.categoryName})\n- Status: **${d.status.toUpperCase()}**\n- Durasi Tunggu: **${d.elapsedHours} jam**\n- Teknisi: ${d.technician}\n- Penyebab Keterlambatan: ${d.cause}\n`).join('\n') +
+          // B24/A24 — daftar dibatasi 10 terlama: beri tahu totalnya.
+          (delayedTotal !== null && delayedTotal > delayed.length ? `\n_(menampilkan ${delayed.length} pesanan tertunda terlama dari ${delayedTotal} total)_` : '');
       }
     }
 
@@ -1594,12 +1732,23 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
       if (finance === null) {
         directReply = 'Data keuangan tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
       } else {
+        // A2/B26 — SATUAN DIJELASKAN: "invoice" (tagihan) dan "transaksi
+        // pembayaran" (baris payments) adalah benda yang berbeda — satu
+        // invoice bisa dibayar lewat beberapa transaksi (cicilan /
+        // percobaan ulang), sehingga 11 invoice vs 18 transaksi adalah
+        // hasil yang sah, bukan salah hitung. Tampilkan invoice per
+        // status, jembatan rekonsiliasi (COUNT DISTINCT invoice yang
+        // punya settlement), baris refund bila ada, dan pisah piutang
+        // tertunggak (lewat jatuh tempo) vs belum jatuh tempo.
+        const settledTxCount = finance.paymentMethodsBreakdown.reduce((sum, p) => sum + p.transactionCount, 0);
+        const breakdownVolume = finance.paymentMethodsBreakdown.reduce((sum, p) => sum + p.volume, 0);
         directReply = `💰 **Rekapitulasi Keuangan Platform BANTUIN:**
-- **Total Seluruh Invoice:** ${finance.totalInvoices} tagihan
-- **Total Pendapatan Terkonfirmasi (Lunas):** **Rp ${finance.totalRevenuePaid.toLocaleString('id-ID')}**
-- **Total Biaya Platform (Platform Fee):** **Rp ${finance.totalPlatformFee.toLocaleString('id-ID')}**
-- **Piutang Invoice Tertunggak (Unpaid):** **Rp ${finance.totalUnpaidAmount.toLocaleString('id-ID')}**\n\n**Sebaran Metode Pembayaran Berhasil:**\n` +
-        finance.paymentMethodsBreakdown.map(p => `- ${p.method.toUpperCase()}: ${p.transactionCount} transaksi (Rp ${p.volume.toLocaleString('id-ID')})`).join('\n');
+- **Total Invoice:** ${finance.totalInvoices} invoice — Lunas: ${finance.invoicesByStatus.paid} | Belum Dibayar: ${finance.invoicesByStatus.unpaid} | Dibatalkan: ${finance.invoicesByStatus.cancelled} | Refund: ${finance.invoicesByStatus.refunded}
+- **Total Pendapatan Terkonfirmasi (Lunas):** **Rp ${finance.totalRevenuePaid.toLocaleString('id-ID')}** — dari ${settledTxCount} transaksi pembayaran settlement untuk ${finance.settledInvoiceCount} invoice
+- **Total Biaya Platform (Platform Fee):** **Rp ${finance.totalPlatformFee.toLocaleString('id-ID')}** _(dari invoice lunas yang sudah ada pembayaran settlement)_
+- **Piutang Invoice Belum Dibayar (Unpaid):** **Rp ${finance.totalUnpaidAmount.toLocaleString('id-ID')}** — Tertunggak (lewat jatuh tempo): Rp ${finance.totalUnpaidOverdue.toLocaleString('id-ID')} | Belum Jatuh Tempo: Rp ${finance.totalUnpaidNotYetDue.toLocaleString('id-ID')}**${finance.refundedTotal > 0 ? `\n- **Dikurangi Refund:** **Rp ${finance.refundedTotal.toLocaleString('id-ID')}**` : ''}\n\n**Sebaran Metode Pembayaran Berhasil (transaksi pembayaran settlement):**\n` +
+        finance.paymentMethodsBreakdown.map(p => `- ${p.method.toUpperCase()}: ${p.transactionCount} transaksi (Rp ${p.volume.toLocaleString('id-ID')})`).join('\n') +
+        `\n\n_Rekonsiliasi: ${settledTxCount} transaksi pembayaran settlement untuk ${finance.settledInvoiceCount} invoice; jumlah sebaran Rp ${breakdownVolume.toLocaleString('id-ID')} dikurangi refund Rp ${finance.refundedTotal.toLocaleString('id-ID')} = pendapatan Rp ${finance.totalRevenuePaid.toLocaleString('id-ID')}. Satu invoice dapat dibayar lewat beberapa transaksi, sehingga jumlah transaksi bisa melebihi jumlah invoice._`;
       }
     }
 
@@ -1615,10 +1764,17 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
 
 **Layanan Paling Diminati:**\n` +
         rep.topServices.map((s, i) => `${i + 1}. **${s.name}**: ${s.requests} pesanan (${s.share})`).join('\n') +
+        // B-X4 — penyebut share adalah seluruh pesanan bulan ini (termasuk
+        // yang service_id-nya NULL), sehingga jumlah share < 100%: beri
+        // label penyebutnya.
+        `\n_(persentase dihitung dari seluruh pesanan bulan ini)_` +
         `\n\n**Kendala Operasional Sering Terjadi:**\n` +
         rep.frequentIssues.map(f => `- ${f.issue} (Dampak: ${f.impact})`).join('\n') +
         `\n\n**Rekomendasi Peningkatan Efisiensi:**\n` +
-        rep.efficiencyRecommendations.map(r => `✅ ${r}`).join('\n');
+        rep.efficiencyRecommendations.map(r => `✅ ${r}`).join('\n') +
+        // B-X4 — catatan konsistensi: pendapatan laporan ini memakai
+        // definisi yang sama dengan rekap keuangan (settlement − refund).
+        `\n\n_Pendapatan dihitung dari pembayaran yang sudah settlement dikurangi refund — definisi yang sama dengan rekap keuangan._`;
       }
     }
 
@@ -1628,10 +1784,15 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
       if (notif === null) {
         directReply = 'Status notifikasi tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
       } else {
+        // B-X6/B25 — "Total Upaya Pengiriman" = sent + failed (OTP pending
+        // belum dikirim, dilaporkan terpisah). 'sent' berarti gateway
+        // menerima pesan — BUKAN "diterima" ponsel tujuan (tidak ada
+        // status delivered/read di skema).
         directReply = `📱 **Status Pengiriman Notifikasi WhatsApp OTP:**
-- **Total Notifikasi Terkirim:** **${notif.totalSent}**
-- **Berhasil Diterima (Delivered):** **${notif.delivered}**
-- **Gagal Dikirim (Failed):** **${notif.failed}**\n\n**Rincian Log Kegagalan:**\n` +
+- **Total Upaya Pengiriman:** **${notif.totalSent}**
+- **Terkirim ke Gateway (Sent):** **${notif.delivered}**
+- **Gagal Dikirim (Failed):** **${notif.failed}**
+- **Menunggu Pengiriman (Pending):** **${notif.pending}**\n\n**Rincian Log Kegagalan:**\n` +
         notif.failedLogs.map((l, i) => `${i + 1}. Tujuan: \`${l.phone}\` - Penyebab: ${l.reason} (${l.createdAt})`).join('\n');
       }
     }
@@ -1639,10 +1800,15 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
     // 8. Diagnostik Sistem, Database, OTP & AI
     else if (/status\s+database|layanan\s+otp|gemini\s+api|status\s+sistem|kesehatan\s+sistem/i.test(norm)) {
       const health = await DataService.getAdminSystemHealth();
+      // B-X7/B16 — provider AI AKTIF dari database (bukan "Model Gemini"
+      // dari env var). B31 — latensi "-" bila DB tidak terhubung.
+      const aiProviderLine = health.aiProvider.provider
+        ? `${health.aiProvider.name || health.aiProvider.provider} — Model: \`${health.aiProvider.model || 'tidak diketahui'}\` (${health.aiProvider.apiKeyConfigured ? '✅ Kunci API Terkonfigurasi' : '⚠️ API Key Belum Disetel'})${health.aiProvider.lastConnectionStatus ? ` — status koneksi terakhir: ${health.aiProvider.lastConnectionStatus}` : ''}`
+        : 'tidak diketahui (konfigurasi provider tidak dapat dibaca)';
       directReply = `🖥️ **Laporan Status Kesehatan Sistem BANTUIN:**
-- **Basis Data MySQL 8.0:** ${health.database.connected ? '✅ Terhubung Normal' : '❌ Terputus'} (Latensi: ${health.database.latencyMs} ms)
+- **Basis Data MySQL 8.0:** ${health.database.connected ? '✅ Terhubung Normal' : '❌ Terputus'} (Latensi: ${health.database.latencyMs === null || health.database.latencyMs === undefined ? '-' : `${health.database.latencyMs} ms`})
 - **Gateway WhatsApp OTP (Fonnte):** Status Terakhir: **${health.whatsappFonnte.lastStatus.toUpperCase()}**
-- **Model Gemini AI:** ${health.geminiAi.model} (${health.geminiAi.apiKeyConfigured ? '✅ Kunci API Terkonfigurasi' : '⚠️ API Key Belum Disetel'})
+- **Provider AI Aktif:** ${aiProviderLine}
 - **Waktu Server:** ${new Date(health.serverTime).toLocaleString('id-ID')}`;
     }
 
@@ -1655,7 +1821,9 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
         directReply = 'Belum ada pengaturan sistem yang tercatat di database BANTUIN.';
       } else {
         directReply = `⚙️ **Pengaturan Konfigurasi Sistem BANTUIN (Admin View):**\n\n` +
-          settings.map((s, i) => `**${i + 1}. ${s.key}** [${s.group}]\n- Nilai: \`${s.value}\`\n${s.description ? `- Deskripsi: ${s.description}\n` : ''}`).join('\n');
+          settings.map((s, i) => `**${i + 1}. ${s.key}** [${s.group}]\n- Nilai: \`${s.value}\`\n${s.description ? `- Deskripsi: ${s.description}\n` : ''}`).join('\n') +
+          // B31 — daftar ini disaring allowlist R3 (8 key): beri tahu admin.
+          `\n\n_Menampilkan pengaturan yang diizinkan untuk chatbot; pengaturan lain dikelola lewat Admin Console._`;
       }
     }
 
@@ -1678,11 +1846,15 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
       if (stats === null) {
         directReply = 'Statistik pengguna tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
       } else {
+        // A9/B27 — tampilkan bucket suspended (sebelumnya hilang sehingga
+        // rincian < total) dan lengkapi bucket admin. "Menunggu Verifikasi"
+        // teknisi adalah verifikasi AKUN (OTP) — bukan verifikasi dokumen
+        // teknisi (technician_profiles.verified_status): label diperjelas.
         directReply = `👥 **Statistik Pengguna Sistem BANTUIN:**
 - **Total Pengguna Terdaftar:** **${stats.totalUsers}**
-- **Pelanggan (Customer):** ${stats.customers.total} (${stats.customers.active} Aktif, ${stats.customers.pending} Menunggu OTP, ${stats.customers.inactive} Tidak Aktif)
-- **Mitra Teknisi:** ${stats.technicians.total} (${stats.technicians.active} Aktif, ${stats.technicians.pending} Menunggu Verifikasi, ${stats.technicians.inactive} Tidak Aktif)
-- **Administrator:** ${stats.admins.total} Akun`;
+- **Pelanggan (Customer):** ${stats.customers.total} (${stats.customers.active} Aktif, ${stats.customers.pending} Menunggu OTP, ${stats.customers.inactive} Tidak Aktif, ${stats.customers.suspended} Ditangguhkan)
+- **Mitra Teknisi:** ${stats.technicians.total} (${stats.technicians.active} Aktif, ${stats.technicians.pending} Menunggu Verifikasi Akun (OTP), ${stats.technicians.inactive} Tidak Aktif, ${stats.technicians.suspended} Ditangguhkan)
+- **Administrator:** ${stats.admins.total} Akun (${stats.admins.active} Aktif, ${stats.admins.pending} Menunggu OTP, ${stats.admins.inactive} Tidak Aktif, ${stats.admins.suspended} Ditangguhkan)`;
       }
     }
 
@@ -1736,10 +1908,23 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
       } else if (!searchTerm) {
         directReply = 'Sebutkan nama, nomor telepon, email, atau UUID pengguna yang ingin dicari (mis. "cari pelanggan Budi").';
       } else {
-        const matchedUsers = await DataService.searchDatabaseUsers(searchTerm, { limit: 5 });
-        if (matchedUsers.length === 0) {
-        directReply = `🔍 **Hasil Pencarian Basis Data Pengguna:**\n\nBerdasarkan pencarian pada sistem BANTUIN, data pengguna dengan kata kunci \`${searchTerm}\` **tidak ditemukan** dalam database pengguna aktif maupun arsip.\n\nPastikan nomor telepon, alamat email, atau UUID yang dimasukkan sudah benar dan terdaftar di BANTUIN.`;
-      } else {
+        // A18 — kualifikasi peran dari pesan ("cari pelanggan Budi")
+        // diteruskan sebagai filter role (getter sudah mendukungnya sejak
+        // N14; sebelumnya peran dibuang saat strip sehingga 5 teknisi
+        // Budi bisa mendesak customer Budi keluar dari LIMIT).
+        const roleWord = /\bpelanggan\b|\bcustomer\b/i.test(norm) ? 'customer'
+          : /\bteknisi\b/i.test(norm) ? 'technician'
+          : /\badmin\b/i.test(norm) ? 'admin'
+          : undefined;
+        const matchedUsers = await DataService.searchDatabaseUsers(searchTerm, { limit: 5, ...(roleWord ? { role: roleWord } : {}) });
+        if (matchedUsers === null) {
+          // A16 — null = DB error, BUKAN "tidak ditemukan".
+          directReply = 'Pencarian pengguna tidak dapat dilakukan saat ini (database tidak dapat diakses). Coba lagi nanti.';
+        } else if (matchedUsers.length === 0) {
+          // A22 — jangan klaim memeriksa "arsip": pengguna soft-deleted
+          // tidak pernah dicari (query memfilter deleted_at IS NULL).
+          directReply = `🔍 **Hasil Pencarian Basis Data Pengguna:**\n\nBerdasarkan pencarian pada sistem BANTUIN, data pengguna dengan kata kunci \`${searchTerm}\` **tidak ditemukan** di antara pengguna terdaftar (belum termasuk akun yang sudah dihapus).\n\nPastikan nomor telepon, alamat email, atau UUID yang dimasukkan sudah benar dan terdaftar di BANTUIN.`;
+        } else {
         directReply = `👤 **Hasil Pencarian Basis Data Pengguna (Admin Console):**\n\n` +
           matchedUsers.map((u, i) => {
             const roleBadge = u.role === 'customer' ? 'Pelanggan (Customer)' : u.role === 'technician' ? 'Mitra Teknisi' : 'Administrator';
@@ -1755,6 +1940,8 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
 - **UUID Sistem:** \`${u.uuid}\`
 - **Terdaftar Pada:** ${new Date(u.registeredAt).toLocaleDateString('id-ID', { dateStyle: 'long' })}`;
           }).join('\n\n') +
+          // A24 — daftar dibatasi 5 terbaru.
+          (matchedUsers.length === 5 ? `\n\n_(menampilkan 5 hasil terbaru; persempit kata kunci bila pengguna yang dicari belum muncul)_` : '') +
           `\n\n💡 _Catatan Admin: Untuk mengelola status akun, verifikasi, atau riwayat transaksi pengguna ini, silakan buka menu **Manajemen Pengguna** di Admin Console._`;
         }
       }
@@ -1776,7 +1963,10 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
         directReply = buildMemorySearchClarification({ kind: 'order', value: orderSearchTerm });
       } else if (orderSearchTerm) {
         const orders = await DataService.searchDatabaseOrders(orderSearchTerm, { limit: 3 });
-        if (orders.length > 0) {
+        if (orders === null) {
+          // A16 — null = DB error, BUKAN "tidak ditemukan".
+          directReply = 'Pencarian pesanan tidak dapat dilakukan saat ini (database tidak dapat diakses). Coba lagi nanti.';
+        } else if (orders.length > 0) {
           directReply = `📋 **Rincian Pesanan Perbaikan Basis Data (Admin Intelligence):**\n\n` +
             orders.map((o, i) => `**${i + 1}. Pesanan #${o.orderCode}** (${o.category})
 - **Perangkat:** ${o.device}
@@ -1786,7 +1976,9 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
 - **Lokasi Pengerjaan:** ${o.address}
 - **Teknisi Bertugas:** **${o.technicianName}** ${o.technicianRating ? `(⭐ ${o.technicianRating.toFixed(1)})` : ''}
 - **Tagihan Invoice:** ${o.invoiceNumber ? `\`${o.invoiceNumber}\` - Rp ${o.totalAmount?.toLocaleString('id-ID')} [${o.invoiceStatus.toUpperCase()}]` : 'Belum Diterbitkan'}
-- **Waktu Diajukan:** ${new Date(o.createdAt).toLocaleString('id-ID')}`).join('\n\n');
+- **Waktu Diajukan:** ${new Date(o.createdAt).toLocaleString('id-ID')}`).join('\n\n') +
+            // A24 — daftar dibatasi 3 terbaru.
+            (orders.length === 3 ? `\n\n_(menampilkan 3 hasil terbaru; persempit kode pesanan bila yang dicari belum muncul)_` : '');
         } else {
           // N13: jawab eksplisit bila tidak ditemukan — jangan diam lalu
           // melempar ke AI yang tidak punya data order tersebut (AI dapat
@@ -1812,15 +2004,20 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
         directReply = buildMemorySearchClarification({ kind: 'invoice', value: invSearchTerm });
       } else if (invSearchTerm) {
         const invoices = await DataService.searchDatabaseInvoices(invSearchTerm, { limit: 3 });
-        if (invoices.length > 0) {
+        if (invoices === null) {
+          // A16 — null = DB error, BUKAN "tidak ditemukan".
+          directReply = 'Pencarian invoice tidak dapat dilakukan saat ini (database tidak dapat diakses). Coba lagi nanti.';
+        } else if (invoices.length > 0) {
           directReply = `📋 **Data Tagihan Invoice Basis Data (Admin View):**\n\n` +
             invoices.map((inv, i) => `**${i + 1}. Invoice #${inv.invoiceNumber}** (Order #${inv.orderCode})
 - **Kategori Layanan:** ${inv.category}
 - **Nama Pelanggan:** **${inv.customerName}** (\`${inv.customerPhone}\`)
 - **Rincian Biaya:** Jasa Rp ${inv.laborCost.toLocaleString('id-ID')} | Suku Cadang Rp ${inv.partsCost.toLocaleString('id-ID')} | Biaya Layanan Rp ${inv.serviceFee.toLocaleString('id-ID')}
-- **Total Pembayaran:** **Rp ${inv.totalAmount.toLocaleString('id-ID')}**
+${inv.discountAmount > 0 ? `- **Diskon:** −Rp ${inv.discountAmount.toLocaleString('id-ID')}\n` : ''}- **Total Pembayaran:** **Rp ${inv.totalAmount.toLocaleString('id-ID')}**
 - **Status Tagihan:** **${inv.status.toUpperCase()}**
-- **Jatuh Tempo:** ${new Date(inv.dueDate).toLocaleDateString('id-ID')}`).join('\n\n');
+- **Jatuh Tempo:** ${new Date(inv.dueDate).toLocaleDateString('id-ID')}`).join('\n\n') +
+            // A24 — daftar dibatasi 3 terbaru.
+            (invoices.length === 3 ? `\n\n_(menampilkan 3 hasil terbaru; persempit nomor invoice bila yang dicari belum muncul)_` : '');
         } else {
           // N13: jawab eksplisit bila tidak ditemukan (lihat D#13).
           directReply = `Invoice dengan nomor \`${invSearchTerm}\` tidak ditemukan di database BANTUIN. Pastikan nomor invoice sudah benar (format: INV-YYYYMMDD-XXXXX).`;
@@ -1939,9 +2136,8 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
             dbContextSummary += `  - Order #${t.orderCode}: Pelanggan: ${t.customerName}, Status: ${t.assignmentStatus}\n`;
           });
         } else if (userContext.role === 'admin') {
-          const [overview, workload, finance, userStats] = await Promise.all([
+          const [overview, finance, userStats] = await Promise.all([
             DataService.getAdminOperationalOverview(),
-            DataService.getAdminTechnicianWorkload(),
             DataService.getAdminFinancialAnalytics(),
             DataService.getAdminUserStats(),
           ]);
@@ -1954,10 +2150,17 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
             // in_diagnosis/estimated/customer_approved) agar AI yang ditanya
             // "berapa pesanan sedang diproses" tidak menjawab inRepair saja
             // dan mengecilkan angka.
-            dbContextSummary += `Ringkasan Admin: Total Pesanan: ${overview.orders.total}, Menunggu: ${overview.orders.submitted}, Ditugaskan: ${overview.orders.assigned}, Terjadwal: ${overview.orders.scheduled}, Diagnosis: ${overview.orders.inDiagnosis}, Estimasi: ${overview.orders.estimated}, Menunggu Persetujuan: ${overview.orders.customerApproved}, Dikerjakan: ${overview.orders.inRepair}, Selesai: ${overview.orders.completed}, Mitra Teknisi Aktif: ${overview.technicians.active}, Pelanggan Aktif: ${overview.customers.active}, Total Pengguna Aktif: ${totalActiveUsers}, Total Pengguna Terdaftar: ${userStats.totalUsers}\n`;
-            dbContextSummary += `Keuangan: Total Pendapatan: Rp ${finance.totalRevenuePaid.toLocaleString('id-ID')}, Piutang Tertunggak: Rp ${finance.totalUnpaidAmount.toLocaleString('id-ID')}, Total Invoice: ${finance.totalInvoices}\n`;
+            // B21 — "Menunggu Persetujuan" adalah status estimated, BUKAN
+            // customer_approved (yang SUDAH disetujui dan menunggu
+            // pengerjaan dimulai). A1 — sertakan complained agar rincian
+            // yang dibaca AI berjumlah sama dengan total.
+            dbContextSummary += `Ringkasan Admin: Total Pesanan: ${overview.orders.total}, Menunggu: ${overview.orders.submitted}, Ditugaskan: ${overview.orders.assigned}, Terjadwal: ${overview.orders.scheduled}, Diagnosis: ${overview.orders.inDiagnosis}, Estimasi (Menunggu Persetujuan): ${overview.orders.estimated}, Disetujui Pelanggan: ${overview.orders.customerApproved}, Dikerjakan: ${overview.orders.inRepair}, Selesai: ${overview.orders.completed}, Dibatalkan: ${overview.orders.cancelled}, Dikomplain: ${overview.orders.complained}, Mitra Teknisi Aktif: ${overview.technicians.active}, Pelanggan Aktif: ${overview.customers.active}, Total Pengguna Aktif: ${totalActiveUsers}, Total Pengguna Terdaftar: ${userStats.totalUsers}\n`;
+            dbContextSummary += `Keuangan: Total Pendapatan: Rp ${finance.totalRevenuePaid.toLocaleString('id-ID')}, Piutang Tertunggak: Rp ${finance.totalUnpaidOverdue.toLocaleString('id-ID')} (belum jatuh tempo: Rp ${finance.totalUnpaidNotYetDue.toLocaleString('id-ID')}), Total Invoice: ${finance.totalInvoices}\n`;
+            // A7/B29 — jumlah teknisi dari getAdminUserStats (total +
+            // aktif yang benar), BUKAN .length daftar workload ber-LIMIT
+            // 10 yang mencakup teknisi suspended/inactive.
+            dbContextSummary += `Teknisi: ${userStats.technicians.active} mitra teknisi aktif dari ${userStats.technicians.total} terdaftar.\n`;
           }
-          dbContextSummary += `Teknisi: ${(workload || []).length} mitra teknisi aktif terdaftar.\n`;
 
           // S29/F20 — blok konteks pengguna/pesanan di bawah TIDAK disuntik
           // bila targetnya berasal dari memori dan belum dikonfirmasi
@@ -1977,7 +2180,8 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
             (currentPath.includes('/admin/users') || contextEntities.activePhoneNumber || contextEntities.activeEmail || contextEntities.activeUserUuid)
           ) {
             const userRecords = await DataService.searchDatabaseUsers(userSearchTerm, { limit: 6 });
-            if (userRecords.length > 0) {
+            // A16 — null = DB error: jangan akses .length pada null.
+            if (userRecords !== null && userRecords.length > 0) {
               // S9b — daftar pengguna di prompt HANYA memuat nama/peran/
               // status; email/telepon/UUID/alamat dibuang, KECUALI
               // pertanyaan saat ini secara eksplisit meminta field itu
@@ -2005,7 +2209,8 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
             (currentPath.includes('/admin/repairs') || contextEntities.activeOrderCode)
           ) {
             const orderRecords = await DataService.searchDatabaseOrders(contextEntities.activeOrderCode || '', { limit: 5 });
-            if (orderRecords.length > 0) {
+            // A16 — null = DB error: jangan akses .length pada null.
+            if (orderRecords !== null && orderRecords.length > 0) {
               // S9b — nomor telepon pelanggan dibuang kecuali pertanyaan
               // saat ini secara eksplisit memintanya.
               const asks = detectExplicitPiiAsks(norm);
@@ -2092,7 +2297,7 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
           },
           {
             name: 'queryDatabase',
-            description: 'Kueri BACA data dari tabel database BANTUIN mana pun yang diizinkan untuk peran pengguna. Gunakan untuk pertanyaan data apa pun yang tidak terjawab alat pencarian lain: total, jumlah, daftar, rekap, dan perbandingan. Hanya SELECT; server yang membangun SQL-nya dan menegakkan izin peran, kolom sensitif tidak pernah dikembalikan. Satu putaran tool saja: bila perlu beberapa kueri, panggil queryDatabase beberapa kali sekaligus.',
+            description: 'Kueri BACA data dari tabel database BANTUIN mana pun yang diizinkan untuk peran pengguna. Gunakan untuk pertanyaan data apa pun yang tidak terjawab alat pencarian lain: total, jumlah, daftar, rekap, dan perbandingan. Hanya SELECT; server yang membangun SQL-nya dan menegakkan izin peran, kolom sensitif tidak pernah dikembalikan. Satu putaran tool saja: bila perlu beberapa kueri, panggil queryDatabase beberapa kali sekaligus. Agregasi di atas JOIN: count/sum menghitung BARIS HASIL JOIN, bukan baris tabel dasar — gunakan count_distinct pada id tabel dasar untuk menghitung baris unik; sum/avg atas kolom tabel dasar bersama JOIN ditolak. Filter pada kolom tabel JOIN membuat LEFT JOIN berperilaku seperti INNER JOIN (baris tanpa pasangan terbuang) — pisahkan kueri hitungan total dan hitungan berfilter. Status pembayaran yang benar dibaca dari payments.payment_status settlement, bukan dari invoices.status.',
             parameters: {
               type: 'object',
               properties: {
@@ -2105,7 +2310,16 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
                 filterColumn2: { type: 'string', description: 'Kolom filter kedua (opsional)' },
                 filterOperator2: { type: 'string', enum: ['=', '!=', '>', '>=', '<', '<=', 'LIKE', 'IN'], description: 'Operator filter kedua' },
                 filterValue2: { type: 'string', description: 'Nilai filter kedua' },
-                aggregateFunction: { type: 'string', enum: ['count', 'sum', 'avg', 'min', 'max'], description: 'Fungsi agregasi (misal: "sum" untuk total, "count" untuk jumlah)' },
+                filterColumn3: { type: 'string', description: 'Kolom filter ketiga (opsional; misal batas atas rentang tanggal)' },
+                filterOperator3: { type: 'string', enum: ['=', '!=', '>', '>=', '<', '<=', 'LIKE', 'IN'], description: 'Operator filter ketiga' },
+                filterValue3: { type: 'string', description: 'Nilai filter ketiga' },
+                filterColumn4: { type: 'string', description: 'Kolom filter keempat (opsional)' },
+                filterOperator4: { type: 'string', enum: ['=', '!=', '>', '>=', '<', '<=', 'LIKE', 'IN'], description: 'Operator filter keempat' },
+                filterValue4: { type: 'string', description: 'Nilai filter keempat' },
+                filterColumn5: { type: 'string', description: 'Kolom filter kelima (opsional)' },
+                filterOperator5: { type: 'string', enum: ['=', '!=', '>', '>=', '<', '<=', 'LIKE', 'IN'], description: 'Operator filter kelima' },
+                filterValue5: { type: 'string', description: 'Nilai filter kelima' },
+                aggregateFunction: { type: 'string', enum: ['count', 'count_distinct', 'sum', 'avg', 'min', 'max'], description: 'Fungsi agregasi (misal: "sum" untuk total, "count" untuk jumlah, "count_distinct" untuk jumlah baris unik tabel dasar di atas JOIN)' },
                 aggregateColumn: { type: 'string', description: 'Kolom yang diagregasi (misal: "total_amount"; kosongkan untuk count semua baris)' },
                 groupBy: { type: 'string', description: 'Kolom GROUP BY (misal: "current_status" untuk rekap per status)' },
                 orderByColumn: { type: 'string', description: 'Kolom pengurutan' },

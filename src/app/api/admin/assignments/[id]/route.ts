@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAdminSession } from '@/lib/auth';
 import { query } from '@/lib/db';
 import { recordAdminAudit } from '@/lib/audit';
+import {
+  notifyAssignmentCancelled,
+  notifyAssignmentOffered,
+  notifyAssignmentTransferred,
+} from '@/lib/wa-notifications';
 
 interface RouteContext {
   params: Promise<{ id: string }>;
@@ -118,6 +123,21 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
         userAgent: request.headers.get('user-agent') || null,
       });
 
+      // Notifikasi WhatsApp ke teknisi yang penugasannya dibatalkan
+      // (best-effort — kegagalan tidak membatalkan pembatalan).
+      const cancelOrderRows: any = await query(
+        'SELECT order_code FROM repair_requests WHERE id = ?',
+        [current.repair_request_id]
+      );
+      if (cancelOrderRows.length > 0) {
+        await notifyAssignmentCancelled({
+          repairRequestId: current.repair_request_id,
+          orderCode: cancelOrderRows[0].order_code,
+          technicianId: current.technician_id,
+          reason: reason || undefined,
+        });
+      }
+
       return NextResponse.json({
         success: true,
         message: 'Penugasan teknisi berhasil dibatalkan',
@@ -184,6 +204,30 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
         ipAddress: request.headers.get('x-forwarded-for') || null,
         userAgent: request.headers.get('user-agent') || null,
       });
+
+      // Notifikasi WhatsApp (best-effort): teknisi baru diberitahu pengalihan
+      // tugas; teknisi lama diberitahu HANYA bila ia sudah menerima tugas
+      // (tawaran yang belum diterima tidak perlu pemberitahuan pengalihan).
+      const reassignOrderRows: any = await query(
+        'SELECT order_code FROM repair_requests WHERE id = ?',
+        [current.repair_request_id]
+      );
+      if (reassignOrderRows.length > 0) {
+        const orderCode = reassignOrderRows[0].order_code;
+        await notifyAssignmentOffered({
+          repairRequestId: current.repair_request_id,
+          orderCode,
+          technicianId: newTechId,
+          isReassignment: true,
+        });
+        if (current.status === 'accepted') {
+          await notifyAssignmentTransferred({
+            repairRequestId: current.repair_request_id,
+            orderCode,
+            previousTechnicianId: current.technician_id,
+          });
+        }
+      }
 
       return NextResponse.json({
         success: true,

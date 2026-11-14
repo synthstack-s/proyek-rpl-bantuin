@@ -368,6 +368,16 @@ export async function executeRoleBasedTool(
         // Menerjemahkan argumen datar dari AI menjadi spesifikasi kueri terjaga.
         // Validasi keamanan (allowlist tabel/kolom, kolom sensitif, row-level
         // scoping) ditegakkan di dalam executeGovernedDatabaseQuery.
+        //
+        // B7/B13 (didokumentasikan ke AI lewat system prompt; teks deskripsi
+        // tool di engine.ts perlu diselaraskan — lihat FIX_NOTES.md):
+        // - count/sum di atas JOIN menghitung BARIS HASIL JOIN (satu baris
+        //   dasar bisa terhitung berkali-kali); gunakan count_distinct
+        //   untuk menghitung baris dasar yang unik, dan sum/avg atas kolom
+        //   tabel dasar bersama JOIN ditolak server dengan penjelasan.
+        // - Filter pada kolom tabel JOIN membuat LEFT JOIN berperilaku
+        //   seperti INNER JOIN (baris tanpa pasangan terbuang) — pisahkan
+        //   kueri hitungan total dan hitungan berfilter.
         const splitList = (v: any): string[] | undefined => {
           if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
           if (typeof v === 'string' && v.trim()) return v.split(',').map((x) => x.trim()).filter(Boolean);
@@ -386,12 +396,41 @@ export async function executeRoleBasedTool(
             return { table: entry.slice(0, idx).trim(), via: entry.slice(idx + 1).trim() };
           });
         };
+        // B11: filter sebagai array (maksimal 5) — kueri status + rentang
+        // tanggal butuh 3 kondisi dan tidak muat dalam 2 filter lama.
+        // Bentuk array didukung server; bentuk DEKLARASI di engine.ts adalah
+        // flat filterColumn..filterColumn5 (array tidak dideklarasikan
+        // karena adapter Gemini hanya mengubah tipe properti level-atas
+        // menjadi huruf besar — tipe bersarang huruf kecil akan ditolak
+        // Gemini, huruf besar akan ditolak Groq/OpenAI).
         const filters: DataService.GovernedQueryFilter[] = [];
-        if (args?.filterColumn && args?.filterOperator) {
-          filters.push({ column: args.filterColumn, operator: args.filterOperator, value: args.filterValue ?? '' });
-        }
-        if (args?.filterColumn2 && args?.filterOperator2) {
-          filters.push({ column: args.filterColumn2, operator: args.filterOperator2, value: args.filterValue2 ?? '' });
+        if (Array.isArray(args?.filters) && args.filters.length > 0) {
+          if (args.filters.length > 5) {
+            return { success: false, error: 'Maksimal 5 filter per kueri.' };
+          }
+          for (const raw of args.filters) {
+            const column = typeof raw?.column === 'string' ? raw.column.trim() : '';
+            const operator = typeof raw?.operator === 'string' ? raw.operator.trim() : '';
+            if (!column || !operator) {
+              return { success: false, error: 'Setiap filter harus memiliki column dan operator.' };
+            }
+            filters.push({ column, operator: operator as DataService.GovernedQueryFilter['operator'], value: raw?.value ?? '' });
+          }
+        } else {
+          // Bentuk flat: filterColumn..filterColumn5 (dideklarasikan di
+          // engine.ts) — loop agar tidak ada filter yang terlewat.
+          const flatFilters: Array<[string, string, any]> = [
+            [args?.filterColumn, args?.filterOperator, args?.filterValue],
+            [args?.filterColumn2, args?.filterOperator2, args?.filterValue2],
+            [args?.filterColumn3, args?.filterOperator3, args?.filterValue3],
+            [args?.filterColumn4, args?.filterOperator4, args?.filterValue4],
+            [args?.filterColumn5, args?.filterOperator5, args?.filterValue5],
+          ];
+          for (const [column, operator, value] of flatFilters) {
+            if (column && operator) {
+              filters.push({ column, operator: operator as DataService.GovernedQueryFilter['operator'], value: value ?? '' });
+            }
+          }
         }
         const spec: DataService.GovernedQuerySpec = {
           table: args?.table,
@@ -421,13 +460,13 @@ export async function executeRoleBasedTool(
         const userQuery = typeof args === 'string'
           ? args
           : (args?.query || args?.searchTerm || args?.phone || args?.phoneNumber || args?.email || args?.name || args?.q || '');
-        return {
-          success: true,
-          data: await DataService.searchDatabaseUsers(userQuery, {
-            role: args?.role,
-            limit: args?.limit,
-          }),
-        };
+        // A16 — getter pencarian mengembalikan null saat DB error (tiga
+        // keadaan); dbResult mengubahnya menjadi error bersih, bukan
+        // success:true dengan data null.
+        return dbResult(await DataService.searchDatabaseUsers(userQuery, {
+          role: args?.role,
+          limit: args?.limit,
+        }));
 
       case 'searchOrders':
       case 'searchDatabaseOrders':
@@ -435,13 +474,11 @@ export async function executeRoleBasedTool(
           ? args
           : (args?.query || args?.searchTerm || args?.orderCode || args?.orderId || args?.device || args?.q || '');
         if (userContext.role === 'admin') {
-          return {
-            success: true,
-            data: await DataService.searchDatabaseOrders(orderQuery, {
-              status: args?.status,
-              limit: args?.limit,
-            }),
-          };
+          // A16 — null = DB error; dbResult mengubahnya menjadi error bersih.
+          return dbResult(await DataService.searchDatabaseOrders(orderQuery, {
+            status: args?.status,
+            limit: args?.limit,
+          }));
         } else if (userContext.role === 'customer' && userContext.userId) {
           return dbResult(
             await DataService.getCustomerRepairs(userContext.userId, {
@@ -476,6 +513,9 @@ export async function executeRoleBasedTool(
           limit: args?.limit,
           includeUnverified: userContext.role === 'admin' && args?.includeUnverified === true,
         });
+        // A16 — null = DB error (bukan "tidak ada teknisi"); tanpa penjaga
+        // ini, `.map(...)` di bawah melempar TypeError untuk peran non-admin.
+        if (technicians === null) return dbResult(null);
         // T8: admin mendapat rekaman lengkap (termasuk kontak) untuk
         // keperluan operasional; semua peran lain — tamu, customer,
         // teknisi — hanya mendapat tampilan publik tanpa PII kontak.
@@ -494,13 +534,11 @@ export async function executeRoleBasedTool(
           ? args
           : (args?.query || args?.searchTerm || args?.invoiceNumber || args?.orderCode || args?.q || '');
         if (userContext.role === 'admin') {
-          return {
-            success: true,
-            data: await DataService.searchDatabaseInvoices(invoiceQuery, {
-              status: args?.status,
-              limit: args?.limit,
-            }),
-          };
+          // A16 — null = DB error; dbResult mengubahnya menjadi error bersih.
+          return dbResult(await DataService.searchDatabaseInvoices(invoiceQuery, {
+            status: args?.status,
+            limit: args?.limit,
+          }));
         } else if (userContext.role === 'customer' && userContext.userId) {
           return dbResult(
             await DataService.getCustomerInvoices(userContext.userId, {

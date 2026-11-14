@@ -672,6 +672,40 @@ CREATE TABLE IF NOT EXISTS `notifications` (
     REFERENCES `users` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Penyimpanan riwayat notifikasi in-app semua pengguna';
 
+-- 8.2 Log Pengiriman Notifikasi WhatsApp (whatsapp_notifications)
+-- Mencatat setiap percobaan pengiriman WhatsApp lewat Fonnte — manual dari
+-- panel admin maupun otomatis saat status pesanan berubah. Dipisah dari
+-- `notifications` (in-app) karena butuh kolom pengiriman tersendiri
+-- (nomor tujuan, status pending/sent/failed, ID pesan Fonnte, error).
+-- Lihat juga: database/migrations/006_whatsapp_notifications.sql.
+CREATE TABLE IF NOT EXISTS `whatsapp_notifications` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id` BIGINT UNSIGNED NOT NULL COMMENT 'Penerima pesan (relasi ke users)',
+  `target_phone` VARCHAR(20) NOT NULL COMMENT 'Nomor tujuan ternormalisasi (format 628...) — kosong bila penerima tidak punya nomor valid',
+  `source` ENUM('manual', 'auto') NOT NULL DEFAULT 'auto' COMMENT 'manual = dikirim admin dari panel; auto = dipicu perubahan status pesanan',
+  `event` VARCHAR(50) NOT NULL COMMENT 'order_status | assignment_offered | assignment_cancelled | schedule_set | order_created | manual',
+  `template_key` VARCHAR(50) NULL DEFAULT NULL COMMENT 'Kunci template pesan (mis. order_assigned); NULL untuk pesan manual bebas',
+  `title` VARCHAR(150) NULL DEFAULT NULL COMMENT 'Judul pesan manual (opsional)',
+  `message` TEXT NOT NULL COMMENT 'Isi pesan WhatsApp yang dikirim',
+  `entity_type` VARCHAR(50) NULL DEFAULT NULL COMMENT 'Entitas terkait, mis. repair_requests',
+  `entity_id` BIGINT UNSIGNED NULL DEFAULT NULL COMMENT 'ID entitas terkait (mis. ID pesanan)',
+  `status` ENUM('pending', 'sent', 'failed') NOT NULL DEFAULT 'pending' COMMENT 'Status pengiriman Fonnte',
+  `fonnte_message_id` VARCHAR(100) NULL DEFAULT NULL COMMENT 'ID pesan dari Fonnte bila terkirim',
+  `error_message` VARCHAR(500) NULL DEFAULT NULL COMMENT 'Detail kegagalan bila status failed',
+  `sent_by_admin_id` BIGINT UNSIGNED NULL DEFAULT NULL COMMENT 'Admin pengirim (hanya untuk source manual)',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  INDEX `idx_wa_user_time` (`user_id`, `created_at`),
+  INDEX `idx_wa_entity` (`entity_type`, `entity_id`),
+  INDEX `idx_wa_status` (`status`),
+  INDEX `idx_wa_event_time` (`event`, `created_at`),
+  CONSTRAINT `fk_wa_user` FOREIGN KEY (`user_id`)
+    REFERENCES `users` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT `fk_wa_admin` FOREIGN KEY (`sent_by_admin_id`)
+    REFERENCES `users` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Log pengiriman notifikasi WhatsApp (Fonnte) manual & otomatis';
+
 -- 8.2 Pengaturan Konfigurasi Sistem (system_settings)
 CREATE TABLE IF NOT EXISTS `system_settings` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,

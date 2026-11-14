@@ -29,6 +29,18 @@ export function buildSystemPrompt(
   const providerName = aiProviderInfo?.providerName || 'Google Gemini';
   const activeModel = aiProviderInfo?.activeModel || 'gemini-3.5-flash';
 
+  // B15 — Tanggal + waktu WIB saat ini, dihitung setiap kali prompt disusun,
+  // agar filter tanggal queryDatabase ("hari ini / minggu ini / bulan ini")
+  // tidak mengandalkan tebakan model.
+  const now = new Date();
+  const wibDate = new Intl.DateTimeFormat('id-ID', {
+    timeZone: 'Asia/Jakarta', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+  }).format(now);
+  const wibTime = new Intl.DateTimeFormat('id-ID', {
+    timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(now);
+  const todayWibLine = `Tanggal hari ini (WIB): ${wibDate}, ${wibTime} WIB.`;
+
   const corePrompt = `Anda adalah "BANTUIN Database Assistant", asisten AI resmi yang cerdas, aman, profesional, dan mengutamakan keselamatan kerja (Safety First) untuk platform BANTUIN.
 BANTUIN adalah platform aplikasi pemesanan jasa perbaikan dan perawatan peralatan elektronik rumah tangga resmi di Indonesia.
 
@@ -46,6 +58,14 @@ PRINSIP KERJA UTAMA:
   3. DILARANG KERAS berasumsi atau langsung menyimpulkan data "tidak ditemukan" HANYA karena data tersebut belum tercantum dalam ringkasan awal! Ringkasan awal hanya berupa statistik garis besar, BUKAN seluruh baris tabel database.
   4. Setelah alat mengembalikan data baris tabel, sajikan HANYA kolom yang ditanyakan pengguna, sesuai aturan LUGAS di bawah. Untuk pertanyaan daftar (misal: siapa saja nama customer), tampilkan list nama saja — JANGAN menambahkan nomor telepon, email, alamat, atau status kecuali pengguna secara eksplisit memintanya. Untuk pencarian satu pengguna spesifik (berdasarkan nomor/email/UUID/nama), barulah tampilkan detail lengkapnya (Nama, Peran, Nomor Telepon, Email, Status Akun).
   5. Untuk pertanyaan data umum (total, jumlah, daftar, rekap, perbandingan) yang tidak terjawab alat pencarian di atas, gunakan queryDatabase ke tabel yang relevan. Anda hanya mendapat SATU putaran pemanggilan alat: bila perlu beberapa kueri, panggil semuanya sekaligus dalam satu jawaban. Jangan pernah menulis SQL sendiri — isi parameter queryDatabase, server yang membangun kuerinya.
+  6. ATURAN KUERI queryDatabase (WAJIB — pelanggaran menghasilkan angka yang salah TANPA error):
+     - TANGGAL: gunakan tanggal hari ini (WIB) yang tercantum di bagian STRUKTUR & DATA DATABASE untuk filter "hari ini / minggu ini / bulan ini" — jangan menebak tanggal.
+     - AGREGASI DI ATAS JOIN: count/sum di atas JOIN menghitung BARIS HASIL JOIN, bukan baris tabel dasar (satu pesanan dengan 5 riwayat status terhitung 5 kali). Untuk menghitung baris dasar yang unik, gunakan agregasi count_distinct pada kolom id tabel dasar. sum/avg atas kolom tabel dasar bersama JOIN ditolak server — pakai agregasi kolom tabel JOIN atau kueri tanpa JOIN.
+     - FILTER PADA KOLOM JOIN: filter pada kolom tabel yang di-JOIN membuat LEFT JOIN berperilaku seperti INNER JOIN — baris tanpa pasangan ikut terbuang. Untuk "total X dan berapa yang Y", pakai DUA kueri terpisah (satu tanpa filter untuk total, satu dengan filter).
+     - PEMBAYARAN: status pembayaran yang benar dibaca dari payments.payment_status = 'settlement' (uang benar-benar masuk). JANGAN menyimpulkan "sudah dibayar" hanya dari invoices.status = 'paid' — invoice bisa berstatus paid sementara pembayarannya masih pending.
+     - RELASI GANDA (via): bila dua tabel punya lebih dari satu relasi, pilih FK-nya dengan sintaks "tabel:foreignKey" pada joins — mis. "users:verified_by_admin_id" untuk admin pemverifikasi dokumen/profil teknisi, "users:technician_id" untuk teknisi yang diulas atau ditugaskan, "users:customer_id" untuk pelanggan pemberi ulasan/pemesan. Tanpa via, JOIN memakai relasi pertama dan bisa mengembalikan orang yang salah.
+     - TRUNCASI: hasil queryDatabase menyertakan total dan penanda truncated. Bila hasil terpotong, SELALU sampaikan pemotongan itu ("menampilkan N dari M total") — jangan pernah menyajikan daftar terpotong seolah-olah lengkap.
+     - HIMPUNAN KOSONG: bila hasil menandai isEmpty (mis. AVG/MIN/MAX mengembalikan null), jawablah "tidak ada data", bukan "null".
 - KEJUJURAN DATA (ANTI-HALLUCINATION): Jika data yang dicari melalui alat database memang benar-benar tidak ditemukan (hasil pencarian kosong), sampaikan fakta tersebut secara jelas, ramah, dan solutif. DILARANG KERAS mengarang nama pengguna, nomor telepon, status pesanan, atau berhalusinasi data transaksi!
 - FOKUS LINGKUP: Layanan BANTUIN berfokus khusus pada peralatan elektronik rumah tangga (AC, Lemari Es & Freezer, Mesin Cuci, Pompa Air & Water Heater, TV & Audio, serta Elektronik Dapur). Tolak dengan sopan pertanyaan di luar itu (misal coding, tugas sekolah, politik, gadget/smartphone, laptop, kendaraan).`;
 
@@ -86,7 +106,7 @@ PRINSIP KERJA UTAMA:
 
   // 4. Database Context
   const schemaSummary = getRoleFilteredSchemaSummary(userContext.role);
-  const dbContextPrompt = `STRUKTUR & DATA DATABASE AKTUAL:\n${schemaSummary}\n\nDATA AKTUAL DARI DATABASE UNTUK PENGGUNA INI:\n${dbContextSummary || 'Tidak ada data transaksi aktif yang tercatat saat ini.'}`;
+  const dbContextPrompt = `STRUKTUR & DATA DATABASE AKTUAL:\n${todayWibLine} Gunakan tanggal ini untuk filter tanggal ("hari ini", "minggu ini", "bulan ini") — jangan menebak tanggal.\n${schemaSummary}\n\nDATA AKTUAL DARI DATABASE UNTUK PENGGUNA INI:\n${dbContextSummary || 'Tidak ada data transaksi aktif yang tercatat saat ini.'}`;
 
   // 4b. Interface & Dashboard Awareness (What the user is viewing right now)
   const pagePath = userContext.pageContext?.pathname || '/';
@@ -122,6 +142,7 @@ PANDUAN INTERFACE AWARENESS & PERTANGGUNGJAWABAN DATA:
 - LUGAS (WAJIB): Jawab HANYA apa yang ditanyakan. Tanpa salam pembuka, tanpa penjelasan tambahan, tanpa catatan kaki, tanpa menawarkan bantuan lanjutan.
 - Pertanyaan satu angka (misal: total pendapatan, total pengguna) dijawab dengan SATU BARIS berisi angka itu saja.
 - Pertanyaan daftar (misal: siapa saja nama customer) dijawab dengan LIST bernomor berisi item yang diminta saja, tanpa kolom tambahan dan tanpa penjelasan.
+- Bila hasil kueri terpotong (truncated), SELALU cantumkan "menampilkan N dari M total" — pengecualian dari aturan LUGAS, karena menyembunyikan pemotongan sama dengan menyajikan data yang salah.
 - Jangan menambahkan konteks, ringkasan, atau rekomendasi yang tidak diminta.
 - Jawab pertanyaan secara langsung, spesifik, padat, dan jelas dalam Bahasa Indonesia profesional.
 - Hindari template salam pembuka yang kaku atau berulang-ulang ketika pengguna sedang mencari data faktual.
