@@ -108,6 +108,18 @@ async function callGeminiRest(
   return data;
 }
 
+function cleanApiKey(key: string): string {
+  if (!key) return '';
+  let cleaned = key.trim();
+  if ((cleaned.startsWith('"') && cleaned.endsWith('"')) || (cleaned.startsWith("'") && cleaned.endsWith("'"))) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  if (cleaned.toLowerCase().startsWith('bearer ')) {
+    cleaned = cleaned.slice(7).trim();
+  }
+  return cleaned;
+}
+
 export class GeminiProviderAdapter implements AIProviderAdapter {
   readonly providerName: AIProviderType = 'gemini';
 
@@ -117,7 +129,12 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
   async testConnection(config: ProviderRuntimeConfig): Promise<AIConnectionTestResult> {
     const startTime = Date.now();
     const endpointToTest = config.apiEndpoint || 'https://generativelanguage.googleapis.com';
-    const modelToTest = config.selectedModel || config.defaultModel || 'gemini-3.5-flash';
+    const rawModel = config.selectedModel || config.defaultModel || 'gemini-2.0-flash';
+    let modelToTest = (!rawModel || rawModel.includes(' ') || rawModel.startsWith('gemini 3.') || rawModel === 'gemini-3.5-flash')
+      ? 'gemini-2.0-flash'
+      : rawModel;
+
+    const cleanedKey = cleanApiKey(config.apiKey);
 
     try {
       // 1. Validasi SSRF & DNS Pinning pada Endpoint. S7: hasil validasi
@@ -126,7 +143,7 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
       // resmi Google apa pun endpoint terkonfigurasi).
       const endpointValidation = await validateAndPinEndpoint(endpointToTest, 'gemini');
 
-      if (!config.apiKey || !config.apiKey.trim()) {
+      if (!cleanedKey) {
         return {
           provider: 'gemini',
           endpoint: endpointToTest,
@@ -149,17 +166,35 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
 
       // 2. Kirim probe request berbobot minimal (1 token) lewat REST
       // langsung ke endpoint terkonfigurasi (S7). Timeout benar-benar
-      // membatalkan fetch (AbortSignal di callGeminiRest).
-      const probeUrl = buildGeminiRestUrl(endpointValidation.normalizedUrl, modelToTest, 'generateContent');
-      await callGeminiRest(
-        probeUrl,
-        config.apiKey,
-        {
-          contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
-          generationConfig: { maxOutputTokens: 1, temperature: 0 },
-        },
-        probeTimeoutMs
-      );
+      // membatalkan fetch (AbortSignal di callGeminiRest). Key dipakai
+      // dalam bentuk bersih (cleanApiKey: tanpa kutip/prefix bearer).
+      const probeBody = {
+        contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
+        generationConfig: { maxOutputTokens: 1, temperature: 0 },
+      };
+      const doProbe = (model: string) =>
+        callGeminiRest(
+          buildGeminiRestUrl(endpointValidation.normalizedUrl, model, 'generateContent'),
+          cleanedKey,
+          probeBody,
+          probeTimeoutMs
+        );
+      try {
+        await doProbe(modelToTest);
+      } catch (probeErr: any) {
+        // Auto-heal: bila model 404 dan bukan gemini-2.0-flash, coba sekali
+        // lagi dengan gemini-2.0-flash. Hanya variabel lokal modelToTest
+        // yang diubah (agar modelTested jujur) — config.selectedModel TIDAK
+        // dimutasi: model tersimpan tidak pernah diubah otomatis oleh tes.
+        const is404 =
+          probeErr?.status === 404 || String(probeErr?.message || '').includes('404');
+        if (is404 && modelToTest !== 'gemini-2.0-flash') {
+          modelToTest = 'gemini-2.0-flash';
+          await doProbe(modelToTest);
+        } else {
+          throw probeErr;
+        }
+      }
 
       const latencyMs = Date.now() - startTime;
 
@@ -174,7 +209,7 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
         errorMessage: null,
       };
     } catch (err: any) {
-      const normalized = this.normalizeError(err, config.apiKey);
+      const normalized = this.normalizeError(err, cleanedKey);
       return {
         provider: 'gemini',
         endpoint: endpointToTest,
@@ -240,7 +275,12 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
       // S7: body REST generateContent — bentuk yang sama seperti yang dulu
       // dibangun SDK (systemInstruction/tools/generationConfig), hanya
       // sekarang dikirim langsung lewat fetch ke endpoint terkonfigurasi.
-      const modelToUse = config.selectedModel || config.defaultModel || 'gemini-3.5-flash';
+      // Sanitasi nama model: nilai kosong/ber-spasi/'gemini 3.'/'gemini-3.5-flash'
+      // (bukan nama model valid) diganti gemini-2.0-flash.
+      const rawModel = config.selectedModel || config.defaultModel || 'gemini-2.0-flash';
+      const modelToUse = (!rawModel || rawModel.includes(' ') || rawModel.startsWith('gemini 3.') || rawModel === 'gemini-3.5-flash')
+        ? 'gemini-2.0-flash'
+        : rawModel;
       const requestBody: Record<string, any> = {
         systemInstruction: systemMessage ? { parts: [{ text: systemMessage }] } : undefined,
         tools: genAITools,
@@ -398,11 +438,9 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
    */
   async fetchAvailableModels(config: ProviderRuntimeConfig): Promise<AIModelListResult> {
     const fallbackGeminiModels: AIModelInfo[] = [
-      { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash', description: 'Model rekomendasi cepat dan cerdas untuk operasional BANTUIN', isDefault: true },
-      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', description: 'Model inferensi generasi baru dengan latensi ultra rendah' },
-      { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', description: 'Model penalaran tinggi untuk diagnosis kerusakan kompleks' },
-      { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash', description: 'Model standar stabil' },
-      { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro', description: 'Model kapasitas token besar' },
+      { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', description: 'Model rekomendasi cepat dan cerdas untuk operasional BANTUIN', isDefault: true },
+      { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash', description: 'Model standar cepat dan hemat token' },
+      { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro', description: 'Model penalaran tinggi untuk diagnosis kerusakan kompleks' },
     ];
 
     const fallback = (error: string): AIModelListResult => ({
@@ -575,13 +613,16 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
         networkSignal.includes('econnreset') ||
         networkSignal.includes('eai_again') ||
         networkSignal.includes('socket hang up') ||
-        networkSignal.includes('fetch failed');
+        networkSignal.includes('fetch failed') ||
+        networkSignal.includes('network') ||
+        networkSignal.includes('eacces');
 
       if (isNetworkError) {
         status = 'provider_error';
         httpStatusCode = null; // tidak ada respons HTTP yang diterima
         isRetryable = true;
         isFallbackEligible = true;
+        sanitizedMsg = 'Koneksi jaringan ke Google Gemini gagal atau terblokir (Periksa sambungan internet / firewall Anda).';
       } else if (lower.includes('insufficient balance') || lower.includes('insufficient_balance') || lower.includes('payment required')) {
         // L1: saldo habis tanpa status numerik — samakan dengan cabang 402
         // numerik di atas ('provider_error' + pesan "Saldo Habis"). HARUS
@@ -653,6 +694,7 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
         isRetryable = false;
         isFallbackEligible = false;
       }
+
     }
 
     return {

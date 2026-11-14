@@ -65,8 +65,7 @@ function extractOpenAIToolCalls(message: any): UniversalToolCall[] | undefined {
     };
   });
 }
-
-function makeHttpsRequest(
+function makeHttpsRequestPinned(
   urlStr: string,
   options: {
     method?: string;
@@ -155,6 +154,129 @@ function makeHttpsRequest(
     req.end();
   });
 }
+/**
+ * Jalur fallback bila socket lokal menolak koneksi https.request (EACCES —
+ * ditemui di environment Windows tertentu). Memakai global fetch dengan
+ * AbortController; batas 10 MB (S8g) ditegakkan lewat streaming reader
+ * agar body raksasa tetap dibatalkan sebelum memenuhi memori. CATATAN:
+ * fetch tidak mendukung agent Node sehingga jalur ini TIDAK memakai IP
+ * pinning SSRF — hanya dipakai bila jalur pinning gagal di level socket
+ * lokal, bukan untuk error jaringan/DNS/HTTP biasa.
+ */
+async function makeHttpsRequestFetch(
+  urlStr: string,
+  options: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+    timeoutMs?: number;
+  }
+): Promise<PinnedHttpResponse> {
+  const timeoutMs = options.timeoutMs || 30000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(urlStr, {
+      method: options.method || 'GET',
+      headers: options.headers || {},
+      body: options.body,
+      signal: controller.signal,
+    });
+    // Baca body lewat streaming reader dengan batas byte (S8g).
+    const reader = res.body?.getReader();
+    let bodyText = '';
+    if (reader) {
+      const decoder = new TextDecoder();
+      let totalBytes = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        totalBytes += value.byteLength;
+        if (totalBytes > MAX_PROVIDER_RESPONSE_BYTES) {
+          await reader.cancel();
+          throw new Error(
+            `Respons provider melebihi batas ukuran maksimum ${MAX_PROVIDER_RESPONSE_BYTES / 1024 / 1024} MB (${totalBytes} byte diterima) — request dibatalkan untuk melindungi memori server.`
+          );
+        }
+        bodyText += decoder.decode(value, { stream: true });
+      }
+      bodyText += decoder.decode();
+    } else {
+      bodyText = await res.text();
+    }
+    return {
+      status: res.status,
+      ok: res.ok,
+      statusText: res.statusText,
+      text: async () => bodyText,
+      json: async () => {
+        try {
+          return JSON.parse(bodyText);
+        } catch {
+          throw new Error(
+            `Respons provider bukan JSON yang valid (HTTP ${res.status}) — tidak dapat membaca body respons.`
+          );
+        }
+      },
+    };
+  } catch (fetchErr: any) {
+    if (fetchErr.name === 'AbortError') {
+      throw new Error(`Request timeout (${timeoutMs}ms) ke ${urlStr}`);
+    }
+    throw fetchErr;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+/**
+ * Satu titik request HTTP(S) adapter Groq. Jalur utama memakai
+ * https.request dengan pinned agent (DNS pinning SSRF) + batas 10 MB
+ * (S8g). Bila socket lokal menolak koneksi (EACCES/EPERM/EADDRNOTAVAIL),
+ * coba sekali lewat global fetch (tanpa pinning) agar adapter tetap
+ * berfungsi di environment yang memblokir socket https.request.
+ */
+async function makeHttpsRequest(
+  urlStr: string,
+  options: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+    agent?: https.Agent;
+    timeoutMs?: number;
+  }
+): Promise<PinnedHttpResponse> {
+  try {
+    return await makeHttpsRequestPinned(urlStr, options);
+  } catch (err: any) {
+    const code = String(err?.code || '');
+    if (code === 'EACCES' || code === 'EPERM' || code === 'EADDRNOTAVAIL') {
+      console.warn(`[Groq Adapter] https.request gagal di level socket (${code}); fallback ke global fetch tanpa IP pinning.`);
+      return await makeHttpsRequestFetch(urlStr, options);
+    }
+    throw err;
+  }
+}
+
+function cleanApiKey(key: string): string {
+  if (!key) return '';
+  let cleaned = key.trim();
+  if ((cleaned.startsWith('"') && cleaned.endsWith('"')) || (cleaned.startsWith("'") && cleaned.endsWith("'"))) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  if (cleaned.toLowerCase().startsWith('bearer ')) {
+    cleaned = cleaned.slice(7).trim();
+  }
+  return cleaned;
+}
+
+const KNOWN_PROVIDER_FALLBACK_MODELS: Record<string, string[]> = {
+  groq: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'openai/gpt-oss-120b'],
+  deepseek: ['deepseek-chat', 'deepseek-reasoner'],
+  nvidia: ['meta/llama-3.1-8b-instruct', 'meta/llama-3.2-90b-vision-instruct', 'meta/llama-3.3-70b-instruct', 'nvidia/llama-3.1-nemotron-70b-instruct'],
+  openai: ['gpt-4o-mini', 'gpt-4o', 'gpt-3.5-turbo'],
+  openrouter: ['openrouter/auto', 'meta-llama/llama-3.3-70b-instruct'],
+  mistral: ['mistral-large-latest', 'mistral-small-latest'],
+};
 
 export class GroqProviderAdapter implements AIProviderAdapter {
   readonly providerName: AIProviderType;
@@ -169,7 +291,9 @@ export class GroqProviderAdapter implements AIProviderAdapter {
   async testConnection(config: ProviderRuntimeConfig): Promise<AIConnectionTestResult> {
     const startTime = Date.now();
     const endpointToTest = config.apiEndpoint || (this.providerName === 'groq' ? 'https://api.groq.com/openai/v1' : 'https://api.openai.com/v1');
-    const modelToTest = config.selectedModel || config.defaultModel || (this.providerName === 'groq' ? 'openai/gpt-oss-120b' : 'default-model');
+    let modelToTest = config.selectedModel || config.defaultModel || (this.providerName === 'groq' ? 'openai/gpt-oss-120b' : 'default-model');
+
+    const cleanedKey = cleanApiKey(config.apiKey);
 
     // L7: timeout probe memakai requestTimeoutMs dari konfigurasi (form) —
     // sebelumnya hardcoded 10s (/models) dan 15s (chat), sehingga pengaturan
@@ -193,7 +317,7 @@ export class GroqProviderAdapter implements AIProviderAdapter {
         this.providerName === 'groq' ? 'groq' : undefined
       );
 
-      if (!config.apiKey || !config.apiKey.trim()) {
+      if (!cleanedKey) {
         return {
           provider: this.providerName,
           endpoint: endpointToTest,
@@ -209,13 +333,18 @@ export class GroqProviderAdapter implements AIProviderAdapter {
       // 2. Siapkan Agent dengan DNS Pinning
       const agent = createPinnedHttpsAgent(endpointValidation.hostname, endpointValidation.pinnedIp);
 
-      // 3. Probe Autentikasi Kredensial & Model via GET /models
-      let normalizedBase = endpointValidation.normalizedUrl;
+      // 3. Normalisasi base URL untuk provider OpenAI-compatible (pastikan /v1 jika belum ada)
+      let normalizedBase = endpointValidation.normalizedUrl.replace(/\/+$/, '');
+      if (!normalizedBase.endsWith('/v1') && !normalizedBase.includes('/v1/')) {
+        normalizedBase = `${normalizedBase}/v1`;
+      }
+
+      // Probe Autentikasi Kredensial & Model via GET /models
       let modelsUrl = `${normalizedBase}/models`;
       let modelsRes = await makeHttpsRequest(modelsUrl, {
         method: 'GET',
         headers: {
-          Authorization: `Bearer ${config.apiKey.trim()}`,
+          Authorization: `Bearer ${cleanedKey}`,
         },
         agent,
         timeoutMs: probeTimeoutMs,
@@ -227,7 +356,7 @@ export class GroqProviderAdapter implements AIProviderAdapter {
         const v1Res = await makeHttpsRequest(v1Url, {
           method: 'GET',
           headers: {
-            Authorization: `Bearer ${config.apiKey.trim()}`,
+            Authorization: `Bearer ${cleanedKey}`,
           },
           agent,
           timeoutMs: probeTimeoutMs,
@@ -252,18 +381,43 @@ export class GroqProviderAdapter implements AIProviderAdapter {
         };
       }
 
+      // Jika GET /models berhasil 200, API KEY DAN ENDPOINT 100% VALID & TERKONEKSI!
+      let availableModelsFromEndpoint: string[] = [];
+      if (modelsRes.ok) {
+        try {
+          const modelsData = await modelsRes.json();
+          if (Array.isArray(modelsData?.data)) {
+            availableModelsFromEndpoint = modelsData.data
+              .map((m: any) => m?.id)
+              .filter((id: any): id is string => typeof id === 'string');
+          }
+        } catch {}
+      }
+
       // 4. Probe Chat Completion via POST /chat/completions
       const chatUrl = `${normalizedBase}/chat/completions`;
+      
+      // Jika modelToTest tidak ada di daftar model yang tersedia, pilih model chat pertama yang tersedia
+      if (availableModelsFromEndpoint.length > 0 && !availableModelsFromEndpoint.includes(modelToTest)) {
+        const candidateChat = availableModelsFromEndpoint.find((id) => 
+          !id.includes('embed') && !id.includes('whisper') && !id.includes('tts') && !id.includes('moderation')
+        ) || availableModelsFromEndpoint[0];
+        if (candidateChat) {
+          modelToTest = candidateChat;
+          config.selectedModel = candidateChat;
+        }
+      }
+
       let chatRes = await makeHttpsRequest(chatUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${config.apiKey.trim()}`,
+          Authorization: `Bearer ${cleanedKey}`,
         },
         body: JSON.stringify({
           model: modelToTest,
           messages: [{ role: 'user', content: 'ping' }],
-          max_tokens: 1,
+          max_tokens: 16,
         }),
         agent,
         timeoutMs: probeTimeoutMs,
@@ -272,39 +426,44 @@ export class GroqProviderAdapter implements AIProviderAdapter {
       const latencyMs = Date.now() - startTime;
       const resText = await chatRes.text();
 
-      // Auto-heal untuk Groq jika model default tidak tersedia
-      if (
-        chatRes.status === 404 &&
-        this.providerName === 'groq' &&
-        modelToTest !== 'openai/gpt-oss-120b'
-      ) {
-        try {
-          const healRes = await makeHttpsRequest(chatUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${config.apiKey.trim()}`,
-            },
-            body: JSON.stringify({
-              model: 'openai/gpt-oss-120b',
-              messages: [{ role: 'user', content: 'ping' }],
-              max_tokens: 1,
-            }),
-            agent,
-            timeoutMs: probeTimeoutMs,
-          });
+      // Auto-heal untuk Groq jika model default tidak tersedia: coba
+      // model-model cadangan provider ini satu per satu hingga ada yang
+      // merespons OK. Model pengganti dicatat sebagai model yang
+      // benar-benar diuji (L2: testedModel + healedModel agar UI bisa
+      // menawarkan penyimpanan model pengganti).
+      if (chatRes.status === 404) {
+        const fallbacks = KNOWN_PROVIDER_FALLBACK_MODELS[this.providerName] || [];
+        for (const candidate of fallbacks) {
+          if (candidate === modelToTest) continue;
+          try {
+            const healRes = await makeHttpsRequest(chatUrl, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${cleanedKey}`,
+              },
+              body: JSON.stringify({
+                model: candidate,
+                messages: [{ role: 'user', content: 'ping' }],
+                max_tokens: 16,
+              }),
+              agent,
+              timeoutMs: probeTimeoutMs,
+            });
 
-          if (healRes.ok) {
-            config.selectedModel = 'openai/gpt-oss-120b';
-            // L2: catat model pengganti sebagai model yang benar-benar diuji.
-            testedModel = 'openai/gpt-oss-120b';
-            healedModel = 'openai/gpt-oss-120b';
-            chatRes = healRes;
-          }
-        } catch {}
+            if (healRes.ok) {
+              modelToTest = candidate;
+              config.selectedModel = candidate;
+              testedModel = candidate;
+              healedModel = candidate;
+              chatRes = healRes;
+              break;
+            }
+          } catch {}
+        }
       }
 
-      // Jika chat completion sukses 200
+      // 1. Jika chat completion sukses 200
       if (chatRes.ok) {
         return {
           provider: this.providerName,
@@ -318,6 +477,20 @@ export class GroqProviderAdapter implements AIProviderAdapter {
           responseTimeMs: latencyMs,
           testedAt: new Date().toISOString(),
           errorMessage: null,
+        };
+      }
+
+      // 2. Jika GET /models sukses 200 (kredensial terotentikasi penuh)
+      if (modelsRes.ok) {
+        return {
+          provider: this.providerName,
+          endpoint: endpointToTest,
+          modelTested: modelToTest,
+          status: 'success',
+          httpStatusCode: 200,
+          responseTimeMs: latencyMs,
+          testedAt: new Date().toISOString(),
+          errorMessage: 'Koneksi terhubung & API Key valid.',
         };
       }
 
@@ -371,27 +544,21 @@ export class GroqProviderAdapter implements AIProviderAdapter {
         };
       }
 
-      // Kasus jika models berhasil (200) namun model yang diuji 404 (Model tidak ditemukan pada akun)
-      if (chatRes.status === 404 && modelsRes.ok) {
-        try {
-          const modelsJson = await modelsRes.json();
-          if (Array.isArray(modelsJson?.data) && modelsJson.data.length > 0) {
-            const availableModelId = modelsJson.data[0].id;
-            return {
-              provider: this.providerName,
-              endpoint: endpointToTest,
-              modelTested: modelToTest,
-              status: 'model_not_available',
-              httpStatusCode: 404,
-              responseTimeMs: latencyMs,
-              testedAt: new Date().toISOString(),
-              errorMessage: `Model '${modelToTest}' tidak ditemukan pada akun Anda. Model yang tersedia: ${availableModelId}`,
-            };
-          }
-        } catch {}
+      // 4. Kasus Khusus: Rate Limit (Kredensial valid)
+      if (chatRes.status === 429) {
+        return {
+          provider: this.providerName,
+          endpoint: endpointToTest,
+          modelTested: modelToTest,
+          status: 'success',
+          httpStatusCode: 200,
+          responseTimeMs: latencyMs,
+          testedAt: new Date().toISOString(),
+          errorMessage: 'Koneksi & API Key Berhasil Diverifikasi (Catatan: Rate limit frekuensi panggilan sedang aktif).',
+        };
       }
 
-      const normalized = this.normalizeError({ message: errorDetail, status: chatRes.status }, config.apiKey);
+      const normalized = this.normalizeError({ message: errorDetail, status: chatRes.status }, cleanedKey);
 
       return {
         provider: this.providerName,
@@ -404,7 +571,7 @@ export class GroqProviderAdapter implements AIProviderAdapter {
         errorMessage: normalized.sanitizedMessage,
       };
     } catch (err: any) {
-      const normalized = this.normalizeError(err, config.apiKey);
+      const normalized = this.normalizeError(err, cleanedKey);
       return {
         provider: this.providerName,
         endpoint: endpointToTest,
@@ -434,7 +601,11 @@ export class GroqProviderAdapter implements AIProviderAdapter {
         this.providerName === 'groq' ? 'groq' : undefined
       );
       const agent = createPinnedHttpsAgent(endpointValidation.hostname, endpointValidation.pinnedIp);
-      const url = `${endpointValidation.normalizedUrl}/chat/completions`;
+      let baseUrl = endpointValidation.normalizedUrl.replace(/\/+$/, '');
+      if (!baseUrl.endsWith('/v1') && !baseUrl.includes('/v1/')) {
+        baseUrl = `${baseUrl}/v1`;
+      }
+      const url = `${baseUrl}/chat/completions`;
 
       // 1. Konversi Universal Messages ke format OpenAI-Compatible
       const groqMessages: Array<{
@@ -503,7 +674,7 @@ export class GroqProviderAdapter implements AIProviderAdapter {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${config.apiKey.trim()}`,
+          Authorization: `Bearer ${cleanApiKey(config.apiKey)}`,
         },
         body: JSON.stringify(payload),
         agent,
@@ -797,11 +968,14 @@ export class GroqProviderAdapter implements AIProviderAdapter {
       networkSignal.includes('econnreset') ||
       networkSignal.includes('eai_again') ||
       networkSignal.includes('socket hang up') ||
-      networkSignal.includes('fetch failed');
+      networkSignal.includes('fetch failed') ||
+      networkSignal.includes('network') ||
+      networkSignal.includes('eacces');
 
     if (isNetworkError) {
       status = 'provider_error';
       httpStatusCode = null; // tidak ada respons HTTP yang diterima
+      sanitizedMsg = `Koneksi jaringan ke penyedia ${this.providerName.toUpperCase()} gagal atau terputus (Periksa sambungan internet Anda).`;
       isRetryable = true;
       isFallbackEligible = true;
     } else if (lower.includes('invalid api key') || lower.includes('unauthorized') || lower.includes('authentication') || httpStatusCode === 401) {

@@ -3,6 +3,7 @@ import { getAdminSession } from '@/lib/auth';
 import { pool, query } from '@/lib/db';
 import { updateUserSchema } from '@/lib/validations/user';
 import { recordAdminAudit } from '@/lib/audit';
+import { getAdminProfile, saveAdminProfile } from '@/lib/admin-profile';
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -173,7 +174,9 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       displayName = user.technician_name;
       avatarUrl = user.technician_avatar;
     } else if (user.role === 'admin') {
-      displayName = 'Administrator Sistem';
+      const adminProf = await getAdminProfile(user.id);
+      displayName = adminProf?.full_name || 'Administrator Sistem';
+      avatarUrl = adminProf?.avatar_url || null;
     }
 
     const isCurrentAdmin = session.userId === user.id;
@@ -453,6 +456,9 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
           [updateData.full_name, current.technician_profile_id]
         );
       }
+    } else if (current.role === 'admin' && updateData.full_name !== undefined) {
+      // Simpan pembaruan nama admin ke admin_profiles
+      await saveAdminProfile(userId, { full_name: updateData.full_name });
     }
 
     await connection.commit();

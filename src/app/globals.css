@@ -1,5 +1,7 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where([data-theme="dark"] *, .dark, .dark *));
+
 @layer base {
   :root {
     --smoky-black: #11120d;
@@ -163,98 +165,102 @@
  * Deep smoky black surfaces with refined bone highlights and muted olive borders.
  * Seamlessly matches and integrates with the untouched Admin Sidebar.
  * ============================================================================== */
-.admin-theme-scope {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope {
   color-scheme: dark;
 }
 
-/* Cards & Background Containers in Admin */
-.admin-theme-scope .bg-white:not(.accent-white) {
+:is(html.light, html[data-theme="light"]) .admin-theme-scope {
+  color-scheme: light;
+}
+
+/* Cards & Background Containers in Admin (Only in Dark Mode) */
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope .bg-white:not(.accent-white) {
   background-color: #141510 !important;
   color: #fffbf4 !important;
   border-color: rgba(86, 84, 73, 0.3) !important;
 }
 
-.admin-theme-scope .bg-slate-50,
-.admin-theme-scope .bg-slate-50\/50,
-.admin-theme-scope .bg-slate-100 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope .bg-slate-50,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope .bg-slate-50\/50,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope .bg-slate-100 {
   background-color: #181914 !important;
   border-color: rgba(86, 84, 73, 0.3) !important;
 }
 
-.admin-theme-scope .border-slate-200,
-.admin-theme-scope .border-slate-200\/80,
-.admin-theme-scope .border-slate-300 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope .border-slate-200,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope .border-slate-200\/80,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope .border-slate-300 {
   border-color: rgba(86, 84, 73, 0.28) !important;
 }
 
-/* Typography & Contrast in Admin */
-.admin-theme-scope .text-slate-900 {
+/* Typography & Contrast in Admin (Only in Dark Mode) */
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope .text-slate-900 {
   color: #fffbf4 !important;
 }
 
-.admin-theme-scope .text-slate-800 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope .text-slate-800 {
   color: #f5eedf !important;
 }
 
-.admin-theme-scope .text-slate-700 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope .text-slate-700 {
   color: #d8cfbc !important;
 }
 
-.admin-theme-scope .text-slate-600 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope .text-slate-600 {
   color: #aba291 !important;
 }
 
-.admin-theme-scope .text-slate-500,
-.admin-theme-scope .text-slate-400 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope .text-slate-500,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope .text-slate-400 {
   color: #8c8678 !important;
 }
 
-/* Form Inputs, Dropdowns & Textarea in Admin */
-.admin-theme-scope input:not([type="checkbox"]):not([type="radio"]),
-.admin-theme-scope select,
-.admin-theme-scope textarea {
+/* Form Inputs, Dropdowns & Textarea in Admin (Only in Dark Mode) */
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope input:not([type="checkbox"]):not([type="radio"]),
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope select,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope textarea {
   background-color: rgba(22, 23, 18, 0.8) !important;
   color: #fffbf4 !important;
   border-color: rgba(86, 84, 73, 0.35) !important;
 }
 
-.admin-theme-scope input:focus,
-.admin-theme-scope select:focus,
-.admin-theme-scope textarea:focus {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope input:focus,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope select:focus,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope textarea:focus {
   border-color: rgba(216, 207, 188, 0.5) !important;
   box-shadow: 0 0 0 2px rgba(216, 207, 188, 0.12) !important;
 }
 
-.admin-theme-scope input::placeholder,
-.admin-theme-scope textarea::placeholder {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope input::placeholder,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope textarea::placeholder {
   color: rgba(138, 133, 120, 0.7) !important;
 }
 
-.admin-theme-scope select option {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope select option {
   background-color: #161712 !important;
   color: #fffbf4 !important;
 }
 
-/* Tables in Admin */
-.admin-theme-scope table {
+/* Tables in Admin (Only in Dark Mode) */
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope table {
   border-color: rgba(86, 84, 73, 0.25) !important;
 }
 
-.admin-theme-scope thead th {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope thead th {
   background-color: rgba(24, 25, 20, 0.9) !important;
   color: #aba291 !important;
   border-color: rgba(86, 84, 73, 0.25) !important;
 }
 
-.admin-theme-scope tbody tr {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope tbody tr {
   border-color: rgba(86, 84, 73, 0.2) !important;
 }
 
-.admin-theme-scope tbody tr:hover td {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope tbody tr:hover td {
   background-color: rgba(86, 84, 73, 0.14) !important;
 }
 
-.admin-theme-scope tbody td {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .admin-theme-scope tbody td {
   border-color: rgba(86, 84, 73, 0.2) !important;
 }
 
@@ -263,107 +269,10 @@
  * ============================================================================== */
 
 /* ------------------------------------------------------------------------------
- * 1. LIGHT MODE (TEMA TERANG: PURE WHITE #FFFFFF LUXURY SYSTEM)
- * Tetap mempertahankan background putih bersih (#FFFFFF) untuk seluruh kartu & komponen
+ * 1. DARK MODE (TEMA GELAP: SLEEK BANTUIN OBSIDIAN #141510 & #181913 SYSTEM)
+ * Berjalan otomatis pada .dark, html.dark, html[data-theme="dark"], dan .admin-theme-scope
  * ------------------------------------------------------------------------------ */
-html.light .ai-provider-white-container,
-html:not(.dark) .ai-provider-white-container {
-  background-color: #ffffff !important;
-  background-image: none !important;
-  color: #111827 !important;
-  border-color: #e5e7eb !important;
-}
-
-html.light .ai-provider-white-container .ai-white-card,
-html:not(.dark) .ai-provider-white-container .ai-white-card {
-  background-color: #ffffff !important;
-  color: #111827 !important;
-}
-
-html.light .ai-provider-white-container .ai-white-card:not([class*="ring-"]),
-html:not(.dark) .ai-provider-white-container .ai-white-card:not([class*="ring-"]) {
-  border-color: #e5e7eb !important;
-}
-
-html.light .ai-provider-white-container .ai-subcard,
-html:not(.dark) .ai-provider-white-container .ai-subcard {
-  background-color: #f9fafb !important;
-  color: #111827 !important;
-  border-color: #e5e7eb !important;
-}
-
-html.light .ai-provider-white-container input:not([type="checkbox"]):not([type="radio"]),
-html.light .ai-provider-white-container select,
-html.light .ai-provider-white-container textarea,
-html:not(.dark) .ai-provider-white-container input:not([type="checkbox"]):not([type="radio"]),
-html:not(.dark) .ai-provider-white-container select,
-html:not(.dark) .ai-provider-white-container textarea {
-  background-color: #ffffff !important;
-  color: #111827 !important;
-  border-color: #d1d5db !important;
-}
-
-html.light .ai-provider-white-container button.bg-white,
-html.light .ai-provider-white-container .ai-btn-white,
-html.light .ai-modal-box .ai-btn-white,
-html:not(.dark) .ai-provider-white-container button.bg-white,
-html:not(.dark) .ai-provider-white-container .ai-btn-white,
-html:not(.dark) .ai-modal-box .ai-btn-white {
-  background-color: #ffffff !important;
-  color: #374151 !important;
-  border-color: #d1d5db !important;
-}
-
-html.light .ai-provider-white-container button.bg-white:hover,
-html.light .ai-provider-white-container .ai-btn-white:hover,
-html.light .ai-modal-box .ai-btn-white:hover,
-html:not(.dark) .ai-provider-white-container button.bg-white:hover,
-html:not(.dark) .ai-provider-white-container .ai-btn-white:hover,
-html:not(.dark) .ai-modal-box .ai-btn-white:hover {
-  background-color: #f9fafb !important;
-  color: #111827 !important;
-}
-
-html.light .ai-provider-white-container select option,
-html:not(.dark) .ai-provider-white-container select option {
-  background-color: #ffffff !important;
-  color: #111827 !important;
-}
-
-html.light .ai-modal-box,
-html:not(.dark) .ai-modal-box {
-  background-color: #ffffff !important;
-  color: #111827 !important;
-  border-color: #e5e7eb !important;
-}
-
-html.light .ai-provider-white-container .text-gray-900,
-html:not(.dark) .ai-provider-white-container .text-gray-900 {
-  color: #111827 !important;
-}
-html.light .ai-provider-white-container .text-gray-800,
-html:not(.dark) .ai-provider-white-container .text-gray-800 {
-  color: #1f2937 !important;
-}
-html.light .ai-provider-white-container .text-gray-700,
-html:not(.dark) .ai-provider-white-container .text-gray-700 {
-  color: #374151 !important;
-}
-html.light .ai-provider-white-container .text-gray-600,
-html:not(.dark) .ai-provider-white-container .text-gray-600 {
-  color: #4b5563 !important;
-}
-html.light .ai-provider-white-container .text-gray-500,
-html:not(.dark) .ai-provider-white-container .text-gray-500 {
-  color: #6b7280 !important;
-}
-
-/* ------------------------------------------------------------------------------
- * 2. DARK MODE (TEMA GELAP: SLEEK BANTUIN OBSIDIAN #141510 & #181913 SYSTEM)
- * Mengubah container, kartu, dan komponen menjadi gelap berkelas tanpa mengubah tema terang
- * ------------------------------------------------------------------------------ */
-html.dark .ai-provider-white-container,
-html[data-theme="dark"] .ai-provider-white-container {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container {
   background-color: #141510 !important;
   background-image: none !important;
   color: #fffbf4 !important;
@@ -371,113 +280,81 @@ html[data-theme="dark"] .ai-provider-white-container {
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45) !important;
 }
 
-html.dark .ai-provider-white-container .ai-white-card,
-html[data-theme="dark"] .ai-provider-white-container .ai-white-card {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .ai-white-card {
   background-color: #181913 !important;
   color: #fffbf4 !important;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3) !important;
 }
 
-html.dark .ai-provider-white-container .ai-white-card:not([class*="ring-"]),
-html[data-theme="dark"] .ai-provider-white-container .ai-white-card:not([class*="ring-"]) {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .ai-white-card:not([class*="ring-"]) {
   border-color: rgba(216, 207, 188, 0.12) !important;
 }
 
-html.dark .ai-provider-white-container .ai-white-card:not([class*="ring-"]):hover,
-html[data-theme="dark"] .ai-provider-white-container .ai-white-card:not([class*="ring-"]):hover {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .ai-white-card:not([class*="ring-"]):hover {
   border-color: rgba(216, 207, 188, 0.25) !important;
 }
 
-html.dark .ai-provider-white-container .ai-subcard,
-html[data-theme="dark"] .ai-provider-white-container .ai-subcard {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .ai-subcard {
   background-color: #11120d !important;
   color: #fffbf4 !important;
   border-color: rgba(216, 207, 188, 0.1) !important;
 }
 
-html.dark .ai-provider-white-container input:not([type="checkbox"]):not([type="radio"]),
-html.dark .ai-provider-white-container select,
-html.dark .ai-provider-white-container textarea,
-html.dark .ai-modal-box input:not([type="checkbox"]):not([type="radio"]),
-html.dark .ai-modal-box select,
-html.dark .ai-modal-box textarea,
-html[data-theme="dark"] .ai-provider-white-container input:not([type="checkbox"]):not([type="radio"]),
-html[data-theme="dark"] .ai-provider-white-container select,
-html[data-theme="dark"] .ai-provider-white-container textarea,
-html[data-theme="dark"] .ai-modal-box input:not([type="checkbox"]):not([type="radio"]),
-html[data-theme="dark"] .ai-modal-box select,
-html[data-theme="dark"] .ai-modal-box textarea {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container input:not([type="checkbox"]):not([type="radio"]),
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container select,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container textarea,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box input:not([type="checkbox"]):not([type="radio"]),
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box select,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box textarea {
   background-color: #11120d !important;
   color: #fffbf4 !important;
   border-color: rgba(216, 207, 188, 0.2) !important;
 }
 
-html.dark .ai-provider-white-container input:focus,
-html.dark .ai-provider-white-container select:focus,
-html.dark .ai-provider-white-container textarea:focus,
-html.dark .ai-modal-box input:focus,
-html.dark .ai-modal-box select:focus,
-html.dark .ai-modal-box textarea:focus,
-html[data-theme="dark"] .ai-provider-white-container input:focus,
-html[data-theme="dark"] .ai-provider-white-container select:focus,
-html[data-theme="dark"] .ai-provider-white-container textarea:focus,
-html[data-theme="dark"] .ai-modal-box input:focus,
-html[data-theme="dark"] .ai-modal-box select:focus,
-html[data-theme="dark"] .ai-modal-box textarea:focus {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container input:focus,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container select:focus,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container textarea:focus,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box input:focus,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box select:focus,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box textarea:focus {
   border-color: rgba(216, 207, 188, 0.5) !important;
   box-shadow: 0 0 0 2px rgba(216, 207, 188, 0.12) !important;
 }
 
-html.dark .ai-provider-white-container input::placeholder,
-html.dark .ai-provider-white-container textarea::placeholder,
-html.dark .ai-modal-box input::placeholder,
-html.dark .ai-modal-box textarea::placeholder,
-html[data-theme="dark"] .ai-provider-white-container input::placeholder,
-html[data-theme="dark"] .ai-provider-white-container textarea::placeholder,
-html[data-theme="dark"] .ai-modal-box input::placeholder,
-html[data-theme="dark"] .ai-modal-box textarea::placeholder {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container input::placeholder,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container textarea::placeholder,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box input::placeholder,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box textarea::placeholder {
   color: rgba(139, 136, 120, 0.7) !important;
 }
 
-html.dark .ai-provider-white-container select option,
-html.dark .ai-modal-box select option,
-html[data-theme="dark"] .ai-provider-white-container select option,
-html[data-theme="dark"] .ai-modal-box select option {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container select option,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box select option {
   background-color: #161712 !important;
   color: #fffbf4 !important;
 }
 
-html.dark .ai-provider-white-container button.bg-white,
-html.dark .ai-provider-white-container .ai-btn-white,
-html.dark .ai-modal-box .ai-btn-white,
-html[data-theme="dark"] .ai-provider-white-container button.bg-white,
-html[data-theme="dark"] .ai-provider-white-container .ai-btn-white,
-html[data-theme="dark"] .ai-modal-box .ai-btn-white {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container button.bg-white,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .ai-btn-white,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box .ai-btn-white {
   background-color: #181913 !important;
   color: #d8cfbc !important;
   border-color: rgba(216, 207, 188, 0.2) !important;
 }
 
-html.dark .ai-provider-white-container button.bg-white:hover,
-html.dark .ai-provider-white-container .ai-btn-white:hover,
-html.dark .ai-modal-box .ai-btn-white:hover,
-html[data-theme="dark"] .ai-provider-white-container button.bg-white:hover,
-html[data-theme="dark"] .ai-provider-white-container .ai-btn-white:hover,
-html[data-theme="dark"] .ai-modal-box .ai-btn-white:hover {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container button.bg-white:hover,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .ai-btn-white:hover,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box .ai-btn-white:hover {
   background-color: #1c1d17 !important;
   color: #fffbf4 !important;
   border-color: rgba(216, 207, 188, 0.35) !important;
 }
 
 /* Modals in Dark Mode */
-html.dark .ai-modal-box,
-html.dark .fixed .ai-modal-box,
-html.dark .ai-provider-white-container .bg-white.shadow-2xl,
-html.dark .fixed .bg-white.shadow-2xl,
-html[data-theme="dark"] .ai-modal-box,
-html[data-theme="dark"] .fixed .ai-modal-box,
-html[data-theme="dark"] .ai-provider-white-container .bg-white.shadow-2xl,
-html[data-theme="dark"] .fixed .bg-white.shadow-2xl {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .fixed .ai-modal-box,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .bg-white.shadow-2xl,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .fixed .bg-white.shadow-2xl {
   background-color: #181913 !important;
   color: #fffbf4 !important;
   border-color: rgba(216, 207, 188, 0.2) !important;
@@ -485,224 +362,547 @@ html[data-theme="dark"] .fixed .bg-white.shadow-2xl {
 }
 
 /* Text Colors in Dark Mode */
-html.dark .ai-provider-white-container .text-gray-900,
-html.dark .ai-modal-box .text-gray-900,
-html[data-theme="dark"] .ai-provider-white-container .text-gray-900,
-html[data-theme="dark"] .ai-modal-box .text-gray-900 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .text-gray-900,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box .text-gray-900 {
   color: #fffbf4 !important;
 }
-html.dark .ai-provider-white-container .text-gray-800,
-html.dark .ai-modal-box .text-gray-800,
-html[data-theme="dark"] .ai-provider-white-container .text-gray-800,
-html[data-theme="dark"] .ai-modal-box .text-gray-800 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .text-gray-800,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box .text-gray-800 {
   color: #f5eedf !important;
 }
-html.dark .ai-provider-white-container .text-gray-700,
-html.dark .ai-modal-box .text-gray-700,
-html[data-theme="dark"] .ai-provider-white-container .text-gray-700,
-html[data-theme="dark"] .ai-modal-box .text-gray-700 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .text-gray-700,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box .text-gray-700 {
   color: #d8cfbc !important;
 }
-html.dark .ai-provider-white-container .text-gray-600,
-html.dark .ai-modal-box .text-gray-600,
-html[data-theme="dark"] .ai-provider-white-container .text-gray-600,
-html[data-theme="dark"] .ai-modal-box .text-gray-600 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .text-gray-600,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box .text-gray-600 {
   color: #aba291 !important;
 }
-html.dark .ai-provider-white-container .text-gray-500,
-html.dark .ai-modal-box .text-gray-500,
-html[data-theme="dark"] .ai-provider-white-container .text-gray-500,
-html[data-theme="dark"] .ai-modal-box .text-gray-500 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .text-gray-500,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box .text-gray-500 {
   color: #8b8878 !important;
 }
 
 /* Dark Mode Brand Icon Containers */
-html.dark .ai-provider-white-container .bg-blue-50,
-html.dark .ai-modal-box .bg-blue-50,
-html[data-theme="dark"] .ai-provider-white-container .bg-blue-50,
-html[data-theme="dark"] .ai-modal-box .bg-blue-50 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .bg-blue-50,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box .bg-blue-50 {
   background-color: rgba(37, 99, 235, 0.15) !important;
   border-color: rgba(59, 130, 246, 0.3) !important;
   color: #93c5fd !important;
 }
 
-html.dark .ai-provider-white-container .bg-orange-50,
-html.dark .ai-modal-box .bg-orange-50,
-html[data-theme="dark"] .ai-provider-white-container .bg-orange-50,
-html[data-theme="dark"] .ai-modal-box .bg-orange-50 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .bg-orange-50,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box .bg-orange-50 {
   background-color: rgba(234, 88, 12, 0.15) !important;
   border-color: rgba(249, 115, 22, 0.3) !important;
   color: #fdba74 !important;
 }
 
-html.dark .ai-provider-white-container .bg-sky-50,
-html.dark .ai-modal-box .bg-sky-50,
-html[data-theme="dark"] .ai-provider-white-container .bg-sky-50,
-html[data-theme="dark"] .ai-modal-box .bg-sky-50 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .bg-sky-50,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box .bg-sky-50 {
   background-color: rgba(2, 132, 199, 0.15) !important;
   border-color: rgba(14, 165, 233, 0.3) !important;
   color: #7dd3fc !important;
 }
 
-html.dark .ai-provider-white-container .bg-violet-50,
-html.dark .ai-modal-box .bg-violet-50,
-html[data-theme="dark"] .ai-provider-white-container .bg-violet-50,
-html[data-theme="dark"] .ai-modal-box .bg-violet-50 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .bg-violet-50,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box .bg-violet-50 {
   background-color: rgba(124, 58, 237, 0.15) !important;
   border-color: rgba(139, 92, 246, 0.3) !important;
   color: #c4b5fd !important;
 }
 
-html.dark .ai-provider-white-container .bg-emerald-50,
-html.dark .ai-modal-box .bg-emerald-50,
-html.dark .fixed .bg-emerald-50,
-html[data-theme="dark"] .ai-provider-white-container .bg-emerald-50,
-html[data-theme="dark"] .ai-modal-box .bg-emerald-50,
-html[data-theme="dark"] .fixed .bg-emerald-50 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .bg-emerald-50,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box .bg-emerald-50,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .fixed .bg-emerald-50 {
   background-color: rgba(5, 150, 105, 0.15) !important;
   border-color: rgba(16, 185, 129, 0.3) !important;
   color: #6ee7b7 !important;
 }
 
-html.dark .ai-provider-white-container .bg-amber-50,
-html.dark .ai-modal-box .bg-amber-50,
-html.dark .fixed .bg-amber-50,
-html[data-theme="dark"] .ai-provider-white-container .bg-amber-50,
-html[data-theme="dark"] .ai-modal-box .bg-amber-50,
-html[data-theme="dark"] .fixed .bg-amber-50 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .bg-amber-50,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box .bg-amber-50,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .fixed .bg-amber-50 {
   background-color: rgba(217, 119, 6, 0.15) !important;
   border-color: rgba(245, 158, 11, 0.3) !important;
   color: #fcd34d !important;
 }
 
-html.dark .ai-provider-white-container .bg-rose-50,
-html.dark .ai-modal-box .bg-rose-50,
-html.dark .fixed .bg-rose-50,
-html[data-theme="dark"] .ai-provider-white-container .bg-rose-50,
-html[data-theme="dark"] .ai-modal-box .bg-rose-50,
-html[data-theme="dark"] .fixed .bg-rose-50 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .bg-rose-50,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box .bg-rose-50,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .fixed .bg-rose-50 {
   background-color: rgba(225, 29, 72, 0.15) !important;
   border-color: rgba(244, 63, 94, 0.3) !important;
   color: #fda4af !important;
 }
 
-html.dark .ai-provider-white-container .bg-indigo-50,
-html.dark .ai-modal-box .bg-indigo-50,
-html[data-theme="dark"] .ai-provider-white-container .bg-indigo-50,
-html[data-theme="dark"] .ai-modal-box .bg-indigo-50 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .bg-indigo-50,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box .bg-indigo-50 {
   background-color: rgba(79, 70, 229, 0.15) !important;
   border-color: rgba(99, 102, 241, 0.3) !important;
   color: #a5b4fc !important;
 }
 
 /* Dark Mode Switcher Active Pill */
-html.dark .ai-provider-white-container .bg-blue-50.border-blue-400,
-html[data-theme="dark"] .ai-provider-white-container .bg-blue-50.border-blue-400 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .bg-blue-50.border-blue-400 {
   background-color: rgba(37, 99, 235, 0.25) !important;
   border-color: rgba(59, 130, 246, 0.7) !important;
   color: #bfdbfe !important;
 }
 
-html.dark .ai-provider-white-container .bg-orange-50.border-orange-400,
-html[data-theme="dark"] .ai-provider-white-container .bg-orange-50.border-orange-400 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .bg-orange-50.border-orange-400 {
   background-color: rgba(234, 88, 12, 0.25) !important;
   border-color: rgba(249, 115, 22, 0.7) !important;
   color: #fed7aa !important;
 }
 
-html.dark .ai-provider-white-container .bg-sky-50.border-sky-400,
-html[data-theme="dark"] .ai-provider-white-container .bg-sky-50.border-sky-400 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .bg-sky-50.border-sky-400 {
   background-color: rgba(2, 132, 199, 0.25) !important;
   border-color: rgba(14, 165, 233, 0.7) !important;
   color: #bae6fd !important;
 }
 
-html.dark .ai-provider-white-container .bg-violet-50.border-violet-400,
-html[data-theme="dark"] .ai-provider-white-container .bg-violet-50.border-violet-400 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .bg-violet-50.border-violet-400 {
   background-color: rgba(124, 58, 237, 0.25) !important;
   border-color: rgba(139, 92, 246, 0.7) !important;
   color: #ddd6fe !important;
 }
 
-html.dark .ai-provider-white-container .bg-emerald-50.border-emerald-400,
-html[data-theme="dark"] .ai-provider-white-container .bg-emerald-50.border-emerald-400 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .bg-emerald-50.border-emerald-400 {
   background-color: rgba(5, 150, 105, 0.25) !important;
   border-color: rgba(16, 185, 129, 0.7) !important;
   color: #a7f3d0 !important;
 }
 
-html.dark .ai-provider-white-container .bg-amber-50.border-amber-400,
-html[data-theme="dark"] .ai-provider-white-container .bg-amber-50.border-amber-400 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .bg-amber-50.border-amber-400 {
   background-color: rgba(217, 119, 6, 0.25) !important;
   border-color: rgba(245, 158, 11, 0.7) !important;
   color: #fde68a !important;
 }
 
 /* Dark Mode Badges & General Backgrounds */
-html.dark .ai-provider-white-container .bg-gray-100,
-html.dark .ai-modal-box .bg-gray-100,
-html[data-theme="dark"] .ai-provider-white-container .bg-gray-100,
-html[data-theme="dark"] .ai-modal-box .bg-gray-100 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .bg-gray-100,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box .bg-gray-100 {
   background-color: #1c1d17 !important;
   color: #d8cfbc !important;
   border-color: rgba(216, 207, 188, 0.2) !important;
 }
 
-html.dark .ai-provider-white-container .bg-gray-50,
-html.dark .ai-modal-box .bg-gray-50,
-html[data-theme="dark"] .ai-provider-white-container .bg-gray-50,
-html[data-theme="dark"] .ai-modal-box .bg-gray-50 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .bg-gray-50,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box .bg-gray-50 {
   background-color: #11120d !important;
   color: #fffbf4 !important;
   border-color: rgba(216, 207, 188, 0.12) !important;
 }
 
-html.dark .ai-provider-white-container .text-emerald-600,
-html.dark .ai-provider-white-container .text-emerald-700,
-html[data-theme="dark"] .ai-provider-white-container .text-emerald-600,
-html[data-theme="dark"] .ai-provider-white-container .text-emerald-700 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .text-emerald-600,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .text-emerald-700 {
   color: #34d399 !important;
 }
 
-html.dark .ai-provider-white-container .text-amber-600,
-html.dark .ai-provider-white-container .text-amber-700,
-html.dark .ai-provider-white-container .text-amber-800,
-html[data-theme="dark"] .ai-provider-white-container .text-amber-600,
-html[data-theme="dark"] .ai-provider-white-container .text-amber-700,
-html[data-theme="dark"] .ai-provider-white-container .text-amber-800 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .text-amber-600,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .text-amber-700,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .text-amber-800 {
   color: #fbbf24 !important;
 }
 
-html.dark .ai-provider-white-container .text-rose-600,
-html.dark .ai-provider-white-container .text-rose-700,
-html[data-theme="dark"] .ai-provider-white-container .text-rose-600,
-html[data-theme="dark"] .ai-provider-white-container .text-rose-700 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .text-rose-600,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .text-rose-700 {
   color: #fb7185 !important;
 }
 
-html.dark .ai-provider-white-container .border-gray-100,
-html.dark .ai-provider-white-container .border-gray-200,
-html.dark .ai-provider-white-container .border-gray-300,
-html.dark .ai-modal-box .border-gray-200,
-html.dark .ai-modal-box .border-gray-300,
-html[data-theme="dark"] .ai-provider-white-container .border-gray-100,
-html[data-theme="dark"] .ai-provider-white-container .border-gray-200,
-html[data-theme="dark"] .ai-provider-white-container .border-gray-300,
-html[data-theme="dark"] .ai-modal-box .border-gray-200,
-html[data-theme="dark"] .ai-modal-box .border-gray-300 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .border-gray-100,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .border-gray-200,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .border-gray-300,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box .border-gray-200,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box .border-gray-300 {
   border-color: rgba(216, 207, 188, 0.12) !important;
 }
 
-html.dark .ai-provider-white-container .border-gray-400,
-html.dark .ai-modal-box .border-gray-400,
-html[data-theme="dark"] .ai-provider-white-container .border-gray-400,
-html[data-theme="dark"] .ai-modal-box .border-gray-400 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .border-gray-400,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-modal-box .border-gray-400 {
   border-color: rgba(216, 207, 188, 0.25) !important;
 }
 
-html.dark .ai-provider-white-container .bg-zinc-300,
-html[data-theme="dark"] .ai-provider-white-container .bg-zinc-300 {
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-provider-white-container .bg-zinc-300 {
   background-color: #2e3025 !important;
+}
+
+/* ------------------------------------------------------------------------------
+ * 2. LIGHT MODE OVERRIDE (TEMA TERANG: PURE WHITE #FFFFFF LUXURY SYSTEM)
+ * Diterapkan ketika tema terang dipilih secara eksplisit (html[data-theme="light"] / html.light)
+ * ------------------------------------------------------------------------------ */
+:is(html[data-theme="light"], html.light) .ai-provider-white-container {
+  background-color: #ffffff !important;
+  background-image: none !important;
+  color: #111827 !important;
+  border-color: #e5e7eb !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1) !important;
+}
+
+:is(html[data-theme="light"], html.light) .ai-provider-white-container .ai-white-card {
+  background-color: #ffffff !important;
+  color: #111827 !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05) !important;
+}
+
+:is(html[data-theme="light"], html.light) .ai-provider-white-container .ai-white-card:not([class*="ring-"]) {
+  border-color: #e5e7eb !important;
+}
+
+:is(html[data-theme="light"], html.light) .ai-provider-white-container .ai-subcard {
+  background-color: #f9fafb !important;
+  color: #111827 !important;
+  border-color: #e5e7eb !important;
+}
+
+:is(html[data-theme="light"], html.light) .ai-provider-white-container input:not([type="checkbox"]):not([type="radio"]),
+:is(html[data-theme="light"], html.light) .ai-provider-white-container select,
+:is(html[data-theme="light"], html.light) .ai-provider-white-container textarea,
+:is(html[data-theme="light"], html.light) .ai-modal-box input:not([type="checkbox"]):not([type="radio"]),
+:is(html[data-theme="light"], html.light) .ai-modal-box select,
+:is(html[data-theme="light"], html.light) .ai-modal-box textarea {
+  background-color: #ffffff !important;
+  color: #111827 !important;
+  border-color: #d1d5db !important;
+}
+
+:is(html[data-theme="light"], html.light) .ai-provider-white-container button.bg-white,
+:is(html[data-theme="light"], html.light) .ai-provider-white-container .ai-btn-white,
+:is(html[data-theme="light"], html.light) .ai-modal-box .ai-btn-white {
+  background-color: #ffffff !important;
+  color: #374151 !important;
+  border-color: #d1d5db !important;
+}
+
+:is(html[data-theme="light"], html.light) .ai-provider-white-container button.bg-white:hover,
+:is(html[data-theme="light"], html.light) .ai-provider-white-container .ai-btn-white:hover,
+:is(html[data-theme="light"], html.light) .ai-modal-box .ai-btn-white:hover {
+  background-color: #f9fafb !important;
+  color: #111827 !important;
+}
+
+:is(html[data-theme="light"], html.light) .ai-provider-white-container select option,
+:is(html[data-theme="light"], html.light) .ai-modal-box select option {
+  background-color: #ffffff !important;
+  color: #111827 !important;
+}
+
+:is(html[data-theme="light"], html.light) .ai-modal-box {
+  background-color: #ffffff !important;
+  color: #111827 !important;
+  border-color: #e5e7eb !important;
+}
+
+:is(html[data-theme="light"], html.light) .ai-provider-white-container .text-gray-900,
+:is(html[data-theme="light"], html.light) .ai-modal-box .text-gray-900 {
+  color: #111827 !important;
+}
+:is(html[data-theme="light"], html.light) .ai-provider-white-container .text-gray-800,
+:is(html[data-theme="light"], html.light) .ai-modal-box .text-gray-800 {
+  color: #1f2937 !important;
+}
+:is(html[data-theme="light"], html.light) .ai-provider-white-container .text-gray-700,
+:is(html[data-theme="light"], html.light) .ai-modal-box .text-gray-700 {
+  color: #374151 !important;
+}
+:is(html[data-theme="light"], html.light) .ai-provider-white-container .text-gray-600,
+:is(html[data-theme="light"], html.light) .ai-modal-box .text-gray-600 {
+  color: #4b5563 !important;
+}
+:is(html[data-theme="light"], html.light) .ai-provider-white-container .text-gray-500,
+:is(html[data-theme="light"], html.light) .ai-modal-box .text-gray-500 {
+  color: #6b7280 !important;
+}
+
+/* ==============================================================================
+ * AI INTELLIGENCE SUITE - DUAL THEME ENGINE (LIGHT & DARK ADAPTIVE)
+ * ============================================================================== */
+
+/* ------------------------------------------------------------------------------
+ * 1. DARK MODE (TEMA GELAP: SLEEK BANTUIN OBSIDIAN SYSTEM)
+ * ------------------------------------------------------------------------------ */
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-intelligence-suite-container {
+  background-color: #141510 !important;
+  color: #fffbf4 !important;
+  border-color: rgba(216, 207, 188, 0.2) !important;
+}
+
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-intelligence-suite-container .ai-doc-card {
+  background-color: #181913 !important;
+  color: #fffbf4 !important;
+  border-color: rgba(216, 207, 188, 0.15) !important;
+}
+
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-intelligence-suite-container .ai-doc-card-title {
+  color: #fffbf4 !important;
+}
+
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-intelligence-suite-container .ai-doc-card-desc {
+  color: rgba(216, 207, 188, 0.7) !important;
+}
+
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-intelligence-suite-container input:not([type="checkbox"]):not([type="radio"]),
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-intelligence-suite-container select,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-intelligence-suite-container textarea {
+  background-color: #161712 !important;
+  color: #fffbf4 !important;
+  border-color: rgba(216, 207, 188, 0.25) !important;
+}
+
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-intelligence-suite-container input::placeholder,
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-intelligence-suite-container textarea::placeholder {
+  color: rgba(171, 162, 145, 0.65) !important;
+}
+
+:is(html.dark, html[data-theme="dark"], html:not(.light)) .ai-intelligence-suite-container select option {
+  background-color: #161712 !important;
+  color: #fffbf4 !important;
+}
+
+/* ------------------------------------------------------------------------------
+ * 2. LIGHT MODE (TEMA TERANG: PURE WHITE #FFFFFF LUXURY SYSTEM)
+ * Diterapkan ketika tema terang dipilih (html.light / html[data-theme="light"])
+ * ------------------------------------------------------------------------------ */
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container {
+  background-color: #ffffff !important;
+  color: #09090b !important;
+  border-color: #e4e4e7 !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05), 0 4px 16px -2px rgba(0, 0, 0, 0.03) !important;
+}
+
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container .ai-doc-card {
+  background-color: #ffffff !important;
+  color: #09090b !important;
+  border-color: #e4e4e7 !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04) !important;
+}
+
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container .ai-doc-card-title {
+  color: #09090b !important;
+}
+
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container .ai-doc-card-desc {
+  color: #52525b !important;
+}
+
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container input:not([type="checkbox"]):not([type="radio"]),
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container select,
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container textarea {
+  background-color: #ffffff !important;
+  color: #09090b !important;
+  border-color: #e4e4e7 !important;
+}
+
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container input::placeholder,
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container textarea::placeholder {
+  color: #a1a1aa !important;
+}
+
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container select option {
+  background-color: #ffffff !important;
+  color: #09090b !important;
+}
+
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container .text-slate-900,
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container .text-white,
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container .text-slate-800 {
+  color: #09090b !important;
+}
+
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container .text-slate-500,
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container .text-slate-600,
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container .text-\[\#D8CFBC\],
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container .text-\[\#D8CFBC\]\/70,
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container .text-\[\#D8CFBC\]\/80 {
+  color: #52525b !important;
+}
+
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container .border-slate-200,
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container .border-\[\#D8CFBC\]\/15,
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container .border-\[\#D8CFBC\]\/20 {
+  border-color: #e4e4e7 !important;
+}
+
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container .bg-slate-100,
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container .bg-\[\#11120D\],
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container .bg-\[\#161712\],
+:is(html.light, html[data-theme="light"]) .ai-intelligence-suite-container .bg-\[\#181913\] {
+  background-color: #f4f4f5 !important;
+}
+
+/* ==============================================================================
+ * BANTUIN CHATBOT+ & DIAGNOSIS DUAL THEME (OBSIDIAN DARK VS PURE WHITE LIGHT)
+ * ============================================================================== */
+
+/* ------------------------------------------------------------------------------
+ * 1. DARK MODE CHATBOT (Sleek Obsidian #181913, Bone #FFFBF4 & Bronze #D8CFBC)
+ * Aktif otomatis saat mode gelap aktif (html.dark, html[data-theme="dark"], atau default)
+ * ------------------------------------------------------------------------------ */
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light))) .chatbot-floating-trigger {
+  background-color: #181913 !important;
+  color: #fffbf4 !important;
+  border-color: rgba(216, 207, 188, 0.3) !important;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.6), 0 8px 10px -6px rgba(0, 0, 0, 0.6) !important;
+}
+
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light))) .chatbot-floating-trigger svg {
+  color: #d8cfbc !important;
+}
+
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light))) .chatbot-modal-window {
+  background-color: rgba(20, 21, 16, 0.98) !important;
+  color: #fffbf4 !important;
+  border-color: rgba(216, 207, 188, 0.25) !important;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.75) !important;
+}
+
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light))) .chatbot-header {
+  background-color: rgba(24, 25, 19, 0.95) !important;
+  border-color: rgba(216, 207, 188, 0.15) !important;
+  color: #fffbf4 !important;
+}
+
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light))) .chatbot-bubble-assistant {
+  background-color: rgba(28, 29, 23, 0.92) !important;
+  border-color: rgba(216, 207, 188, 0.18) !important;
+  color: #fffbf4 !important;
+}
+
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light))) .chatbot-bubble-user {
+  background-color: #fffbf4 !important;
+  color: #11120d !important;
+}
+
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light))) .chatbot-chips-bar {
+  background-color: rgba(24, 25, 19, 0.8) !important;
+  border-color: rgba(216, 207, 188, 0.15) !important;
+}
+
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light))) .chatbot-chip {
+  background-color: #1c1d17 !important;
+  border-color: rgba(216, 207, 188, 0.22) !important;
+  color: #d8cfbc !important;
+}
+
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light))) .chatbot-chip:hover {
+  background-color: rgba(216, 207, 188, 0.15) !important;
+  color: #fffbf4 !important;
+}
+
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light))) .chatbot-footer {
+  background-color: rgba(24, 25, 19, 0.95) !important;
+  border-color: rgba(216, 207, 188, 0.15) !important;
+}
+
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light))) .chatbot-input-form {
+  background-color: #11120d !important;
+  border-color: rgba(216, 207, 188, 0.22) !important;
+}
+
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light))) .chatbot-input-field {
+  color: #fffbf4 !important;
+}
+
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light))) .chatbot-input-field::placeholder {
+  color: #8b8878 !important;
+}
+
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light))) .chatbot-send-btn {
+  background-color: #fffbf4 !important;
+  color: #11120d !important;
+}
+
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light))) .chatbot-diagnosis-card {
+  background-color: rgba(24, 25, 19, 0.95) !important;
+  border-color: rgba(216, 207, 188, 0.25) !important;
+  color: #fffbf4 !important;
+}
+
+/* ------------------------------------------------------------------------------
+ * 2. LIGHT MODE CHATBOT (Crisp Pure White #FFFFFF, Zinc #E4E4E7 & Slate #09090B)
+ * Aktif saat mode terang dipilih (html.light, html[data-theme="light"])
+ * ------------------------------------------------------------------------------ */
+:is(html.light, html[data-theme="light"]) .chatbot-floating-trigger {
+  background-color: #ffffff !important;
+  color: #09090b !important;
+  border-color: #e4e4e7 !important;
+  box-shadow: 0 10px 25px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.08) !important;
+}
+
+:is(html.light, html[data-theme="light"]) .chatbot-floating-trigger svg {
+  color: #d97706 !important;
+}
+
+:is(html.light, html[data-theme="light"]) .chatbot-modal-window {
+  background-color: rgba(255, 255, 255, 0.98) !important;
+  color: #09090b !important;
+  border-color: #e4e4e7 !important;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.15) !important;
+}
+
+:is(html.light, html[data-theme="light"]) .chatbot-header {
+  background-color: #fafafa !important;
+  border-color: #e4e4e7 !important;
+  color: #09090b !important;
+}
+
+:is(html.light, html[data-theme="light"]) .chatbot-bubble-assistant {
+  background-color: #f4f4f5 !important;
+  border-color: #e4e4e7 !important;
+  color: #09090b !important;
+}
+
+:is(html.light, html[data-theme="light"]) .chatbot-bubble-user {
+  background-color: #09090b !important;
+  color: #fafafa !important;
+}
+
+:is(html.light, html[data-theme="light"]) .chatbot-chips-bar {
+  background-color: #fafafa !important;
+  border-color: #e4e4e7 !important;
+}
+
+:is(html.light, html[data-theme="light"]) .chatbot-chip {
+  background-color: #ffffff !important;
+  border-color: #e4e4e7 !important;
+  color: #27272a !important;
+}
+
+:is(html.light, html[data-theme="light"]) .chatbot-chip:hover {
+  background-color: #f4f4f5 !important;
+  color: #09090b !important;
+  border-color: #d4d4d8 !important;
+}
+
+:is(html.light, html[data-theme="light"]) .chatbot-footer {
+  background-color: #fafafa !important;
+  border-color: #e4e4e7 !important;
+}
+
+:is(html.light, html[data-theme="light"]) .chatbot-input-form {
+  background-color: #ffffff !important;
+  border-color: #e4e4e7 !important;
+}
+
+:is(html.light, html[data-theme="light"]) .chatbot-input-field {
+  color: #09090b !important;
+}
+
+:is(html.light, html[data-theme="light"]) .chatbot-input-field::placeholder {
+  color: #a1a1aa !important;
+}
+
+:is(html.light, html[data-theme="light"]) .chatbot-send-btn {
+  background-color: #09090b !important;
+  color: #fafafa !important;
+}
+
+:is(html.light, html[data-theme="light"]) .chatbot-diagnosis-card {
+  background-color: #ffffff !important;
+  border-color: #fde68a !important;
+  color: #09090b !important;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05) !important;
 }
 
 /* Reduced Motion */
@@ -1187,28 +1387,58 @@ html.light tbody td strong {
   color: #09090B !important;
 }
 
-/* Form Inputs, Selects, and Textareas */
-html.light input:not([type="checkbox"]):not([type="radio"]),
-html.light select,
-html.light textarea {
+/* ==============================================================================
+ * DUAL THEME FORM INPUTS, SELECTS & TEXTAREAS (OBSIDIAN DARK VS PURE WHITE LIGHT)
+ * ============================================================================== */
+
+/* 1. DARK MODE / ADMIN OBSIDIAN: Dark Inputs, Selects, and Textareas */
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light)) .admin-theme-scope, :where(:not(html.light)) .dark) input:not([type="checkbox"]):not([type="radio"]):not(.ai-input-light),
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light)) .admin-theme-scope, :where(:not(html.light)) .dark) select:not(.ai-input-light),
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light)) .admin-theme-scope, :where(:not(html.light)) .dark) textarea:not(.ai-input-light) {
+  background-color: #161712 !important;
+  color: #fffbf4 !important;
+  border-color: rgba(216, 207, 188, 0.25) !important;
+}
+
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light)) .admin-theme-scope, :where(:not(html.light)) .dark) input:focus,
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light)) .admin-theme-scope, :where(:not(html.light)) .dark) select:focus,
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light)) .admin-theme-scope, :where(:not(html.light)) .dark) textarea:focus {
+  border-color: rgba(216, 207, 188, 0.6) !important;
+  box-shadow: 0 0 0 2px rgba(216, 207, 188, 0.15) !important;
+}
+
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light)) .admin-theme-scope, :where(:not(html.light)) .dark) input::placeholder,
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light)) .admin-theme-scope, :where(:not(html.light)) .dark) textarea::placeholder {
+  color: rgba(171, 162, 145, 0.65) !important;
+}
+
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light)) .admin-theme-scope, :where(:not(html.light)) .dark) select option {
+  background-color: #161712 !important;
+  color: #fffbf4 !important;
+}
+
+/* 2. LIGHT MODE: Pure White Form Inputs, Selects, and Textareas */
+:is(html.light, html[data-theme="light"]) input:not([type="checkbox"]):not([type="radio"]),
+:is(html.light, html[data-theme="light"]) select,
+:is(html.light, html[data-theme="light"]) textarea {
   background-color: #FFFFFF !important;
   color: #09090B !important;
   border-color: #E4E4E7 !important;
 }
 
-html.light input:focus,
-html.light select:focus,
-html.light textarea:focus {
+:is(html.light, html[data-theme="light"]) input:focus,
+:is(html.light, html[data-theme="light"]) select:focus,
+:is(html.light, html[data-theme="light"]) textarea:focus {
   border-color: #09090B !important;
   box-shadow: 0 0 0 2px rgba(9, 9, 11, 0.08) !important;
 }
 
-html.light input::placeholder,
-html.light textarea::placeholder {
+:is(html.light, html[data-theme="light"]) input::placeholder,
+:is(html.light, html[data-theme="light"]) textarea::placeholder {
   color: #A1A1AA !important;
 }
 
-html.light select option {
+:is(html.light, html[data-theme="light"]) select option {
   background-color: #FFFFFF !important;
   color: #09090B !important;
 }
@@ -1421,6 +1651,35 @@ html.light ::selection {
   background-color: rgba(9, 9, 11, 0.12) !important;
   color: #09090B !important;
 }
+
+/* ==============================================================================
+ * SEAMLESS LANDING PAGE NAVBAR & HERO UNIFICATION
+ * Menghilangkan kesan navbar sebagai kotak terpisah; menyatu dengan hero section
+ * ============================================================================== */
+.landing-navbar {
+  background-color: transparent !important;
+  background-image: none !important;
+  border: none !important;
+  border-bottom: none !important;
+  box-shadow: none !important;
+  backdrop-filter: blur(12px) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+}
+
+:is(html.light, html[data-theme="light"]) .landing-navbar {
+  background: linear-gradient(180deg, rgba(250, 250, 250, 0.85) 0%, rgba(250, 250, 250, 0.35) 75%, transparent 100%) !important;
+  border: none !important;
+  border-bottom: none !important;
+  box-shadow: none !important;
+}
+
+:is(html.dark, html[data-theme="dark"], :where(:not(html.light))) .landing-navbar {
+  background: linear-gradient(180deg, rgba(17, 18, 13, 0.85) 0%, rgba(17, 18, 13, 0.35) 75%, transparent 100%) !important;
+  border: none !important;
+  border-bottom: none !important;
+  box-shadow: none !important;
+}
+
 
 
 

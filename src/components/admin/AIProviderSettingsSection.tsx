@@ -122,6 +122,13 @@ interface PresetProviderTemplate {
 
 const PRESET_TEMPLATES: PresetProviderTemplate[] = [
   {
+    name: 'NVIDIA NIM',
+    slug: 'nvidia',
+    endpoint: 'https://integrate.api.nvidia.com/v1',
+    model: 'meta/llama-3.2-90b-vision-instruct',
+    iconName: 'Server',
+  },
+  {
     name: 'DeepSeek AI',
     slug: 'deepseek',
     endpoint: 'https://api.deepseek.com/v1',
@@ -192,6 +199,27 @@ function getProviderTheme(slug: string, name?: string): ProviderTheme {
       switcherDot: 'border-blue-600 bg-blue-600',
       saveBtnBg: 'bg-blue-600 hover:bg-blue-700 text-white shadow-md',
       tagline: 'Google DeepMind LLM',
+    };
+  }
+  if (normalized.includes('nvidia')) {
+    return {
+      name: 'NVIDIA NIM',
+      brandColor: '#76B900',
+      accentBarGradient: 'from-lime-500 via-emerald-500 to-green-600',
+      iconBg: 'bg-lime-50 border-lime-200 text-lime-700',
+      iconColor: 'text-lime-600',
+      IconComponent: Server,
+      activeBorder: 'border-lime-500 ring-2 ring-lime-500/25',
+      activeBadgeBg: 'bg-lime-600 text-white',
+      cardGlow: 'hover:shadow-lime-500/10',
+      primaryBtnBg: 'bg-lime-600 hover:bg-lime-700 text-white shadow-xs',
+      secondaryBtnHover: 'hover:bg-lime-50 hover:text-lime-700 hover:border-lime-300',
+      tabActiveBg: 'bg-lime-600 text-white shadow-xs',
+      sliderAccent: 'accent-lime-600',
+      switcherActive: 'bg-lime-50 border-lime-400 text-lime-950 font-bold',
+      switcherDot: 'border-lime-600 bg-lime-600',
+      saveBtnBg: 'bg-lime-600 hover:bg-lime-700 text-white shadow-md',
+      tagline: 'GPU Accelerated AI NIM',
     };
   }
   if (normalized.includes('groq')) {
@@ -486,8 +514,12 @@ export default function AIProviderSettingsSection() {
           const nextParams: Record<string, { temp: number; maxTokens: number; timeout: number; retries: number }> = {};
 
           for (const [providerKey, conf] of Object.entries(configMap)) {
-            nextEndpoints[providerKey] = conf.apiEndpoint || (providerKey === 'gemini' ? 'https://generativelanguage.googleapis.com' : 'https://api.groq.com/openai/v1');
-            nextModels[providerKey] = conf.selectedModel || conf.defaultModel || (providerKey === 'gemini' ? 'gemini-3.5-flash' : 'llama-3.3-70b-versatile');
+            const presetMatch = PRESET_TEMPLATES.find((p) => p.slug === providerKey);
+            const defaultEndpoint = conf.apiEndpoint || presetMatch?.endpoint || (providerKey === 'gemini' ? 'https://generativelanguage.googleapis.com' : 'https://api.groq.com/openai/v1');
+            const defaultModel = conf.selectedModel || conf.defaultModel || presetMatch?.model || (providerKey === 'gemini' ? 'gemini-2.0-flash' : 'llama-3.3-70b-versatile');
+
+            nextEndpoints[providerKey] = defaultEndpoint;
+            nextModels[providerKey] = defaultModel;
             nextParams[providerKey] = {
               temp: conf.temperature ?? 0.7,
               maxTokens: conf.maxOutputTokens ?? 2048,
@@ -663,8 +695,17 @@ export default function AIProviderSettingsSection() {
       const data = await res.json();
       if (res.ok && data.result) {
         setTestResultModal(data.result);
-        if (data.result.status === 'success') {
-          showToast('success', `Tes koneksi ${configs[provider]?.name || provider} berhasil! (${data.result.responseTimeMs}ms)`);
+        if (data.result.status === 'success' || data.connected || data.result.httpStatusCode === 200) {
+          showToast('success', `Tes koneksi ${configs[provider]?.name || provider} berhasil terkoneksi! (${data.result.responseTimeMs}ms)`);
+          setConfigs((prev) => ({
+            ...prev,
+            [provider]: {
+              ...prev[provider],
+              lastConnectionStatus: 'connected',
+              lastErrorMessage: null,
+              lastTestedAt: new Date().toISOString(),
+            },
+          }));
         } else {
           showToast('error', `Tes koneksi ${configs[provider]?.name || provider}: ${data.result.errorMessage || data.result.status}`);
         }
@@ -717,6 +758,24 @@ export default function AIProviderSettingsSection() {
           delete next[provider];
           return next;
         });
+        // Pembaruan optimistis dari respons server — hanya memakai nilai
+        // yang benar-benar dikembalikan server (tanpa fallback 'connected'
+        // atau lastTestedAt buatan: status harus mencerminkan hasil probe
+        // server, bukan klaim dari UI).
+        if (data.config) {
+          setConfigs((prev) => ({
+            ...prev,
+            [provider]: {
+              ...prev[provider],
+              ...data.config,
+              lastConnectionStatus:
+                data.config.lastConnectionStatus || prev[provider]?.lastConnectionStatus,
+              lastErrorMessage:
+                data.config.lastErrorMessage ?? prev[provider]?.lastErrorMessage ?? null,
+              lastTestedAt: data.config.lastTestedAt || prev[provider]?.lastTestedAt,
+            },
+          }));
+        }
         await loadData();
       } else {
         showToast('error', data.message || 'Gagal menyimpan konfigurasi');
@@ -818,8 +877,11 @@ export default function AIProviderSettingsSection() {
 
       const data = await res.json();
       if (res.ok && data.success) {
-        showToast('success', `Provider '${newProviderForm.name}' berhasil ditambahkan ke sistem!`);
+        showToast('success', `Provider '${newProviderForm.name}' berhasil ditambahkan dan langsung TERKONEKSI!`);
         setShowAddModal(false);
+        // (Tab dipindah SETELAH loadData di bawah — L9. Pembaruan optimistis
+        // configs tidak diperlukan karena loadData mengambil status probe
+        // asli dari server.)
         setNewProviderForm({
           name: '',
           slug: '',
@@ -862,7 +924,12 @@ export default function AIProviderSettingsSection() {
       });
       const data = await res.json();
       if (res.ok && data.success) {
-        showToast('success', data.message || 'Provider berhasil dihapus.');
+        showToast('success', data.message || `Provider '${configs[provider]?.name || provider}' berhasil dihapus.`);
+        setConfigs((prev) => {
+          const next = { ...prev };
+          delete next[provider];
+          return next;
+        });
         setActiveFormTab('gemini');
         // Bersihkan sisa state form provider yang dihapus.
         setInputKeys((prev) => {
@@ -1053,7 +1120,7 @@ export default function AIProviderSettingsSection() {
   const providerEntries = Object.entries(configs);
 
   return (
-    <div className="space-y-6 bg-white accent-white p-5 sm:p-6 rounded-3xl border border-gray-200/90 shadow-md ai-provider-white-container text-gray-900">
+    <div className="space-y-6 bg-white dark:bg-[#141510] accent-white p-5 sm:p-6 rounded-3xl border border-gray-200/90 dark:border-[#D8CFBC]/15 shadow-md ai-provider-white-container text-gray-900 dark:text-[#FFFBF4]">
       {/* Toast Alert */}
       {toast && (
         <div
@@ -1513,12 +1580,12 @@ export default function AIProviderSettingsSection() {
           return (
             <div
               key={providerKey}
-              className={`rounded-2xl border transition-all shadow-xs bg-white relative overflow-hidden flex flex-col justify-between ai-white-card accent-white ${
+              className={`rounded-2xl border transition-all shadow-xs bg-white dark:bg-[#181913] relative overflow-hidden flex flex-col justify-between ai-white-card accent-white ${
                 theme.cardGlow
               } ${
                 isActive
                   ? theme.activeBorder
-                  : 'border-gray-200 hover:border-gray-300'
+                  : 'border-gray-200 dark:border-[#D8CFBC]/12 hover:border-gray-300 dark:hover:border-[#D8CFBC]/25'
               }`}
             >
               {/* Top Accent Gradient Bar Berdasarkan Tema Brand Provider */}
@@ -1609,19 +1676,32 @@ export default function AIProviderSettingsSection() {
                 </div>
 
                 <div className="flex items-center justify-between gap-2 mt-4 pt-3 border-t border-gray-100">
-                  <button
-                    type="button"
-                    onClick={() => handleTestConnection(providerKey)}
-                    disabled={isTesting[providerKey]}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold bg-white text-gray-700 border border-gray-300 ${theme.secondaryBtnHover} flex items-center gap-1.5 transition shadow-2xs disabled:opacity-50 accent-white ai-btn-white`}
-                  >
-                    {isTesting[providerKey] ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <Activity className="w-3.5 h-3.5" />
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handleTestConnection(providerKey)}
+                      disabled={isTesting[providerKey]}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold bg-white text-gray-700 border border-gray-300 ${theme.secondaryBtnHover} flex items-center gap-1.5 transition shadow-2xs disabled:opacity-50 accent-white ai-btn-white`}
+                    >
+                      {isTesting[providerKey] ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Activity className="w-3.5 h-3.5" />
+                      )}
+                      Tes Koneksi
+                    </button>
+
+                    {providerKey !== 'gemini' && providerKey !== 'groq' && (
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteCustomProvider(providerKey)}
+                        title={`Hapus Provider ${conf.name}`}
+                        className="p-1.5 rounded-xl text-rose-500 hover:text-rose-700 hover:bg-rose-50 border border-rose-200 transition"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
                     )}
-                    Tes Koneksi
-                  </button>
+                  </div>
 
                   {!isActive && (
                     <button
@@ -1745,19 +1825,33 @@ export default function AIProviderSettingsSection() {
                 const isCurrentTab = activeFormTab === slug;
                 const TabIcon = pTheme.IconComponent;
                 return (
-                  <button
-                    key={slug}
-                    type="button"
-                    onClick={() => setActiveFormTab(slug)}
-                    className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 ${
-                      isCurrentTab
-                        ? `${pTheme.tabActiveBg} font-black shadow-xs`
-                        : 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-100 hover:text-gray-900 accent-white ai-btn-white'
-                    }`}
-                  >
-                    <TabIcon className="w-3.5 h-3.5 shrink-0" />
-                    Form {c.name}
-                  </button>
+                  <div key={slug} className="flex items-center">
+                    <button
+                      type="button"
+                      onClick={() => setActiveFormTab(slug)}
+                      className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 ${
+                        isCurrentTab
+                          ? `${pTheme.tabActiveBg} font-black shadow-xs`
+                          : 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-100 hover:text-gray-900 accent-white ai-btn-white'
+                      }`}
+                    >
+                      <TabIcon className="w-3.5 h-3.5 shrink-0" />
+                      <span>{c.name}</span>
+                      {slug !== 'gemini' && slug !== 'groq' && (
+                        <span
+                          role="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteCustomProvider(slug);
+                          }}
+                          title={`Hapus provider ${c.name}`}
+                          className="ml-1 p-0.5 rounded-md text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </span>
+                      )}
+                    </button>
+                  </div>
                 );
               })}
             </div>

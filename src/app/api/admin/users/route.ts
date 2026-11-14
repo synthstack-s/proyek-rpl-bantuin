@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAdminSession } from '@/lib/auth';
 import { query } from '@/lib/db';
+import { getAdminProfile } from '@/lib/admin-profile';
 
 interface UserRow {
   id: number;
@@ -127,6 +128,14 @@ export async function GET(request: NextRequest) {
     const dataParams = [...queryParams, limit, offset];
     const rows = await query<UserRow[]>(dataSql, dataParams);
 
+    // Ambil profil admin untuk setiap akun admin yang muncul pada halaman ini
+    const adminIds = rows.filter((u) => u.role === 'admin').map((u) => u.id);
+    const adminProfilesMap: Record<number, string> = {};
+    for (const aId of adminIds) {
+      const ap = await getAdminProfile(aId);
+      if (ap?.full_name) adminProfilesMap[aId] = ap.full_name;
+    }
+
     // 6. Format Respon Aman (Tanpa password_hash atau rahasia autentikasi)
     const formattedUsers = rows.map((user) => {
       // Resolusi nama tampilan sesuai peran
@@ -140,7 +149,7 @@ export async function GET(request: NextRequest) {
         displayName = user.technician_name;
         avatarUrl = user.technician_avatar;
       } else if (user.role === 'admin') {
-        displayName = 'Administrator Sistem';
+        displayName = adminProfilesMap[user.id] || 'Administrator Sistem';
       }
 
       return {

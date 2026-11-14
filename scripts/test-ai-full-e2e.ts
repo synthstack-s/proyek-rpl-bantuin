@@ -291,7 +291,7 @@ async function runAllTests() {
   const metrics = await getAIMonitoringMetrics();
   assert(metrics.summary.totalRequests >= 2, 'Metrik mencatat total requests', `Got: ${metrics.summary.totalRequests}`);
   assert(metrics.summary.totalTokensUsed >= 470, 'Metrik mencatat akumulasi token', `Got: ${metrics.summary.totalTokensUsed}`);
-  assert(metrics.summary.averageResponseTimeMs > 0, 'Metrik menghitung rerata latency', `Got: ${metrics.summary.averageResponseTimeMs}ms`);
+  assert(metrics.summary.averageResponseTimeMs !== null && metrics.summary.averageResponseTimeMs > 0, 'Metrik menghitung rerata latency', `Got: ${metrics.summary.averageResponseTimeMs}ms`);
   assert(metrics.summary.fallbackCount >= 1, 'Metrik mencatat kejadian fallback', `Got: ${metrics.summary.fallbackCount}`);
 
   // =========================================================================

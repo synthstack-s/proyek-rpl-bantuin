@@ -145,6 +145,12 @@ export async function POST(req: NextRequest) {
       userContext.pageContext = {
         pathname: String(pageContext.pathname || '/'),
         pageTitle: pageContext.pageTitle ? String(pageContext.pageTitle) : undefined,
+        visibleContentSummary: pageContext.visibleContentSummary
+          ? String(pageContext.visibleContentSummary).slice(0, 3000)
+          : undefined,
+        activeTab: pageContext.activeTab ? String(pageContext.activeTab) : undefined,
+        activeEntityId: pageContext.activeEntityId ? String(pageContext.activeEntityId) : undefined,
+        screenData: typeof pageContext.screenData === 'object' ? pageContext.screenData : undefined,
       };
     }
 

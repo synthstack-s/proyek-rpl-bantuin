@@ -144,7 +144,7 @@ async function runSecurityTestSuite() {
   });
 
   // Pertanyaan lanjutan "Siapa teknisinya?" harus menyelesaikan activeOrderCode dari memori
-  const followUpResolved = resolveConversationContext('Siapa teknisinya?', [], 1001);
+  const followUpResolved = resolveConversationContext('Siapa teknisinya?', [], 1001, 1001);
   assert(
     followUpResolved.activeOrderCode === 'BAN-20261030-00001',
     'Resolusi entitas berhasil mengenali pesanan aktif untuk pertanyaan "Siapa teknisinya?"'
@@ -152,7 +152,7 @@ async function runSecurityTestSuite() {
   assert(followUpResolved.isFollowUpQuestion === true, 'Mendeteksi isFollowUpQuestion = true');
 
   // Isolasi Sesi: Sesi 1002 milik pengguna lain tidak boleh membaca memori sesi 1001
-  const session2Resolved = resolveConversationContext('Bagaimana status pesanan saya?', [], 1002);
+  const session2Resolved = resolveConversationContext('Bagaimana status pesanan saya?', [], 1002, 1002);
   assert(
     session2Resolved.activeOrderCode === null,
     'Konteks sesi terisolasi: Sesi 1002 tidak terpengaruh data sesi 1001'

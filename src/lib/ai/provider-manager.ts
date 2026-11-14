@@ -523,10 +523,22 @@ export class AIProviderManager {
 
     const baseConfig = await getProviderRuntimeConfig(provider);
     const overrideTimeout = Number(configOverride?.requestTimeoutMs);
+
+    // Filter agar jika apiKey yang dikirim adalah placeholder sensor masked (misal **** atau ...),
+    // kita tetap menggunakan apiKey riil yang terdekripsi di sistem.
+    let effectiveApiKey = baseConfig.apiKey;
+    if (configOverride?.apiKey && configOverride.apiKey.trim().length > 0) {
+      const overrideKey = configOverride.apiKey.trim();
+      const isMasked = overrideKey.includes('****') || (overrideKey.includes('...') && overrideKey.length < 35);
+      if (!isMasked) {
+        effectiveApiKey = overrideKey;
+      }
+    }
+
     const testConfig: ProviderRuntimeConfig = {
       ...baseConfig,
       apiEndpoint: configOverride?.apiEndpoint || baseConfig.apiEndpoint,
-      apiKey: configOverride?.apiKey && configOverride.apiKey.trim().length > 0 ? configOverride.apiKey.trim() : baseConfig.apiKey,
+      apiKey: effectiveApiKey,
       selectedModel: configOverride?.selectedModel || baseConfig.selectedModel,
       // L7: override timeout dari form (dijepit 5s–120s); bila tidak ada /
       // tidak valid, pakai timeout tersimpan dari konfigurasi.
@@ -636,7 +648,7 @@ export class AIProviderManager {
     return tracker.state;
   }
 
-  private recordCircuitSuccess(provider: AIProviderType): void {
+  public recordCircuitSuccess(provider: AIProviderType): void {
     const tracker = this.circuitBreakers.get(provider);
     if (tracker) {
       tracker.state = 'CLOSED';

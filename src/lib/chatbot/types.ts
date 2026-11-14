@@ -4,6 +4,15 @@
 
 export type UserRole = 'customer' | 'technician' | 'admin' | 'guest';
 
+export interface PageContextData {
+  pathname: string;
+  pageTitle?: string;
+  visibleContentSummary?: string;
+  activeTab?: string;
+  activeEntityId?: string | number;
+  screenData?: Record<string, any>;
+}
+
 export interface ChatUserContext {
   userId?: number;
   uuid?: string;
@@ -18,10 +27,7 @@ export interface ChatUserContext {
    * tidak ada konteks request (pemanggilan langsung / job latar).
    */
   clientIp?: string | null;
-  pageContext?: {
-    pathname: string;
-    pageTitle?: string;
-  };
+  pageContext?: PageContextData;
 }
 
 export interface DiagnosisCard {

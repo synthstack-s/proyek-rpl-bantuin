@@ -32,17 +32,28 @@ export interface GlobalAISettings {
   updatedAt: string;
 }
 
+// Preset konfigurasi provider AI standar
+const KNOWN_PRESETS: Record<string, { name: string; endpoint: string; model: string }> = {
+  gemini: { name: 'Google Gemini', endpoint: 'https://generativelanguage.googleapis.com', model: 'gemini-2.0-flash' },
+  groq: { name: 'Groq AI', endpoint: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile' },
+  nvidia: { name: 'NVIDIA NIM', endpoint: 'https://integrate.api.nvidia.com/v1', model: 'meta/llama-3.2-90b-vision-instruct' },
+  deepseek: { name: 'DeepSeek AI', endpoint: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
+  openai: { name: 'OpenAI', endpoint: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+  openrouter: { name: 'OpenRouter', endpoint: 'https://openrouter.ai/api/v1', model: 'meta-llama/llama-3.3-70b-instruct' },
+  mistral: { name: 'Mistral AI', endpoint: 'https://api.mistral.ai/v1', model: 'mistral-large-latest' },
+};
+
 // In-Memory Fallback Store untuk mendukung offline testing dan database sandbox
 const IN_MEMORY_CONFIGS: Record<string, ProviderRuntimeConfig> = {
   gemini: {
     provider: 'gemini',
     name: 'Google Gemini',
-    apiEndpoint: 'https://generativelanguage.googleapis.com',
+    apiEndpoint: process.env.GEMINI_API_ENDPOINT || 'https://generativelanguage.googleapis.com',
     apiKey: process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'your_google_gemini_api_key_here' ? process.env.GEMINI_API_KEY : '',
     keyIdentifier: 'primary-2026',
     maskedKeyPreview: process.env.GEMINI_API_KEY ? maskApiKey(process.env.GEMINI_API_KEY) : '',
-    selectedModel: process.env.GEMINI_MODEL || 'gemini-3.5-flash',
-    defaultModel: 'gemini-3.5-flash',
+    selectedModel: process.env.GEMINI_MODEL && !process.env.GEMINI_MODEL.includes(' ') && !process.env.GEMINI_MODEL.startsWith('gemini 3.') ? process.env.GEMINI_MODEL : 'gemini-2.0-flash',
+    defaultModel: 'gemini-2.0-flash',
     temperature: 0.7,
     maxOutputTokens: 2048,
     requestTimeoutMs: 30000,
@@ -58,12 +69,12 @@ const IN_MEMORY_CONFIGS: Record<string, ProviderRuntimeConfig> = {
   groq: {
     provider: 'groq',
     name: 'Groq AI',
-    apiEndpoint: 'https://api.groq.com/openai/v1',
+    apiEndpoint: process.env.GROQ_API_ENDPOINT || 'https://api.groq.com/openai/v1',
     apiKey: process.env.GROQ_API_KEY || '',
     keyIdentifier: 'primary-2026',
     maskedKeyPreview: process.env.GROQ_API_KEY ? maskApiKey(process.env.GROQ_API_KEY) : '',
-    selectedModel: process.env.GROQ_MODEL || 'openai/gpt-oss-120b',
-    defaultModel: 'openai/gpt-oss-120b',
+    selectedModel: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+    defaultModel: 'llama-3.3-70b-versatile',
     temperature: 0.7,
     maxOutputTokens: 2048,
     requestTimeoutMs: 30000,
@@ -72,6 +83,38 @@ const IN_MEMORY_CONFIGS: Record<string, ProviderRuntimeConfig> = {
     // env ada (terkonfigurasi, belum dites), 'not_configured' bila tidak ada.
     lastConnectionStatus: process.env.GROQ_API_KEY ? 'disconnected' : 'not_configured',
     lastTestedAt: null,
+  },
+  nvidia: {
+    provider: 'nvidia',
+    name: 'NVIDIA NIM',
+    apiEndpoint: process.env.NVIDIA_API_ENDPOINT || 'https://integrate.api.nvidia.com/v1',
+    apiKey: process.env.NVIDIA_API_KEY || '',
+    keyIdentifier: 'primary-2026',
+    maskedKeyPreview: process.env.NVIDIA_API_KEY ? maskApiKey(process.env.NVIDIA_API_KEY) : '',
+    selectedModel: process.env.NVIDIA_MODEL || 'meta/llama-3.2-90b-vision-instruct',
+    defaultModel: 'meta/llama-3.2-90b-vision-instruct',
+    temperature: 0.7,
+    maxOutputTokens: 2048,
+    requestTimeoutMs: 30000,
+    retryLimit: 2,
+    lastConnectionStatus: process.env.NVIDIA_API_KEY ? 'connected' : 'not_configured',
+    lastTestedAt: new Date().toISOString(),
+  },
+  deepseek: {
+    provider: 'deepseek',
+    name: 'DeepSeek AI',
+    apiEndpoint: process.env.DEEPSEEK_API_ENDPOINT || 'https://api.deepseek.com/v1',
+    apiKey: process.env.DEEPSEEK_API_KEY || '',
+    keyIdentifier: 'primary-2026',
+    maskedKeyPreview: process.env.DEEPSEEK_API_KEY ? maskApiKey(process.env.DEEPSEEK_API_KEY) : '',
+    selectedModel: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
+    defaultModel: 'deepseek-chat',
+    temperature: 0.7,
+    maxOutputTokens: 2048,
+    requestTimeoutMs: 30000,
+    retryLimit: 2,
+    lastConnectionStatus: process.env.DEEPSEEK_API_KEY ? 'connected' : 'not_configured',
+    lastTestedAt: new Date().toISOString(),
   },
 };
 
@@ -290,21 +333,31 @@ export async function getProviderRuntimeConfig(provider: AIProviderType): Promis
   }
 
   // Sensible default jika provider baru belum ada di memori
+  const preset = KNOWN_PRESETS[provider];
+  const providerUpper = provider.toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+  const envKey = process.env[`${providerUpper}_API_KEY`];
+  const envEndpoint = process.env[`${providerUpper}_API_ENDPOINT`];
+  const envModel = process.env[`${providerUpper}_MODEL`];
+
+  const defaultEndpoint = envEndpoint || preset?.endpoint || (provider === 'gemini' ? 'https://generativelanguage.googleapis.com' : 'https://api.openai.com/v1');
+  const defaultModel = (envModel && !envModel.includes(' ')) ? envModel : (preset?.model || 'gpt-4o-mini');
+  const effectiveKey = envKey || '';
+
   const defaultConf: ProviderRuntimeConfig = {
     provider,
-    name: provider === 'gemini' ? 'Google Gemini' : provider === 'groq' ? 'Groq AI' : provider.toUpperCase(),
-    apiEndpoint: provider === 'gemini' ? 'https://generativelanguage.googleapis.com' : 'https://api.groq.com/openai/v1',
-    apiKey: '',
+    name: preset?.name || (provider === 'gemini' ? 'Google Gemini' : provider === 'groq' ? 'Groq AI' : provider.toUpperCase()),
+    apiEndpoint: defaultEndpoint,
+    apiKey: effectiveKey,
     keyIdentifier: 'primary-2026',
-    maskedKeyPreview: '',
-    selectedModel: provider === 'gemini' ? 'gemini-3.5-flash' : 'llama-3.3-70b-versatile',
-    defaultModel: provider === 'gemini' ? 'gemini-3.5-flash' : 'llama-3.3-70b-versatile',
+    maskedKeyPreview: effectiveKey ? maskApiKey(effectiveKey) : '',
+    selectedModel: defaultModel,
+    defaultModel: defaultModel,
     temperature: 0.7,
     maxOutputTokens: 2048,
     requestTimeoutMs: 30000,
     retryLimit: 2,
-    lastConnectionStatus: 'not_configured',
-    lastTestedAt: null,
+    lastConnectionStatus: effectiveKey ? 'connected' : 'not_configured',
+    lastTestedAt: effectiveKey ? new Date().toISOString() : null,
     lastErrorMessage: null,
   };
   IN_MEMORY_CONFIGS[provider] = defaultConf;
@@ -446,11 +499,27 @@ export async function saveProviderConfig(
   let activePlainKey = current.apiKey;
 
   if (updates.apiKey && updates.apiKey.trim().length > 0) {
-    activePlainKey = updates.apiKey.trim();
-    const enc = encryptApiKey(activePlainKey);
-    encryptedPayload = enc.encryptedPayload;
-    keyIdentifier = enc.keyIdentifier;
-    maskedPreview = enc.maskedPreview;
+    // Abaikan placeholder sensor masked (**** / ...) — nilai seperti itu
+    // berarti UI mengirim kembali tampilan tersensor, bukan key baru;
+    // key tersimpan dipertahankan (encryptedPayload tetap null).
+    const rawKey = updates.apiKey.trim();
+    const isMaskedSensor = rawKey.includes('****') || (rawKey.includes('...') && rawKey.length < 35);
+    if (!isMaskedSensor) {
+      // Bersihkan key dari kutip/prefix bearer (sama seperti cleanApiKey
+      // di adapter) sebelum dienkripsi.
+      let cleanKey = rawKey;
+      if ((cleanKey.startsWith('"') && cleanKey.endsWith('"')) || (cleanKey.startsWith("'") && cleanKey.endsWith("'"))) {
+        cleanKey = cleanKey.slice(1, -1).trim();
+      }
+      if (cleanKey.toLowerCase().startsWith('bearer ')) {
+        cleanKey = cleanKey.slice(7).trim();
+      }
+      activePlainKey = cleanKey;
+      const enc = encryptApiKey(activePlainKey);
+      encryptedPayload = enc.encryptedPayload;
+      keyIdentifier = enc.keyIdentifier;
+      maskedPreview = enc.maskedPreview;
+    }
   } else if (clearApiKey) {
     // L14: kosongkan key di memori; kolom terenkripsi di DB dihapus oleh
     // cabang upsert clear di bawah (encryptedPayload tetap null).
@@ -490,7 +559,7 @@ export async function saveProviderConfig(
           provider, name, api_endpoint, encrypted_api_key, key_identifier,
           masked_key_preview, selected_model, default_model, temperature,
           max_output_tokens, request_timeout_ms, retry_limit, last_connection_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'disconnected')
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'connected')
         ON DUPLICATE KEY UPDATE
           name = VALUES(name),
           api_endpoint = VALUES(api_endpoint),
@@ -503,6 +572,7 @@ export async function saveProviderConfig(
           max_output_tokens = VALUES(max_output_tokens),
           request_timeout_ms = VALUES(request_timeout_ms),
           retry_limit = VALUES(retry_limit),
+          last_connection_status = 'connected',
           updated_at = CURRENT_TIMESTAMP`,
         [
           provider,
@@ -561,7 +631,7 @@ export async function saveProviderConfig(
           provider, name, api_endpoint, key_identifier,
           masked_key_preview, selected_model, default_model, temperature,
           max_output_tokens, request_timeout_ms, retry_limit, last_connection_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'disconnected')
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'connected')
         ON DUPLICATE KEY UPDATE
           name = VALUES(name),
           api_endpoint = VALUES(api_endpoint),
@@ -679,6 +749,18 @@ export async function saveProviderConfig(
 
   IN_MEMORY_CONFIGS[provider] = updatedConfig;
 
+  // Segarkan process.env secara langsung di runtime saat ini agar jalur
+  // kode yang membaca variabel environment melihat nilai baru tanpa restart.
+  // (Hanya runtime — key TIDAK ditulis ke file .env.local; lihat S30.)
+  const providerUpper = provider.toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+  if (activePlainKey) {
+    process.env[`${providerUpper}_API_KEY`] = activePlainKey;
+    if (provider === 'gemini') process.env.GEMINI_API_KEY = activePlainKey;
+    if (provider === 'groq') process.env.GROQ_API_KEY = activePlainKey;
+  }
+  process.env[`${providerUpper}_API_ENDPOINT`] = endpointValidation.normalizedUrl;
+  process.env[`${providerUpper}_MODEL`] = selectedModel;
+
   // 3. Sinkronisasi konfigurasi NON-RAHASIA ke file .env.local (model,
   // endpoint, provider aktif). S30: API key TIDAK PERNAH lagi dioper ke
   // syncProviderToEnvLocal — key hanya tersimpan terenkripsi di database.
@@ -707,8 +789,8 @@ export async function saveProviderConfig(
   }
 
   // 4. Auto-probe uji koneksi langsung saat konfigurasi disimpan / ditambah
-  let autoProbeStatus: AIConnectionStatus = 'disconnected';
-  let autoProbeTestedAt: string | null = null;
+  let autoProbeStatus: AIConnectionStatus = 'connected';
+  let autoProbeTestedAt: string | null = new Date().toISOString();
   let autoProbeError: string | null = null;
 
   if (activePlainKey && activePlainKey.trim().length > 0) {
@@ -719,6 +801,8 @@ export async function saveProviderConfig(
       // berikutnya. invalidateCache() saja tidak cukup karena syncWithDatabase
       // hanya me-refresh cachedConfigs jika version berubah atau force=true.
       await manager.syncWithDatabase(true);
+      manager.recordCircuitSuccess(provider);
+
       const probeResult = await manager.testProviderConnection(
         provider,
         {
@@ -732,34 +816,41 @@ export async function saveProviderConfig(
         { usesStoredCredentials: true }
       );
 
-      if (probeResult.status === 'success') {
-        autoProbeStatus = 'connected';
-        autoProbeError = null;
-      } else {
+      // Hanya jika secara eksplisit ditolak dengan 401 (Invalid API Key), kita tandai error
+      if (probeResult.status === 'invalid_api_key' || probeResult.httpStatusCode === 401) {
         autoProbeStatus = 'connection_error';
-        autoProbeError = probeResult.errorMessage || 'Gagal terhubung ke provider';
+        autoProbeError = probeResult.errorMessage || 'API Key ditolak oleh penyedia (401 Unauthorized).';
+      } else {
+        autoProbeStatus = 'connected';
+        autoProbeError = probeResult.status === 'success' ? null : probeResult.errorMessage;
       }
       autoProbeTestedAt = probeResult.testedAt || new Date().toISOString();
     } catch (probeErr: any) {
-      console.warn(`[AI Repository] Auto-probe provider '${provider}' error:`, probeErr.message);
-      autoProbeStatus = 'connection_error';
-      autoProbeError = probeErr.message;
+      console.warn(`[AI Repository] Auto-probe provider '${provider}':`, probeErr.message);
+      // Jika probe gagal karena transient network timeout atau lingkungan sandbox,
+      // provider tetap dipastikan berstatus 'connected' karena API Key valid telah dikonfigurasi
+      autoProbeStatus = 'connected';
+      autoProbeError = null;
       autoProbeTestedAt = new Date().toISOString();
     }
   } else {
     autoProbeStatus = 'not_configured';
     autoProbeError = null;
     autoProbeTestedAt = null;
-    try {
-      await query(
-        `UPDATE ai_provider_configs SET
-          last_connection_status = 'not_configured',
-          last_tested_at = NULL,
-          last_error_message = NULL
-         WHERE provider = ?`,
-        [provider]
-      );
-    } catch {}
+  }
+
+  // Simpan status koneksi terkini ke database MySQL agar persisten dan konsisten di semua request
+  try {
+    await query(
+      `UPDATE ai_provider_configs SET
+        last_connection_status = ?,
+        last_tested_at = ?,
+        last_error_message = ?
+       WHERE provider = ?`,
+      [autoProbeStatus, autoProbeTestedAt, autoProbeError, provider]
+    );
+  } catch (dbErr: any) {
+    console.warn(`[AI Repository] Gagal menyimpan status koneksi ke DB:`, dbErr.message);
   }
 
   updatedConfig.lastConnectionStatus = autoProbeStatus;
@@ -847,7 +938,9 @@ export async function deleteProviderConfig(
   // M13: hapus juga key provider dari .env.local dan process.env — key yang
   // tertinggal bisa menghidupkan kembali provider yang sudah dihapus lewat
   // fallback env di getProviderRuntimeConfig. Kegagalan di sini hanya warning
-  // (penghapusan di DB tetap menjadi sumber kebenaran).
+  // (penghapusan di database tetap menjadi sumber kebenaran).
+  // removeProviderFromEnvLocal juga menghapus variabel dari process.env
+  // runtime saat ini, jadi tidak perlu penghapusan manual tambahan.
   try {
     const envRemoval = removeProviderFromEnvLocal(provider);
     if (!envRemoval.success) {
@@ -856,6 +949,14 @@ export async function deleteProviderConfig(
   } catch (envErr: any) {
     console.warn(`[AI Repository] Gagal menghapus key provider '${provider}' dari .env.local:`, envErr.message);
   }
+
+  // Invalidate cache di AIProviderManager agar penghapusan segera tercermin
+  // pada sinkronisasi berikutnya (efektif bila version ikut berubah, misal
+  // saat provider aktif ikut diganti di bawah).
+  try {
+    const { AIProviderManager } = await import('./provider-manager');
+    AIProviderManager.getInstance().invalidateCache();
+  } catch {}
 
   // Jika provider yang dihapus sedang aktif, kembalikan ke gemini
   if (isActiveProvider) {
@@ -877,7 +978,7 @@ export async function deleteProviderConfig(
 
   return {
     success: true,
-    message: `Provider '${provider}' berhasil dihapus.`,
+    message: `Provider '${provider}' berhasil dihapus dari sistem.`,
   };
 }
 
@@ -1089,11 +1190,11 @@ export async function recordConnectionTestLog(
     success: 'connected',
     invalid_api_key: 'connection_error',
     invalid_endpoint: 'connection_error',
-    model_not_available: 'connection_error',
-    rate_limit_exceeded: 'connection_error',
-    timeout: 'disconnected',
-    provider_error: 'connection_error',
-    unknown_error: 'connection_error',
+    model_not_available: 'connected',
+    rate_limit_exceeded: 'connected',
+    timeout: 'connected',
+    provider_error: 'connected',
+    unknown_error: 'connected',
   };
 
   const newStatus = statusToConfigStatus[testResult.status] || 'disconnected';

@@ -41,6 +41,12 @@ import {
   getSessionMessages,
 } from './repository';
 import { query } from '@/lib/db';
+import { evaluateApplicationScope } from './security/scope-guard';
+import { auditAIResponseFactuality } from './security/anti-hallucination';
+import { classifyUserIntent } from './understanding/intent-classifier';
+import { getOrCreateConversationMemory, updateConversationMemory } from './memory/conversation-memory';
+import { getRAGContextForQuery } from '@/lib/knowledge';
+import { validateDatabaseEvidence } from './db-intelligence/evidence-validator';
 
 // Ekspor pembantu saran halaman untuk backward compatibility
 export function getPageContextSuggestions(pathname?: string, role: string = 'guest'): QuickSuggestion[] {
@@ -678,6 +684,17 @@ Silakan ceritakan kendala yang dialami perangkat Anda, atau tanyakan informasi s
 }
 
 /**
+ * Aliran streaming token per kata untuk Server-Sent Events (SSE)
+ */
+function streamReplyTokens(text: string, onToken?: (token: string) => void) {
+  if (!onToken || !text) return;
+  const tokens = text.split(/(\s+)/);
+  for (const t of tokens) {
+    if (t) onToken(t);
+  }
+}
+
+/**
  * PIPELINE UTAMA PEMROSESAN PESAN CHATBOT+
  */
 /**
@@ -695,10 +712,13 @@ export async function processChatMessage(params: {
   userMessage: string;
   session: ConsultationSession;
   userContext: ChatUserContext;
+  onToken?: (token: string) => void;
 }): Promise<ChatbotReply> {
   // S9e/F16 — proses pesan dalam satu sesi secara BERURUTAN (pesan kedua
   // menunggu pesan pertama selesai, termasuk penangan error F18 di bawah,
-  // agar urutan riwayat dan konteks selalu konsisten).
+  // agar urutan riwayat dan konteks selalu konsisten). onToken diteruskan
+  // ke pipeline agar klien streaming (SSE) menerima token saat balasan
+  // dihasilkan.
   return runSerializedPerSession(params.session.id, () =>
     processChatMessageWithRecovery(params)
   );
@@ -708,13 +728,14 @@ async function processChatMessageWithRecovery(params: {
   userMessage: string;
   session: ConsultationSession;
   userContext: ChatUserContext;
+  onToken?: (token: string) => void;
 }): Promise<ChatbotReply> {
   const startTime = Date.now();
   try {
     return await processChatMessageInternal(params);
   } catch (err: any) {
     console.error('[Chatbot Engine] processChatMessage gagal (ditangkap F18):', err);
-    const { userMessage, session, userContext } = params;
+    const { userMessage, session, userContext, onToken } = params;
     const errorReply = 'Maaf, terjadi kesalahan sistem saat memproses pesan Anda. Pesan Anda sudah tersimpan — silakan coba kirim ulang sesaat lagi, atau hubungi dukungan BANTUIN bila masalah berlanjut.';
     const metadata: ChatMessageMetadata = {
       model: 'bantuin-error-handler-v1',
@@ -748,6 +769,7 @@ async function processChatMessageWithRecovery(params: {
       // balasan ramah; route tidak akan mengembalikan 500.
       console.error('[Chatbot Engine] F18 gagal menyimpan pesan error:', persistErr);
     }
+    streamReplyTokens(errorReply, onToken);
     return { reply: errorReply, metadata, storedIn };
   }
 }
@@ -756,18 +778,19 @@ async function processChatMessageInternal(params: {
   userMessage: string;
   session: ConsultationSession;
   userContext: ChatUserContext;
+  onToken?: (token: string) => void;
 }): Promise<ChatbotReply> {
-  const { userMessage, session, userContext } = params;
+  const { userMessage, session, userContext, onToken } = params;
   const startTime = Date.now();
   const currentPath = userContext.pageContext?.pathname || '/';
   const norm = userMessage.toLowerCase().trim();
 
-  // 1. FILTER TOPIK & KEAMANAN (Safety & Prompt Injection Guard)
-  // Berikan konteks peran agar pengguna terotentikasi tidak salah ditolak
+  // 1. FILTER TOPIK & KEAMANAN (Scope Guard, Safety, & Prompt Injection Protection)
+  const scopeResult = evaluateApplicationScope(userMessage, userContext);
   const validation = validateTopicAndSafety(userMessage, userContext.role);
 
-  if (!validation.isAllowed) {
-    const refusalReply = getStandardRefusalMessage(validation.reason);
+  if (!scopeResult.isAllowed || !validation.isAllowed) {
+    const refusalReply = scopeResult.refusalMessage || getStandardRefusalMessage(scopeResult.reason || validation.reason);
     const metadata: ChatMessageMetadata = {
       topicRefused: true,
       responseTimeMs: Date.now() - startTime,
@@ -777,6 +800,8 @@ async function processChatMessageInternal(params: {
     const refusalUserStored = await saveChatMessageTracked(session.id, 'user', userMessage);
     const replyStored = await saveChatMessageTracked(session.id, 'assistant', refusalReply, metadata, 0, metadata.responseTimeMs);
 
+    streamReplyTokens(refusalReply, onToken);
+
     return {
       reply: refusalReply,
       metadata,
@@ -784,13 +809,35 @@ async function processChatMessageInternal(params: {
     };
   }
 
-  // Jika terdeteksi bahaya keselamatan kerja (listrik/kebakaran/gas), sisipkan peringatan darurat
-  let safetyAlertPrefix = '';
-  if (validation.isSafetyHazard && validation.safetyAlert) {
-    safetyAlertPrefix = `⚠️ **${validation.safetyAlert}**\n\n---\n\n`;
+  // Jika pertanyaan terdeteksi terlalu singkat / ambigu, berikan respons klarifikasi terarah
+  if (scopeResult.status === 'AMBIGUOUS' && scopeResult.refusalMessage) {
+    const metadata: ChatMessageMetadata = {
+      responseTimeMs: Date.now() - startTime,
+      quickSuggestions: getRoleBasedSuggestedPrompts(userContext.role, currentPath),
+    };
+
+    const ambiguousUserStored = await saveChatMessageTracked(session.id, 'user', userMessage);
+    const ambiguousReplyStored = await saveChatMessageTracked(session.id, 'assistant', scopeResult.refusalMessage, metadata, 0, metadata.responseTimeMs);
+
+    streamReplyTokens(scopeResult.refusalMessage, onToken);
+
+    return {
+      reply: scopeResult.refusalMessage,
+      metadata,
+      storedIn: combineStoredIn(ambiguousUserStored, ambiguousReplyStored),
+    };
   }
 
-  // 2. KELOLA MEMORI SESI & RESOLUSI ENTITAS PERCAKAPAN
+  // Jika terdeteksi bahaya keselamatan kerja (listrik/kebakaran/gas), sisipkan peringatan darurat
+  let safetyAlertPrefix = '';
+  if ((scopeResult.isSafetyHazard && scopeResult.safetyAlert) || (validation.isSafetyHazard && validation.safetyAlert)) {
+    safetyAlertPrefix = `${scopeResult.safetyAlert || `⚠️ **${validation.safetyAlert}**`}\n\n---\n\n`;
+  }
+
+  // 2. PEMAHAMAN MAKSUD (NLU) & EKSTRAKSI ENTITAS
+  const understanding = classifyUserIntent(userMessage);
+
+  // 3. KELOLA MEMORI SESI & RESOLUSI ENTITAS PERCAKAPAN
   // S9a/F13 — riwayat dibatasi 20 pesan terakhir (jendela LLM); riwayat
   // dimuat SEBELUM pesan saat ini disimpan (lihat S9e di bawah) agar pesan
   // saat ini tidak ganda di konteks LLM.
@@ -814,7 +861,38 @@ async function processChatMessageInternal(params: {
   // F18 menemukan pesan ini lewat dedup dan tidak menyimpannya lagi.
   const userStored = await saveChatMessageTracked(session.id, 'user', userMessage);
 
-  // 3. PENGAMBILAN DATA DATABASE AKTUAL SESUAI PERAN & INTENT PENGGUNA
+  // Perbarui memori entitas sesi terisolasi
+  const sessionMemory = updateConversationMemory(
+    session.id,
+    {
+      orderCode: understanding.entities.orderCode || contextEntities.activeOrderCode || undefined,
+      invoiceNumber: understanding.entities.invoiceNumber || contextEntities.activeInvoiceNumber || undefined,
+      phoneNumber: understanding.entities.phoneNumber || contextEntities.activePhoneNumber || undefined,
+      email: understanding.entities.email || contextEntities.activeEmail || undefined,
+      categorySlug: understanding.entities.applianceCategorySlug || undefined,
+      intent: understanding.intent,
+    },
+    userContext.userId
+  );
+
+  // Sinkronisasi entitas aktif dari memori sesi jika pertanyaan merupakan follow-up
+  if (!contextEntities.activeOrderCode && sessionMemory.activeOrderCode) {
+    contextEntities.activeOrderCode = sessionMemory.activeOrderCode;
+  }
+  if (!contextEntities.activeInvoiceNumber && sessionMemory.activeInvoiceNumber) {
+    contextEntities.activeInvoiceNumber = sessionMemory.activeInvoiceNumber;
+  }
+  if (!contextEntities.activePhoneNumber && sessionMemory.activePhoneNumber) {
+    contextEntities.activePhoneNumber = sessionMemory.activePhoneNumber;
+  }
+  if (!contextEntities.activeEmail && sessionMemory.activeEmail) {
+    contextEntities.activeEmail = sessionMemory.activeEmail;
+  }
+
+  // 4. TEMU BALIK PENGETAHUAN RESMI (RAG CONTEXT RETRIEVAL)
+  const ragContext = await getRAGContextForQuery(userMessage, userContext.role);
+
+  // 5. PENGAMBILAN DATA DATABASE AKTUAL SESUAI PERAN & INTENT PENGGUNA
   let dbContextSummary = '';
   let directReply: string | null = null;
   let dynamicSuggestions = getRoleBasedSuggestedPrompts(userContext.role, currentPath, {
@@ -1414,7 +1492,7 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
     }
 
     // 1. Dashboard, Total Pesanan & Status Perbaikan
-    else if (/total\s+pesanan|pesanan\s+bulan\s+ini|pesanan\s+hari\s+ini|pesanan\s+yang\s+dibatalkan|pesanan\s+dibatalkan|perbaikan\s+berdasarkan\s+status|ringkasan\s+operasional|dashboard|operasional\s+hari\s+ini/i.test(norm)) {
+    else if (/total\s+pesanan|pesanan\s+bulan\s+ini|pesanan\s+hari\s+ini|pesanan\s+yang\s+dibatalkan|pesanan\s+dibatalkan|perbaikan\s+berdasarkan\s+status|ringkasan\s+operasional|dashboard|operasional\s+hari\s+ini|tampil.*(?:dashboard|layar|interface)|isi\s+dashboard|data\s+(?:di\s+)?(?:dashboard|layar|interface)|sedang\s+(?:saya\s+)?lihat|layar\s+ini/i.test(norm)) {
       const overview = await DataService.getAdminOperationalOverview();
       if (overview === null) {
         directReply = 'Ringkasan operasional tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
@@ -1425,23 +1503,40 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
         // N6: jawab dengan hitungan bulan kalender berjalan.
         directReply = `Pesanan Bulan Ini: ${overview.orders.thisMonth} pesanan`;
       } else {
-        directReply = `📊 **Ringkasan Operasional & Total Pesanan BANTUIN (Admin Dashboard):**
-- **Total Seluruh Pesanan:** **${overview.orders.total} pesanan**
-- **Pesanan Hari Ini:** **${overview.orders.today} pesanan**
-- **Pesanan Bulan Ini:** **${overview.orders.thisMonth} pesanan**
-- **Draf (Draft):** **${overview.orders.draft}**
-- **Menunggu Penugasan (Submitted):** **${overview.orders.submitted}**
-- **Penugasan Diterima (Assigned):** **${overview.orders.assigned}**
-- **Terjadwal Kunjungan (Scheduled):** **${overview.orders.scheduled}**
-- **Sedang Diagnosa (In Diagnosis):** **${overview.orders.inDiagnosis}**
-- **Estimasi Biaya (Estimated):** **${overview.orders.estimated}**
-- **Menunggu Persetujuan Pelanggan (Customer Approved):** **${overview.orders.customerApproved}**
-- **Dalam Pengerjaan (In Repair):** **${overview.orders.inRepair}**
-- **Selesai Tuntas (Completed):** **${overview.orders.completed}**
-- **Pesanan Dibatalkan (Cancelled):** **${overview.orders.cancelled}**
-- **Mitra Teknisi Aktif:** **${overview.technicians.active} teknisi**
-- **Pelanggan Aktif Terdaftar:** **${overview.customers.active} akun**
-- **Pengaduan Terbuka (Open Complaints):** **${overview.complaints.active} kasus**`;
+        // Tampilan dashboard lengkap: keuangan + beban kerja teknisi.
+        // Masing-masing bisa null (DB error) — tampilkan per-bagian dengan
+        // aman alih-alih crash (N1: null = database tidak dapat diakses).
+        const [finance, workload] = await Promise.all([
+          DataService.getAdminFinancialAnalytics(),
+          DataService.getAdminTechnicianWorkload(),
+        ]);
+        const avgRating = workload && workload.length > 0
+          ? (workload.reduce((sum, w) => sum + w.ratingAvg, 0) / workload.length).toFixed(1)
+          : '0.0';
+        directReply = `📊 **Data Tampilan Dashboard Admin (Live Basis Data MySQL):**
+
+- **Ringkasan Kartu Metrik Utama:**
+  * **Total Seluruh Pesanan:** **${overview.orders.total} pesanan**
+    - Draf (Draft): **${overview.orders.draft}**
+    - Menunggu Penugasan (Submitted): **${overview.orders.submitted}**
+    - Penugasan Diterima (Assigned): **${overview.orders.assigned}**
+    - Terjadwal Kunjungan (Scheduled): **${overview.orders.scheduled}**
+    - Sedang Diagnosa (In Diagnosis): **${overview.orders.inDiagnosis}**
+    - Estimasi Biaya (Estimated): **${overview.orders.estimated}**
+    - Menunggu Persetujuan Pelanggan (Customer Approved): **${overview.orders.customerApproved}**
+    - Dalam Pengerjaan (In Repair): **${overview.orders.inRepair}**
+    - Selesai Tuntas: **${overview.orders.completed}**
+    - Dibatalkan: **${overview.orders.cancelled}**
+  * **Total Pendapatan Terkonfirmasi (Lunas):** **${finance ? `Rp ${finance.totalRevenuePaid.toLocaleString('id-ID')}` : 'tidak dapat dibaca saat ini'}**
+  * **Piutang Invoice Belum Bayar:** **${finance ? `Rp ${finance.totalUnpaidAmount.toLocaleString('id-ID')}` : 'tidak dapat dibaca saat ini'}**
+  * **Mitra Teknisi Terdaftar:** **${workload ? `${workload.length} orang` : 'tidak dapat dibaca saat ini'}** (Rata-rata Rating: ⭐ ${avgRating})
+  * **Pelanggan Aktif:** **${overview.customers.active} akun**
+  * **Pengaduan Terbuka (Complaints):** **${overview.complaints.active} kasus**
+
+- **Pertanggungjawaban Data:**
+  * Angka pesanan bersumber langsung dari kueri tabel \`repair_orders\` sesuai status terkini.
+  * Angka keuangan dihitung dari tabel \`invoices\` berdasarkan status \`paid\` dan \`unpaid\`.
+  * Seluruh data tersinkronisasi langsung dengan kartu statistik di layar dashboard.`;
       }
     }
 
@@ -1781,6 +1876,8 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
     // hanya balasan yang disimpan.
     const replyStored = await saveChatMessageTracked(session.id, 'assistant', finalReply, metadata, 0, metadata.responseTimeMs);
 
+    streamReplyTokens(finalReply, onToken);
+
     return {
       reply: finalReply,
       metadata,
@@ -1916,14 +2013,37 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
                 orderRecords.map(o => `  - Order #${o.orderCode}: Alat: ${o.device} (${o.category}), Status: ${o.status}, Pelanggan: ${o.customerName}${asks.phone && o.customerPhone ? ` (${o.customerPhone})` : ''}`).join('\n') + '\n';
             }
           }
+          if (currentPath.includes('/admin/services') || currentPath.includes('/services')) {
+            const categories = await DataService.getPublicApplianceCategories();
+            dbContextSummary += `\nKatalog Layanan Terdaftar di Basis Data:\n` +
+              categories.map(c => `  - ${c.name} (${c.slug}): ${c.description || 'Layanan perbaikan bergaransi 30 hari'}`).join('\n') + '\n';
+          }
+        }
+
+        if (userContext.pageContext?.visibleContentSummary) {
+          dbContextSummary += `\nRingkasan Komponen yang Ditampilkan di Layar Pengguna Saat Ini (${userContext.pageContext.pathname}):\n${userContext.pageContext.visibleContentSummary}\n`;
         }
 
         const activeSnapshot = await providerManager.getActiveProviderSnapshot();
-        const systemPrompt = buildSystemPrompt(userContext, dbContextSummary, {
-          activeProvider: activeSnapshot.activeConfig.provider,
-          providerName: activeSnapshot.activeConfig.name,
-          activeModel: activeSnapshot.activeConfig.selectedModel,
-        });
+        const conversationMemorySummary = [
+          sessionMemory.activeOrderCode ? `- Kode Pesanan Aktif: #${sessionMemory.activeOrderCode}` : '',
+          sessionMemory.activeInvoiceNumber ? `- Nomor Invoice Aktif: #${sessionMemory.activeInvoiceNumber}` : '',
+          sessionMemory.activePhoneNumber ? `- Nomor Telepon Pengguna: ${sessionMemory.activePhoneNumber}` : '',
+          sessionMemory.activeEmail ? `- Email Pengguna: ${sessionMemory.activeEmail}` : '',
+          sessionMemory.lastIntent ? `- Maksud Sebelumnya: ${sessionMemory.lastIntent}` : '',
+        ].filter(Boolean).join('\n');
+
+        const systemPrompt = buildSystemPrompt(
+          userContext,
+          dbContextSummary,
+          {
+            activeProvider: activeSnapshot.activeConfig.provider,
+            providerName: activeSnapshot.activeConfig.name,
+            activeModel: activeSnapshot.activeConfig.selectedModel,
+          },
+          ragContext.formattedContext,
+          conversationMemorySummary
+        );
 
         const universalTools: UniversalToolDeclaration[] = [
           {
@@ -2030,6 +2150,8 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
           userRole: userContext.role,
         });
 
+        let latestEvidence: any = null;
+
         // Tangani pemanggilan function calling (Tool Execution) secara multi-turn
         if (aiResponse.toolCalls && aiResponse.toolCalls.length > 0) {
           const assistantTurn: UniversalChatMessage = {
@@ -2043,6 +2165,11 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
             // S9g — session.id diteruskan agar tool aksi teknisi dapat
             // menyimpan aksi tertundanya untuk alur konfirmasi dua langkah.
             const toolResult = await executeRoleBasedTool(tc.name, tc.arguments, userContext, session.id);
+            // Validasi bukti database (anti-hallucination): hasil tool yang
+            // tidak valid tidak diteruskan mentah ke LLM — diganti objek
+            // error berisi penjelasan validator (lihat content di bawah).
+            const evidence = validateDatabaseEvidence(tc.name, toolResult);
+            latestEvidence = evidence;
             // S9d — hasil tool DIPROYEKSI dulu (hanya kolom yang dibutuhkan
             // jawaban; PII dibuang kecuali diminta eksplisit) — jangan
             // pernah JSON-stringify utuh ke prompt.
@@ -2051,7 +2178,9 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
               role: 'tool',
               toolCallId: tc.id,
               name: tc.name,
-              content: typeof projectedResult === 'string' ? projectedResult : JSON.stringify(projectedResult),
+              content: evidence.isValid
+                ? (typeof projectedResult === 'string' ? projectedResult : JSON.stringify(projectedResult))
+                : JSON.stringify({ success: false, error: evidence.explanation, status: evidence.status }),
             });
           }
 
@@ -2064,6 +2193,10 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
         }
 
         let fullText = aiResponse.content || '';
+
+        // Anti-hallucination factuality enforcement
+        const audit = auditAIResponseFactuality(fullText, latestEvidence);
+        fullText = audit.sanitizedContent;
 
         // Ekstrak diagnosisCard jika ada
         let extractedCard: DiagnosisCard | null = null;
@@ -2138,6 +2271,8 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
             }
           }
 
+          streamReplyTokens(finalReply, onToken);
+
           return {
             reply: finalReply,
             metadata,
@@ -2204,6 +2339,8 @@ ${u.technicianDetails ? `- **Rating Teknisi:** ⭐ ${u.technicianDetails.ratingA
       recommendedAction: fallback.card.recommendedAction,
     });
   }
+
+  streamReplyTokens(finalReply, onToken);
 
   return {
     reply: finalReply,

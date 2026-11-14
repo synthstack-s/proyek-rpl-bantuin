@@ -42,7 +42,7 @@ function renderMarkdownInline(content: string) {
   return parts.map((part, i) => {
     if (part.startsWith('**') && part.endsWith('**') && part.length >= 4) {
       return (
-        <strong key={i} className="font-bold text-[#FFFBF4]">
+        <strong key={i} className="font-bold text-slate-900 dark:text-[#FFFBF4]">
           {part.slice(2, -2)}
         </strong>
       );
@@ -55,12 +55,12 @@ function renderTextLines(lines: string[]) {
   return lines.map((line, idx) => {
     const trimmed = line.trim();
     if (trimmed === '---') {
-      return <hr key={idx} className="my-2 border-t border-[#D8CFBC]/20" />;
+      return <hr key={idx} className="my-2 border-t border-slate-200 dark:border-[#D8CFBC]/20" />;
     }
     if (trimmed.startsWith('### ')) {
       const headingText = trimmed.replace(/^###\s+/, '');
       return (
-        <h4 key={idx} className="text-sm font-bold text-[#FFFBF4] mt-2 mb-1">
+        <h4 key={idx} className="text-sm font-bold text-slate-900 dark:text-[#FFFBF4] mt-2 mb-1">
           {renderMarkdownInline(headingText)}
         </h4>
       );
@@ -68,7 +68,7 @@ function renderTextLines(lines: string[]) {
     if (trimmed.startsWith('## ')) {
       const headingText = trimmed.replace(/^##\s+/, '');
       return (
-        <h3 key={idx} className="text-base font-bold text-[#FFFBF4] mt-2.5 mb-1">
+        <h3 key={idx} className="text-base font-bold text-slate-900 dark:text-[#FFFBF4] mt-2.5 mb-1">
           {renderMarkdownInline(headingText)}
         </h3>
       );
@@ -136,22 +136,22 @@ function FormattedChatMessage({ text }: { text: string }) {
           {beforeLines.length > 0 && (
             <div className="space-y-1">{renderTextLines(beforeLines)}</div>
           )}
-          <div className="overflow-x-auto my-2 rounded-xl border border-[#D8CFBC]/25 bg-[#141510]/80">
+          <div className="overflow-x-auto my-2 rounded-xl border border-slate-200 bg-white dark:border-[#D8CFBC]/25 dark:bg-[#141510]/80">
             <table className="w-full text-left text-xs border-collapse">
               <thead>
-                <tr className="border-b border-[#D8CFBC]/20 bg-[#D8CFBC]/10">
+                <tr className="border-b border-slate-200 bg-slate-100 dark:border-[#D8CFBC]/20 dark:bg-[#D8CFBC]/10">
                   {headers.map((h, hIdx) => (
-                    <th key={hIdx} className="px-3 py-2 font-semibold text-[#FFFBF4]">
+                    <th key={hIdx} className="px-3 py-2 font-semibold text-slate-900 dark:text-[#FFFBF4]">
                       {renderMarkdownInline(h)}
                     </th>
                   ))}
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[#D8CFBC]/10">
+              <tbody className="divide-y divide-slate-100 dark:divide-[#D8CFBC]/10">
                 {rows.map((r, rIdx) => (
-                  <tr key={rIdx} className="hover:bg-[#FFFBF4]/5">
+                  <tr key={rIdx} className="hover:bg-slate-50 dark:hover:bg-[#FFFBF4]/5">
                     {r.map((cell, cIdx) => (
-                      <td key={cIdx} className="px-3 py-1.5 text-[#D8CFBC]/90 font-medium">
+                      <td key={cIdx} className="px-3 py-1.5 text-slate-700 dark:text-[#D8CFBC]/90 font-medium">
                         {renderMarkdownInline(cell)}
                       </td>
                     ))}
@@ -173,6 +173,118 @@ function FormattedChatMessage({ text }: { text: string }) {
       {renderTextLines(text.split('\n'))}
     </div>
   );
+}
+
+/**
+ * Ekstraktor ringkasan visual antarmuka/layar (DOM Interface Awareness)
+ * Membaca data yang terlihat di dashboard atau halaman saat ini tanpa menyertakan input sensitif.
+ */
+function extractCurrentInterfaceSummary(): {
+  pathname: string;
+  pageTitle: string;
+  visibleContentSummary: string;
+  screenData: Record<string, any>;
+} {
+  if (typeof window === 'undefined' || typeof document === 'undefined') {
+    return { pathname: '/', pageTitle: '', visibleContentSummary: '', screenData: {} };
+  }
+
+  const pathname = window.location.pathname || '/';
+  const pageTitle = document.title || '';
+  const screenData: Record<string, any> = {};
+
+  // 1. Ekstraksi kartu metrik / angka statistik terlihat di layar
+  const foundStats: string[] = [];
+  const statElements = document.querySelectorAll(
+    '[data-stat-card], .stat-card, [data-stat-label], [data-metric], [aria-label*="stat" i], .text-2xl.font-bold, .text-3xl.font-bold, .text-xl.font-bold'
+  );
+  statElements.forEach((el) => {
+    const parent = el.closest('div, section, article');
+    const label = parent?.querySelector('span, p, h3, h4, [class*="text-xs"], [class*="text-sm"]')?.textContent?.trim() || '';
+    const val = el.textContent?.trim() || '';
+    if (val && label && val !== label && val.length < 50 && label.length < 80) {
+      foundStats.push(`${label}: ${val}`);
+    }
+  });
+
+  // 2. Ekstraksi judul halaman / bagian konten utama
+  const headings: string[] = [];
+  document.querySelectorAll('main h1, main h2, main h3, h1, h2').forEach((h) => {
+    const text = h.textContent?.trim();
+    if (text && text.length > 2 && text.length < 100 && !headings.includes(text)) {
+      headings.push(text);
+    }
+  });
+
+  // 3. Ekstraksi tab / filter aktif
+  const activeTabs: string[] = [];
+  document.querySelectorAll('[role="tab"][aria-selected="true"], [data-active="true"], button[class*="bg-amber-600"], button[class*="active"]').forEach((tab) => {
+    const text = tab.textContent?.trim();
+    if (text && text.length < 50 && !activeTabs.includes(text)) {
+      activeTabs.push(text);
+    }
+  });
+
+  // 4. Ekstraksi judul kolom tabel jika ada
+  const tableHeaders: string[] = [];
+  document.querySelectorAll('main table th, table th').forEach((th) => {
+    const text = th.textContent?.trim();
+    if (text && text.length < 40 && !tableHeaders.includes(text)) {
+      tableHeaders.push(text);
+    }
+  });
+
+  // 5. Ekstraksi beberapa baris data tabel terlihat (maks 5 baris)
+  const tableRows: string[] = [];
+  document.querySelectorAll('main table tbody tr, table tbody tr').forEach((tr, idx) => {
+    if (idx < 5) {
+      const rowCells = Array.from(tr.querySelectorAll('td'))
+        .map((td) => td.textContent?.trim() || '')
+        .filter((c) => c.length > 0 && c.length < 60)
+        .slice(0, 5);
+      if (rowCells.length > 0) {
+        tableRows.push(rowCells.join(' | '));
+      }
+    }
+  });
+
+  // 6. Susun ringkasan terstruktur
+  const summaryParts: string[] = [];
+  if (headings.length > 0) {
+    summaryParts.push(`Judul/Bagian Layar: ${headings.slice(0, 4).join(' > ')}`);
+  }
+  if (activeTabs.length > 0) {
+    summaryParts.push(`Tab/Filter Aktif: ${activeTabs.join(', ')}`);
+  }
+  if (foundStats.length > 0) {
+    const uniqueStats = Array.from(new Set(foundStats)).slice(0, 10);
+    summaryParts.push(`Kartu/Metrik Statistik Terlihat: ${uniqueStats.join('; ')}`);
+    screenData.visibleStats = uniqueStats;
+  }
+  if (tableHeaders.length > 0) {
+    summaryParts.push(`Kolom Tabel di Layar: ${tableHeaders.join(', ')}`);
+  }
+  if (tableRows.length > 0) {
+    summaryParts.push(`Contoh Baris Data Terlihat:\n${tableRows.join('\n')}`);
+  }
+
+  // 7. Snippet teks container utama jika informasi di atas minim
+  if (summaryParts.length === 0) {
+    const mainEl = document.querySelector('main') || document.body;
+    const cloned = mainEl.cloneNode(true) as HTMLElement;
+    cloned.querySelectorAll('script, style, input, textarea, svg, noscript').forEach((el) => el.remove());
+    const rawText = (cloned.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 600);
+    if (rawText) {
+      summaryParts.push(`Ringkasan Konten Layar: ${rawText}`);
+    }
+  }
+
+  return {
+    pathname,
+    pageTitle,
+    visibleContentSummary: summaryParts.join('\n\n').slice(0, 2000),
+    screenData,
+  };
 }
 
 export function ChatbotWidget() {
@@ -229,15 +341,13 @@ export function ChatbotWidget() {
       }
 
       try {
-        // 2. Buat sesi baru yang murni untuk halaman/rute ini
+        // 2. Buat sesi baru yang murni untuk halaman/rute ini dengan ringkasan antarmuka
+        const pageInfo = extractCurrentInterfaceSummary();
         const res = await fetch('/api/chat/session', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            pageContext: {
-              pathname,
-              pageTitle: typeof document !== 'undefined' ? document.title : undefined,
-            },
+            pageContext: pageInfo,
           }),
         });
 
@@ -318,48 +428,128 @@ export function ChatbotWidget() {
     setMessages((prev) => [...prev, userMsg]);
     setIsLoading(true);
 
+    const assistantMsgId = (Date.now() + 1).toString();
+    const streamingAssistantMsg: UIMessage = {
+      id: assistantMsgId,
+      role: 'assistant',
+      message: '',
+      createdAt: new Date().toISOString(),
+    };
+
     try {
+      const pageInfo = extractCurrentInterfaceSummary();
       const res = await fetch('/api/chat/message', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream, application/json',
+        },
         body: JSON.stringify({
           message: textToSend,
           sessionUuid: sessionUuid || undefined,
-          pageContext: {
-            pathname,
-            pageTitle: typeof document !== 'undefined' ? document.title : undefined,
-          },
+          pageContext: pageInfo,
+          stream: true,
         }),
       });
 
-      const data = await res.json();
+      const contentType = res.headers.get('content-type') || '';
 
-      if (!res.ok || !data.success) {
-        setErrorNotice(data.message || 'Gagal memproses pesan.');
+      // JIKA SERVER MENDUKUNG REAL-TIME STREAMING RESPONSES (SSE)
+      if (contentType.includes('text/event-stream') && res.body) {
+        setMessages((prev) => [...prev, streamingAssistantMsg]);
         setIsLoading(false);
-        return;
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let accumulatedText = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split('\n\n');
+          buffer = parts.pop() || '';
+
+          for (const block of parts) {
+            if (!block.trim()) continue;
+            const eventMatch = block.match(/^event:\s*(\w+)/m);
+            const dataMatch = block.match(/^data:\s*(.+)$/m);
+            const eventType = eventMatch ? eventMatch[1] : 'token';
+            const rawData = dataMatch ? dataMatch[1] : '';
+
+            if (!rawData) continue;
+
+            try {
+              const parsed = JSON.parse(rawData);
+
+              if (eventType === 'token' && parsed.text) {
+                accumulatedText += parsed.text;
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantMsgId
+                      ? { ...msg, message: accumulatedText }
+                      : msg
+                  )
+                );
+              } else if (eventType === 'metadata') {
+                if (parsed.session?.sessionUuid && parsed.session.sessionUuid !== sessionUuid) {
+                  setSessionUuid(parsed.session.sessionUuid);
+                }
+                if (parsed.metadata?.quickSuggestions && parsed.metadata.quickSuggestions.length > 0) {
+                  setPageSuggestions(parsed.metadata.quickSuggestions);
+                }
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantMsgId
+                      ? {
+                          ...msg,
+                          metadata: {
+                            ...parsed.metadata,
+                            diagnosisCard: parsed.diagnosisCard || parsed.metadata?.diagnosisCard,
+                          },
+                        }
+                      : msg
+                  )
+                );
+              }
+            } catch {
+              // Abaikan kegagalan parse JSON parsial
+            }
+          }
+        }
+      } else {
+        // FALLBACK STANDAR NON-STREAMING (JSON)
+        const data = await res.json();
+
+        if (!res.ok || !data.success) {
+          setErrorNotice(data.message || 'Gagal memproses pesan.');
+          setIsLoading(false);
+          return;
+        }
+
+        if (data.session?.sessionUuid && data.session.sessionUuid !== sessionUuid) {
+          setSessionUuid(data.session.sessionUuid);
+        }
+
+        if (data.metadata?.quickSuggestions && data.metadata.quickSuggestions.length > 0) {
+          setPageSuggestions(data.metadata.quickSuggestions);
+        }
+
+        const assistantMsg: UIMessage = {
+          id: assistantMsgId,
+          role: 'assistant',
+          message: data.reply,
+          metadata: {
+            ...data.metadata,
+            diagnosisCard: data.diagnosisCard || data.metadata?.diagnosisCard,
+          },
+          createdAt: new Date().toISOString(),
+        };
+
+        setMessages((prev) => [...prev, assistantMsg]);
       }
-
-      if (data.session?.sessionUuid && data.session.sessionUuid !== sessionUuid) {
-        setSessionUuid(data.session.sessionUuid);
-      }
-
-      if (data.metadata?.quickSuggestions && data.metadata.quickSuggestions.length > 0) {
-        setPageSuggestions(data.metadata.quickSuggestions);
-      }
-
-      const assistantMsg: UIMessage = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        message: data.reply,
-        metadata: {
-          ...data.metadata,
-          diagnosisCard: data.diagnosisCard || data.metadata?.diagnosisCard,
-        },
-        createdAt: new Date().toISOString(),
-      };
-
-      setMessages((prev) => [...prev, assistantMsg]);
     } catch {
       setErrorNotice('Terjadi kendala jaringan saat menghubungi asisten AI.');
     } finally {
@@ -376,11 +566,12 @@ export function ChatbotWidget() {
     setMessages([]);
     setIsLoading(true);
     try {
+      const pageInfo = extractCurrentInterfaceSummary();
       const res = await fetch('/api/chat/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          pageContext: { pathname },
+          pageContext: pageInfo,
         }),
       });
       const data = await res.json();
@@ -426,17 +617,17 @@ export function ChatbotWidget() {
         <div className="fixed bottom-5 right-5 z-50 animate-in fade-in duration-300">
           <button
             onClick={() => setIsOpen(true)}
-            className="group relative flex items-center gap-2.5 rounded-full bg-[#181913]/90 text-[#FFFBF4] border border-[#D8CFBC]/30 px-4 py-3 shadow-2xl backdrop-blur-xl transition-all duration-300 hover:scale-105 hover:border-[#D8CFBC] active:scale-95"
+            className="chatbot-floating-trigger group relative flex items-center gap-2.5 rounded-full bg-white text-slate-900 border border-slate-200/90 dark:bg-[#181913]/90 dark:text-[#FFFBF4] dark:border-[#D8CFBC]/30 px-4 py-3 shadow-xl dark:shadow-2xl backdrop-blur-xl transition-all duration-300 hover:scale-105 hover:border-slate-400 dark:hover:border-[#D8CFBC] active:scale-95"
           >
             <div className="relative flex h-6 w-6 items-center justify-center">
-              <Bot className="h-6 w-6 text-[#D8CFBC] transition group-hover:rotate-12" />
+              <Bot className="h-6 w-6 text-amber-600 dark:text-[#D8CFBC] transition group-hover:rotate-12" />
               <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[#D8CFBC] opacity-75"></span>
-                <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-[#FFFBF4]"></span>
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 dark:bg-[#D8CFBC] opacity-75"></span>
+                <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-amber-500 dark:bg-[#FFFBF4]"></span>
               </span>
             </div>
             <span className="text-sm font-bold tracking-wide">Tanya AI</span>
-            <Sparkles className="h-4 w-4 text-[#D8CFBC]" />
+            <Sparkles className="h-4 w-4 text-amber-600 dark:text-[#D8CFBC]" />
           </button>
         </div>
       )}
@@ -444,31 +635,31 @@ export function ChatbotWidget() {
       {/* Floating Chat Modal / Drawer (Saat Widget Terbuka di Atas Halaman Aktif) */}
       {isOpen && (
         <div
-          className={`fixed z-50 flex flex-col rounded-3xl border border-[#D8CFBC]/25 bg-[#141510]/95 shadow-2xl backdrop-blur-2xl transition-all duration-300 overflow-hidden ${
+          className={`chatbot-modal-window fixed z-50 flex flex-col rounded-3xl border border-slate-200 dark:border-[#D8CFBC]/25 bg-white/95 dark:bg-[#141510]/95 text-slate-900 dark:text-[#FFFBF4] shadow-2xl backdrop-blur-2xl transition-all duration-300 overflow-hidden ${
             isExpanded
               ? 'bottom-3 right-3 sm:bottom-5 sm:right-5 w-[96vw] sm:w-[540px] md:w-[680px] h-[92vh]'
               : 'bottom-3 right-3 sm:bottom-5 sm:right-5 w-[94vw] sm:w-[420px] md:w-[460px] h-[600px] max-h-[85vh]'
           }`}
         >
           {/* Top Rim Reflection */}
-          <div className="h-px w-full bg-gradient-to-r from-transparent via-[#D8CFBC]/30 to-transparent" />
+          <div className="h-px w-full bg-gradient-to-r from-transparent via-slate-300/40 dark:via-[#D8CFBC]/30 to-transparent" />
 
           {/* Header Widget */}
-          <div className="flex shrink-0 items-center justify-between border-b border-[#D8CFBC]/15 bg-[#181913]/90 px-4 py-3 backdrop-blur-md">
+          <div className="chatbot-header flex shrink-0 items-center justify-between border-b border-slate-200 dark:border-[#D8CFBC]/15 bg-slate-50/90 dark:bg-[#181913]/90 px-4 py-3 backdrop-blur-md">
             <div className="flex items-center gap-2.5">
-              <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-[#D8CFBC]/15 border border-[#D8CFBC]/25 text-[#D8CFBC] shadow-inner">
+              <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-amber-500/10 dark:bg-[#D8CFBC]/15 border border-amber-500/20 dark:border-[#D8CFBC]/25 text-amber-600 dark:text-[#D8CFBC] shadow-inner">
                 <Bot className="h-5 w-5" />
               </div>
               <div>
                 <div className="flex items-center gap-1.5">
-                  <h3 className="text-sm font-bold text-[#FFFBF4]">BANTUIN Assistant</h3>
-                  <span className="flex items-center gap-0.5 rounded-full bg-[#D8CFBC]/15 px-2 py-0.5 text-[9px] font-semibold text-[#D8CFBC] border border-[#D8CFBC]/20">
+                  <h3 className="text-sm font-bold text-slate-900 dark:text-[#FFFBF4]">BANTUIN Assistant</h3>
+                  <span className="flex items-center gap-0.5 rounded-full bg-amber-500/15 dark:bg-[#D8CFBC]/15 px-2 py-0.5 text-[9px] font-semibold text-amber-700 dark:text-[#D8CFBC] border border-amber-500/20 dark:border-[#D8CFBC]/20">
                     <Sparkles className="h-2 w-2" />
                     AI
                   </span>
                 </div>
-                <div className="flex items-center gap-1 text-[11px] text-[#D8CFBC]/70">
-                  <Compass className="h-3 w-3 text-[#D8CFBC]" />
+                <div className="flex items-center gap-1 text-[11px] text-slate-500 dark:text-[#D8CFBC]/70">
+                  <Compass className="h-3 w-3 text-amber-600 dark:text-[#D8CFBC]" />
                   <span className="truncate max-w-[180px] sm:max-w-[240px] font-mono">{getPageContextLabel()}</span>
                 </div>
               </div>
@@ -480,7 +671,7 @@ export function ChatbotWidget() {
                 onClick={handleNewSession}
                 disabled={isLoading}
                 title="Mulai Sesi Baru"
-                className="rounded-xl p-1.5 text-[#D8CFBC]/70 hover:bg-[#D8CFBC]/10 hover:text-[#FFFBF4] transition disabled:opacity-50"
+                className="rounded-xl p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-200/50 dark:text-[#D8CFBC]/70 dark:hover:bg-[#D8CFBC]/10 dark:hover:text-[#FFFBF4] transition disabled:opacity-50"
               >
                 <RotateCcw className="h-4 w-4" />
               </button>
@@ -489,7 +680,7 @@ export function ChatbotWidget() {
               <button
                 onClick={() => setIsExpanded(!isExpanded)}
                 title={isExpanded ? 'Kecilkan Tampilan' : 'Perbesar Tampilan'}
-                className="hidden sm:inline-flex rounded-xl p-1.5 text-[#D8CFBC]/70 hover:bg-[#D8CFBC]/10 hover:text-[#FFFBF4] transition"
+                className="hidden sm:inline-flex rounded-xl p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-200/50 dark:text-[#D8CFBC]/70 dark:hover:bg-[#D8CFBC]/10 dark:hover:text-[#FFFBF4] transition"
               >
                 {isExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
               </button>
@@ -498,7 +689,7 @@ export function ChatbotWidget() {
               <button
                 onClick={() => setIsOpen(false)}
                 title="Tutup Widget Chat"
-                className="rounded-xl p-1.5 text-[#D8CFBC]/70 hover:bg-[#D8CFBC]/10 hover:text-[#FFFBF4] transition"
+                className="rounded-xl p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-200/50 dark:text-[#D8CFBC]/70 dark:hover:bg-[#D8CFBC]/10 dark:hover:text-[#FFFBF4] transition"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -506,7 +697,7 @@ export function ChatbotWidget() {
           </div>
 
           {/* Area Pesan Chat */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-3.5 custom-scrollbar">
+          <div className="flex-1 overflow-y-auto p-4 space-y-3.5 custom-scrollbar bg-white/50 dark:bg-transparent">
             {messages.map((m, index) => {
               const isUser = m.role === 'user';
               return (
@@ -515,7 +706,7 @@ export function ChatbotWidget() {
                   className={`flex gap-2.5 ${isUser ? 'justify-end' : 'justify-start'}`}
                 >
                   {!isUser && (
-                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-xl bg-[#1C1D17] border border-[#D8CFBC]/20 text-[#D8CFBC] shadow-inner mt-0.5">
+                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-xl bg-slate-100 dark:bg-[#1C1D17] border border-slate-200 dark:border-[#D8CFBC]/20 text-amber-600 dark:text-[#D8CFBC] shadow-inner mt-0.5">
                       <Bot className="h-3.5 w-3.5" />
                     </div>
                   )}
@@ -523,16 +714,16 @@ export function ChatbotWidget() {
                   <div
                     className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-xs sm:text-sm shadow-md leading-relaxed ${
                       isUser
-                        ? 'bg-[#FFFBF4] text-[#11120D] font-medium rounded-br-none'
-                        : 'border border-[#D8CFBC]/15 bg-[#1C1D17]/90 text-[#FFFBF4] rounded-bl-none'
+                        ? 'chatbot-bubble-user bg-slate-900 text-white dark:bg-[#FFFBF4] dark:text-[#11120D] font-medium rounded-br-none shadow-md'
+                        : 'chatbot-bubble-assistant border border-slate-200 dark:border-[#D8CFBC]/15 bg-slate-50/90 dark:bg-[#1C1D17]/90 text-slate-900 dark:text-[#FFFBF4] rounded-bl-none shadow-xs'
                     }`}
                   >
                     <FormattedChatMessage text={m.message} />
 
                     {/* Bahaya Keselamatan */}
                     {m.metadata?.safetyAlert && (
-                      <div className="mt-2.5 flex items-start gap-2 rounded-xl border border-rose-500/30 bg-rose-950/40 p-2.5 text-xs text-rose-200">
-                        <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-rose-400 mt-0.5" />
+                      <div className="mt-2.5 flex items-start gap-2 rounded-xl border border-rose-300 bg-rose-50 p-2.5 text-xs text-rose-800 dark:border-rose-500/30 dark:bg-rose-950/40 dark:text-rose-200">
+                        <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-rose-600 dark:text-rose-400 mt-0.5" />
                         <div>{m.metadata.safetyAlert}</div>
                       </div>
                     )}
@@ -548,13 +739,13 @@ export function ChatbotWidget() {
 
                     {/* Quick Suggestion Chips */}
                     {m.metadata?.quickSuggestions && m.metadata.quickSuggestions.length > 0 && (
-                      <div className="mt-3 pt-2 border-t border-[#D8CFBC]/10 flex flex-wrap gap-1.5">
+                      <div className="mt-3 pt-2 border-t border-slate-200/80 dark:border-[#D8CFBC]/10 flex flex-wrap gap-1.5">
                         {m.metadata.quickSuggestions.map((chip, chipIdx) => (
                           <button
                             key={chipIdx}
                             onClick={() => handleSendMessage(chip.prompt)}
                             disabled={isLoading}
-                            className="rounded-full border border-[#D8CFBC]/25 bg-[#181913] px-2.5 py-1 text-[11px] text-[#D8CFBC] transition hover:bg-[#D8CFBC]/20 hover:text-[#FFFBF4] disabled:opacity-50"
+                            className="chatbot-chip rounded-full border border-slate-200 bg-white text-slate-700 hover:bg-slate-100 hover:text-slate-900 dark:border-[#D8CFBC]/25 dark:bg-[#181913] dark:text-[#D8CFBC] dark:hover:bg-[#D8CFBC]/20 dark:hover:text-[#FFFBF4] px-2.5 py-1 text-[11px] transition disabled:opacity-50"
                           >
                             {chip.label}
                           </button>
@@ -564,7 +755,7 @@ export function ChatbotWidget() {
                   </div>
 
                   {isUser && (
-                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-xl bg-[#565449] border border-[#D8CFBC]/20 text-[#FFFBF4] shadow-sm mt-0.5">
+                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-xl bg-slate-800 text-white dark:bg-[#565449] dark:border dark:border-[#D8CFBC]/20 dark:text-[#FFFBF4] shadow-sm mt-0.5">
                       <User className="h-3.5 w-3.5" />
                     </div>
                   )}
@@ -574,20 +765,20 @@ export function ChatbotWidget() {
 
             {/* Indikator Memproses AI */}
             {isLoading && (
-              <div className="flex items-center gap-2 text-xs text-[#D8CFBC]/70">
-                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-xl bg-[#1C1D17] border border-[#D8CFBC]/20 text-[#D8CFBC] shadow-sm">
+              <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-[#D8CFBC]/70">
+                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-xl bg-slate-100 dark:bg-[#1C1D17] border border-slate-200 dark:border-[#D8CFBC]/20 text-amber-600 dark:text-[#D8CFBC] shadow-sm">
                   <Bot className="h-3.5 w-3.5" />
                 </div>
-                <div className="flex items-center gap-1.5 rounded-xl border border-[#D8CFBC]/15 bg-[#181913]/90 px-3 py-2">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-[#D8CFBC]" />
-                  <span>BANTUIN AI sedang memproses data...</span>
+                <div className="flex items-center gap-1.5 rounded-xl border border-slate-200 dark:border-[#D8CFBC]/15 bg-slate-50/90 dark:bg-[#181913]/90 px-3 py-2 text-slate-700 dark:text-[#FFFBF4]">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-600 dark:text-[#D8CFBC]" />
+                  <span>BANTUIN AI sedang memproses respons...</span>
                 </div>
               </div>
             )}
 
             {errorNotice && (
-              <div className="flex items-center gap-2 rounded-xl border border-rose-500/30 bg-rose-950/40 p-2.5 text-xs text-rose-300">
-                <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-rose-400" />
+              <div className="flex items-center gap-2 rounded-xl border border-rose-300 bg-rose-50 dark:border-rose-500/30 dark:bg-rose-950/40 p-2.5 text-xs text-rose-800 dark:text-rose-300">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-rose-600 dark:text-rose-400" />
                 <span>{errorNotice}</span>
               </div>
             )}
@@ -597,13 +788,13 @@ export function ChatbotWidget() {
 
           {/* Quick Context Chips Bar (di atas input) */}
           {pageSuggestions.length > 0 && (
-            <div className="shrink-0 border-t border-[#D8CFBC]/15 bg-[#181913]/60 px-3 py-1.5 overflow-x-auto flex gap-1.5 no-scrollbar">
+            <div className="chatbot-chips-bar shrink-0 border-t border-slate-200 dark:border-[#D8CFBC]/15 bg-slate-50/80 dark:bg-[#181913]/60 px-3 py-1.5 overflow-x-auto flex gap-1.5 no-scrollbar">
               {pageSuggestions.map((s, idx) => (
                 <button
                   key={idx}
                   onClick={() => handleSendMessage(s.prompt)}
                   disabled={isLoading}
-                  className="whitespace-nowrap rounded-lg border border-[#D8CFBC]/20 bg-[#1C1D17] px-2.5 py-1 text-[11px] text-[#D8CFBC] hover:border-[#D8CFBC] hover:text-[#FFFBF4] transition disabled:opacity-50"
+                  className="chatbot-chip whitespace-nowrap rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-100 hover:text-slate-900 hover:border-slate-300 dark:border-[#D8CFBC]/20 dark:bg-[#1C1D17] dark:text-[#D8CFBC] dark:hover:border-[#D8CFBC] dark:hover:text-[#FFFBF4] px-2.5 py-1 text-[11px] transition disabled:opacity-50"
                 >
                   {s.label}
                 </button>
@@ -612,13 +803,13 @@ export function ChatbotWidget() {
           )}
 
           {/* Footer Input Box */}
-          <div className="shrink-0 border-t border-[#D8CFBC]/15 bg-[#181913]/90 p-2.5">
+          <div className="chatbot-footer shrink-0 border-t border-slate-200 dark:border-[#D8CFBC]/15 bg-slate-50/90 dark:bg-[#181913]/90 p-2.5">
             <form
               onSubmit={(e) => {
                 e.preventDefault();
                 handleSendMessage();
               }}
-              className="flex items-center gap-1.5 rounded-2xl border border-[#D8CFBC]/20 bg-[#11120D] p-1 transition focus-within:border-[#D8CFBC]"
+              className="chatbot-input-form flex items-center gap-1.5 rounded-2xl border border-slate-200 bg-white dark:border-[#D8CFBC]/20 dark:bg-[#11120D] p-1 transition focus-within:border-amber-500 dark:focus-within:border-[#D8CFBC] shadow-xs"
             >
               <input
                 type="text"
@@ -633,13 +824,13 @@ export function ChatbotWidget() {
                 }
                 maxLength={2000}
                 disabled={isLoading}
-                className="flex-1 bg-transparent px-2.5 py-1.5 text-xs sm:text-sm text-[#FFFBF4] placeholder-[#8B8878] outline-none disabled:opacity-50"
+                className="chatbot-input-field flex-1 bg-transparent px-2.5 py-1.5 text-xs sm:text-sm text-slate-900 placeholder-slate-400 dark:text-[#FFFBF4] dark:placeholder-[#8B8878] outline-none disabled:opacity-50"
               />
 
               <button
                 type="submit"
                 disabled={!inputMessage.trim() || isLoading}
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-[#FFFBF4] hover:bg-[#D8CFBC] text-[#11120D] font-bold shadow-md transition disabled:opacity-40"
+                className="chatbot-send-btn flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-slate-900 hover:bg-slate-800 text-white dark:bg-[#FFFBF4] dark:hover:bg-[#D8CFBC] dark:text-[#11120D] font-bold shadow-md transition disabled:opacity-40"
               >
                 {isLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
               </button>

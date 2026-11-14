@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getAdminSession } from '@/lib/auth';
 import { query } from '@/lib/db';
+import { getAdminProfile } from '@/lib/admin-profile';
 
 export async function GET() {
   const session = await getAdminSession();
@@ -25,12 +26,16 @@ export async function GET() {
     );
   }
 
+  const profile = await getAdminProfile(user.id);
+
   return NextResponse.json(
     {
       success: true,
       user: {
         id: user.id,
         uuid: user.uuid,
+        name: profile?.full_name || (user.email ? user.email.split('@')[0] : 'Admin Bantuin'),
+        avatar_url: profile?.avatar_url || null,
         email: user.email,
         phone: user.phone_number,
         role: user.role,

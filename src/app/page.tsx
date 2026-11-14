@@ -75,41 +75,41 @@ export default async function HomePage() {
   ];
 
   return (
-    <main className="min-h-screen bg-[#11120D] text-[#FFFBF4] selection:bg-[#D8CFBC]/25 selection:text-[#FFFBF4] flex flex-col justify-between relative overflow-hidden">
+    <main className="min-h-screen bg-[#FAFAFA] dark:bg-[#11120D] text-slate-900 dark:text-[#FFFBF4] selection:bg-[#D8CFBC]/25 selection:text-[#FFFBF4] flex flex-col justify-between relative overflow-hidden">
       {/* Ambient background glows for liquid glass reflections */}
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[400px] bg-gradient-to-b from-[#565449]/20 via-[#D8CFBC]/8 to-transparent blur-[140px] pointer-events-none rounded-full" />
-      <div className="absolute top-[30%] -right-40 w-96 h-96 bg-[#565449]/15 rounded-full blur-[120px] pointer-events-none" />
-      <div className="absolute top-[65%] -left-40 w-96 h-96 bg-[#D8CFBC]/10 rounded-full blur-[130px] pointer-events-none" />
+      <div className="absolute -top-24 left-1/2 -translate-x-1/2 w-[900px] h-[450px] bg-gradient-to-b from-amber-500/10 via-amber-400/5 to-transparent dark:from-[#565449]/20 dark:via-[#D8CFBC]/8 dark:to-transparent blur-[140px] pointer-events-none rounded-full" />
+      <div className="absolute top-[30%] -right-40 w-96 h-96 bg-amber-500/5 dark:bg-[#565449]/15 rounded-full blur-[120px] pointer-events-none" />
+      <div className="absolute top-[65%] -left-40 w-96 h-96 bg-amber-400/5 dark:bg-[#D8CFBC]/10 rounded-full blur-[130px] pointer-events-none" />
 
-      {/* 1. Header Navigation Bar (Liquid Glass Sticky) */}
-      <header className="sticky top-0 z-40 w-full bg-[#11120D]/80 backdrop-blur-xl border-b border-[#D8CFBC]/10 px-4 sm:px-8 py-3.5 transition-all">
+      {/* 1. Header Navigation Bar (Integrated with Hero Section) */}
+      <header className="landing-navbar sticky top-0 z-40 w-full bg-transparent px-4 sm:px-8 py-3.5 transition-all">
         <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
           <Link href="/" className="flex items-center gap-3 group">
-            <div className="w-10 h-10 rounded-2xl bg-[#1A1C16] border border-[#D8CFBC]/25 flex items-center justify-center shadow-md shadow-black/40 group-hover:border-[#D8CFBC]/50 transition-all">
-              <Wrench className="w-5 h-5 text-[#D8CFBC]" />
+            <div className="w-10 h-10 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:bg-[#1A1C16] dark:border-[#D8CFBC]/25 dark:text-[#D8CFBC] flex items-center justify-center shadow-xs dark:shadow-md dark:shadow-black/40 group-hover:scale-105 transition-all">
+              <Wrench className="w-5 h-5 text-amber-600 dark:text-[#D8CFBC]" />
             </div>
             <div>
-              <span className="text-xl font-black tracking-tight text-[#FFFBF4] block">
+              <span className="text-xl font-black tracking-tight text-slate-900 dark:text-[#FFFBF4] block">
                 BANTUIN
               </span>
-              <span className="text-[10px] block text-[#D8CFBC] font-semibold tracking-wider uppercase">
+              <span className="text-[10px] block text-amber-700 dark:text-[#D8CFBC] font-semibold tracking-wider uppercase">
                 Teknisi Elektronik Terpadu
               </span>
             </div>
           </Link>
 
           {/* Desktop Nav Links */}
-          <nav className="hidden md:flex items-center gap-7 text-xs font-medium text-[#ABA291]">
-            <a href="#kategori" className="hover:text-[#FFFBF4] transition-colors">
+          <nav className="hidden md:flex items-center gap-7 text-xs font-semibold text-slate-600 dark:text-[#ABA291]">
+            <a href="#kategori" className="hover:text-slate-900 dark:hover:text-[#FFFBF4] transition-colors">
               Kategori Layanan
             </a>
-            <a href="#alur" className="hover:text-[#FFFBF4] transition-colors">
+            <a href="#alur" className="hover:text-slate-900 dark:hover:text-[#FFFBF4] transition-colors">
               Alur Perbaikan
             </a>
-            <a href="#lacak" className="hover:text-[#FFFBF4] transition-colors">
+            <a href="#lacak" className="hover:text-slate-900 dark:hover:text-[#FFFBF4] transition-colors">
               Lacak Pesanan
             </a>
-            <a href="#keunggulan" className="hover:text-[#FFFBF4] transition-colors">
+            <a href="#keunggulan" className="hover:text-slate-900 dark:hover:text-[#FFFBF4] transition-colors">
               Keunggulan
             </a>
           </nav>
@@ -127,7 +127,7 @@ export default async function HomePage() {
                       ? '/admin'
                       : '/customer/dashboard'
                   }
-                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#FFFBF4] hover:bg-[#EAE3D5] text-xs font-bold text-[#11120D] shadow-sm transition-all hover:scale-[1.02]"
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white dark:bg-[#FFFBF4] dark:hover:bg-[#EAE3D5] dark:text-[#11120D] text-xs font-bold shadow-sm transition-all hover:scale-[1.02]"
                 >
                   <span>
                     {session.role === 'technician'
@@ -141,20 +141,20 @@ export default async function HomePage() {
                 <LogoutButton />
               </div>
             ) : (
-              <div className="flex items-center gap-2.5">
+              <div className="flex items-center gap-2">
                 <Link
                   href="/login"
-                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#181913]/70 border border-[#D8CFBC]/15 text-xs font-semibold text-[#D8CFBC] hover:text-[#FFFBF4] hover:border-[#D8CFBC]/35 transition-all"
+                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold text-slate-700 hover:text-slate-900 hover:bg-slate-200/60 dark:bg-[#181913]/70 dark:border dark:border-[#D8CFBC]/15 dark:text-[#D8CFBC] dark:hover:text-[#FFFBF4] dark:hover:border-[#D8CFBC]/35 transition-all"
                 >
-                  <LogIn className="w-3.5 h-3.5 text-[#D8CFBC]" />
+                  <LogIn className="w-3.5 h-3.5 text-amber-600 dark:text-[#D8CFBC]" />
                   <span>Masuk</span>
                 </Link>
 
                 <Link
                   href="/register/customer"
-                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#FFFBF4] hover:bg-[#EAE3D5] text-xs font-bold text-[#11120D] shadow-sm transition-all hover:scale-[1.02]"
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white dark:bg-[#FFFBF4] dark:hover:bg-[#EAE3D5] dark:text-[#11120D] text-xs font-bold shadow-sm transition-all hover:scale-[1.02]"
                 >
-                  <UserPlus className="w-3.5 h-3.5 text-[#11120D]" />
+                  <UserPlus className="w-3.5 h-3.5" />
                   <span>Daftar</span>
                 </Link>
               </div>
@@ -164,67 +164,67 @@ export default async function HomePage() {
       </header>
 
       {/* 2. Hero Section */}
-      <section className="relative pt-12 pb-20 md:pt-20 md:pb-32 px-4 sm:px-8">
+      <section className="relative pt-8 pb-20 md:pt-14 md:pb-32 px-4 sm:px-8">
         <div className="max-w-5xl mx-auto text-center relative z-10 space-y-6">
-          <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-[#565449]/25 border border-[#D8CFBC]/20 text-[#D8CFBC] text-xs font-semibold backdrop-blur-md">
-            <Sparkles className="w-3.5 h-3.5 text-[#FFFBF4]" />
+          <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-800 dark:bg-[#565449]/25 dark:border-[#D8CFBC]/20 dark:text-[#D8CFBC] text-xs font-semibold backdrop-blur-md">
+            <Sparkles className="w-3.5 h-3.5 text-amber-600 dark:text-[#FFFBF4]" />
             <span>Garansi Resmi Layanan 30 Hari Kalender</span>
           </div>
 
-          <h1 className="text-4xl sm:text-5xl md:text-6xl font-black tracking-tight text-[#FFFBF4] leading-[1.15]">
+          <h1 className="text-4xl sm:text-5xl md:text-6xl font-black tracking-tight text-slate-900 dark:text-[#FFFBF4] leading-[1.15]">
             Perbaikan Elektronik Rumah Tangga <br className="hidden sm:inline" />
-            <span className="bg-gradient-to-r from-[#FFFBF4] via-[#D8CFBC] to-[#ABA291] bg-clip-text text-transparent">
+            <span className="bg-gradient-to-r from-amber-600 via-amber-700 to-slate-900 dark:from-[#FFFBF4] dark:via-[#D8CFBC] dark:to-[#ABA291] bg-clip-text text-transparent">
               Cepat, Transparan, & Terpercaya
             </span>
           </h1>
 
-          <p className="text-[#D8CFBC] text-sm sm:text-base md:text-lg max-w-2xl mx-auto leading-relaxed">
+          <p className="text-slate-600 dark:text-[#D8CFBC] text-sm sm:text-base md:text-lg max-w-2xl mx-auto leading-relaxed">
             Panggil mitra teknisi profesional tersertifikasi kompetensi (Zero-NIK) langsung ke rumah Anda untuk AC, kulkas, mesin cuci, pompa air, dan peralatan dapur.
           </p>
 
           <div className="flex flex-wrap items-center justify-center gap-3 pt-4">
             <Link
               href="/?chat=true"
-              className="inline-flex items-center gap-2 px-6 py-3.5 rounded-2xl bg-[#1A1C16]/80 hover:bg-[#565449]/35 border border-[#D8CFBC]/25 text-[#FFFBF4] font-bold text-sm shadow-xl backdrop-blur-md transition-all hover:scale-105"
+              className="inline-flex items-center gap-2 px-6 py-3.5 rounded-2xl bg-white hover:bg-slate-50 border border-slate-200/90 text-slate-900 dark:bg-[#1A1C16]/80 dark:hover:bg-[#565449]/35 dark:border-[#D8CFBC]/25 dark:text-[#FFFBF4] font-bold text-sm shadow-md dark:shadow-xl backdrop-blur-md transition-all hover:scale-105"
             >
-              <Bot className="w-5 h-5 text-[#D8CFBC]" />
+              <Bot className="w-5 h-5 text-amber-600 dark:text-[#D8CFBC]" />
               <span>Konsultasi Kerusakan (AI Chatbot+)</span>
             </Link>
 
             <Link
               href="/register/customer"
-              className="inline-flex items-center gap-2 px-6 py-3.5 rounded-2xl bg-[#FFFBF4] hover:bg-[#EAE3D5] text-[#11120D] font-bold text-sm shadow-xl transition-all hover:scale-105"
+              className="inline-flex items-center gap-2 px-6 py-3.5 rounded-2xl bg-slate-900 hover:bg-slate-800 text-white dark:bg-[#FFFBF4] dark:hover:bg-[#EAE3D5] dark:text-[#11120D] font-bold text-sm shadow-md dark:shadow-xl transition-all hover:scale-105"
             >
-              <UserPlus className="w-4 h-4 text-[#11120D]" />
+              <UserPlus className="w-4 h-4 text-white dark:text-[#11120D]" />
               <span>Pesan Teknisi Sekarang</span>
             </Link>
 
             <Link
               href="/register/technician"
-              className="inline-flex items-center gap-2 px-5 py-3.5 rounded-2xl bg-[#565449]/25 hover:bg-[#565449]/40 border border-[#D8CFBC]/20 text-[#D8CFBC] hover:text-[#FFFBF4] text-sm font-semibold transition-all backdrop-blur-md"
+              className="inline-flex items-center gap-2 px-5 py-3.5 rounded-2xl bg-slate-100 hover:bg-slate-200/70 border border-slate-200/80 text-slate-700 hover:text-slate-900 dark:bg-[#565449]/25 dark:hover:bg-[#565449]/40 dark:border-[#D8CFBC]/20 dark:text-[#D8CFBC] dark:hover:text-[#FFFBF4] text-sm font-semibold transition-all backdrop-blur-md"
             >
-              <Award className="w-4 h-4 text-[#D8CFBC]" />
+              <Award className="w-4 h-4 text-amber-600 dark:text-[#D8CFBC]" />
               <span>Gabung Mitra Teknisi</span>
             </Link>
           </div>
 
           {/* Quick Metrics Bar (Liquid Glass Cards) */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-10 max-w-3xl mx-auto text-left">
-            <div className="p-4 rounded-2xl bg-[#181913]/75 backdrop-blur-md border border-[#D8CFBC]/15 relative overflow-hidden group hover:border-[#D8CFBC]/30 transition-all">
-              <div className="text-xl sm:text-2xl font-black text-[#FFFBF4]">30 Hari</div>
-              <div className="text-xs text-[#ABA291] font-medium mt-0.5">Garansi Servis Resmi</div>
+            <div className="p-4 rounded-2xl bg-white/80 dark:bg-[#181913]/75 backdrop-blur-md border border-slate-200 dark:border-[#D8CFBC]/15 relative overflow-hidden group hover:border-slate-300 dark:hover:border-[#D8CFBC]/30 shadow-xs dark:shadow-none transition-all">
+              <div className="text-xl sm:text-2xl font-black text-slate-900 dark:text-[#FFFBF4]">30 Hari</div>
+              <div className="text-xs text-slate-500 dark:text-[#ABA291] font-medium mt-0.5">Garansi Servis Resmi</div>
             </div>
-            <div className="p-4 rounded-2xl bg-[#181913]/75 backdrop-blur-md border border-[#D8CFBC]/15 relative overflow-hidden group hover:border-[#D8CFBC]/30 transition-all">
-              <div className="text-xl sm:text-2xl font-black text-emerald-400">100%</div>
-              <div className="text-xs text-[#ABA291] font-medium mt-0.5">Teknisi Tersertifikasi</div>
+            <div className="p-4 rounded-2xl bg-white/80 dark:bg-[#181913]/75 backdrop-blur-md border border-slate-200 dark:border-[#D8CFBC]/15 relative overflow-hidden group hover:border-slate-300 dark:hover:border-[#D8CFBC]/30 shadow-xs dark:shadow-none transition-all">
+              <div className="text-xl sm:text-2xl font-black text-emerald-600 dark:text-emerald-400">100%</div>
+              <div className="text-xs text-slate-500 dark:text-[#ABA291] font-medium mt-0.5">Teknisi Tersertifikasi</div>
             </div>
-            <div className="p-4 rounded-2xl bg-[#181913]/75 backdrop-blur-md border border-[#D8CFBC]/15 relative overflow-hidden group hover:border-[#D8CFBC]/30 transition-all">
-              <div className="text-xl sm:text-2xl font-black text-[#D8CFBC]">Zero-NIK</div>
-              <div className="text-xs text-[#ABA291] font-medium mt-0.5">Privasi Pelanggan Terjaga</div>
+            <div className="p-4 rounded-2xl bg-white/80 dark:bg-[#181913]/75 backdrop-blur-md border border-slate-200 dark:border-[#D8CFBC]/15 relative overflow-hidden group hover:border-slate-300 dark:hover:border-[#D8CFBC]/30 shadow-xs dark:shadow-none transition-all">
+              <div className="text-xl sm:text-2xl font-black text-amber-600 dark:text-[#D8CFBC]">Zero-NIK</div>
+              <div className="text-xs text-slate-500 dark:text-[#ABA291] font-medium mt-0.5">Privasi Pelanggan Terjaga</div>
             </div>
-            <div className="p-4 rounded-2xl bg-[#181913]/75 backdrop-blur-md border border-[#D8CFBC]/15 relative overflow-hidden group hover:border-[#D8CFBC]/30 transition-all">
-              <div className="text-xl sm:text-2xl font-black text-amber-300">Fonnte OTP</div>
-              <div className="text-xs text-[#ABA291] font-medium mt-0.5">Notifikasi WhatsApp Resmi</div>
+            <div className="p-4 rounded-2xl bg-white/80 dark:bg-[#181913]/75 backdrop-blur-md border border-slate-200 dark:border-[#D8CFBC]/15 relative overflow-hidden group hover:border-slate-300 dark:hover:border-[#D8CFBC]/30 shadow-xs dark:shadow-none transition-all">
+              <div className="text-xl sm:text-2xl font-black text-amber-600 dark:text-amber-300">Fonnte OTP</div>
+              <div className="text-xs text-slate-500 dark:text-[#ABA291] font-medium mt-0.5">Notifikasi WhatsApp Resmi</div>
             </div>
           </div>
         </div>

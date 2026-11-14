@@ -24,6 +24,7 @@ export const OFFICIAL_PROVIDER_HOSTNAMES: Record<string, string[]> = {
   openai: ['api.openai.com'],
   openrouter: ['openrouter.ai'],
   mistral: ['api.mistral.ai'],
+  nvidia: ['integrate.api.nvidia.com', 'api.nvidia.com'],
 };
 
 // S8b: TIDAK ADA lagi pemetaan IP fallback. Versi sebelumnya memakai

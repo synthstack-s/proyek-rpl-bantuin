@@ -100,6 +100,12 @@ export async function POST(req: NextRequest) {
       userContext.pageContext = {
         pathname: String(pageContext.pathname || '/'),
         pageTitle: pageContext.pageTitle ? String(pageContext.pageTitle) : undefined,
+        visibleContentSummary: pageContext.visibleContentSummary
+          ? String(pageContext.visibleContentSummary).slice(0, 3000)
+          : undefined,
+        activeTab: pageContext.activeTab ? String(pageContext.activeTab) : undefined,
+        activeEntityId: pageContext.activeEntityId ? String(pageContext.activeEntityId) : undefined,
+        screenData: typeof pageContext.screenData === 'object' ? pageContext.screenData : undefined,
       };
     }
 
@@ -118,7 +124,8 @@ export async function POST(req: NextRequest) {
 
     // 3b. Rate Limit Chat — Lapisan 2: per-identitas (S5/F3). Kunci utama
     // adalah identitas yang tidak bisa dipalsukan lewat header: userId
-    // login, atau UUID sesi server untuk guest.
+    // login, atau UUID sesi server untuk guest. Berlaku juga untuk
+    // permintaan streaming di bawah (tidak boleh dilewati).
     const identityKey = userContext.userId
       ? `user:${userContext.userId}`
       : `session:${session.sessionUuid}`;
@@ -137,7 +144,7 @@ export async function POST(req: NextRequest) {
     // Dihitung dari ai_usage_logs hari ini (per userId login / per sesi
     // guest); batas dibaca dari system_settings.ai_daily_free_quota
     // (default 10). Bila DB tidak terbaca, checkDailyAIQuota fail-open
-    // dengan peringatan (lihat repository.ts).
+    // dengan peringatan (lihat repository.ts). Berlaku juga untuk streaming.
     const quota = await checkDailyAIQuota({
       userId: userContext.userId || null,
       sessionId: session.id,
@@ -152,7 +159,66 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 4. Proses Pesan melalui Pipeline Chatbot+
+    const wantsStream = body.stream === true || req.headers.get('accept')?.includes('text/event-stream');
+
+    // 4. Jika Klien Meminta Streaming Respons Real-Time (SSE)
+    if (wantsStream) {
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({
+        async start(controller) {
+          try {
+            const result = await processChatMessage({
+              userMessage: message.trim(),
+              session,
+              userContext,
+              onToken: (token: string) => {
+                controller.enqueue(
+                  encoder.encode(`event: token\ndata: ${JSON.stringify({ text: token })}\n\n`)
+                );
+              },
+            });
+
+            // Kirim metadata, kartu diagnosis, dan sesi
+            controller.enqueue(
+              encoder.encode(
+                `event: metadata\ndata: ${JSON.stringify({
+                  metadata: result.metadata,
+                  diagnosisCard: result.diagnosisCard || null,
+                  session: {
+                    sessionUuid: session.sessionUuid,
+                    categoryId: session.categoryId,
+                    categorySlug: session.categorySlug,
+                  },
+                })}\n\n`
+              )
+            );
+
+            controller.enqueue(encoder.encode(`event: done\ndata: {}\n\n`));
+            controller.close();
+          } catch (streamErr: any) {
+            console.error('Error in SSE stream:', streamErr);
+            controller.enqueue(
+              encoder.encode(
+                `event: error\ndata: ${JSON.stringify({
+                  message: 'Terjadi kesalahan sistem saat memproses streaming AI.',
+                })}\n\n`
+              )
+            );
+            controller.close();
+          }
+        },
+      });
+
+      return new Response(stream, {
+        headers: {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-cache, no-transform',
+          'Connection': 'keep-alive',
+        },
+      });
+    }
+
+    // 5. Mode Standar Non-Streaming (JSON Response)
     const result = await processChatMessage({
       userMessage: message.trim(),
       session,

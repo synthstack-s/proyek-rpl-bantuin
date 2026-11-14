@@ -141,6 +141,20 @@ CREATE TABLE IF NOT EXISTS `technician_profiles` (
     REFERENCES `users` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Profil teknisi (verifikasi kelayakan berbasis dokumen pendukung)';
 
+-- 2.2.1 Profil Administrator (admin_profiles)
+CREATE TABLE IF NOT EXISTS `admin_profiles` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id` BIGINT UNSIGNED NOT NULL,
+  `full_name` VARCHAR(150) NOT NULL,
+  `avatar_url` VARCHAR(255) NULL DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_admin_profiles_user` (`user_id`),
+  CONSTRAINT `fk_admin_profile_user` FOREIGN KEY (`user_id`)
+    REFERENCES `users` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Data profil khusus administrator';
+
 -- 2.3 Dokumen Pendukung Teknisi (technician_documents)
 CREATE TABLE IF NOT EXISTS `technician_documents` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -805,4 +819,35 @@ CREATE TABLE IF NOT EXISTS `ai_config_audit_logs` (
   INDEX `idx_ai_audit_admin_time` (`admin_user_id`, `created_at`),
   INDEX `idx_ai_audit_action` (`action`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Audit trail jejak rekam modifikasi konfigurasi AI administrator';
+
+-- 9.6 Tabel Pustaka Pengetahuan Asisten AI (ai_knowledge_base)
+CREATE TABLE IF NOT EXISTS `ai_knowledge_base` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `slug` VARCHAR(100) NOT NULL,
+  `title` VARCHAR(200) NOT NULL,
+  `category` ENUM(
+    'application_overview',
+    'feature_documentation',
+    'module_documentation',
+    'business_rules',
+    'user_guide',
+    'workflow_documentation',
+    'role_permission_documentation',
+    'database_relationship_documentation',
+    'system_configuration_documentation',
+    'error_handling_documentation'
+  ) NOT NULL,
+  `tags` JSON NULL DEFAULT NULL,
+  `summary` TEXT NOT NULL,
+  `content` MEDIUMTEXT NOT NULL,
+  `source` VARCHAR(150) NOT NULL,
+  `is_active` BOOLEAN NOT NULL DEFAULT TRUE,
+  `created_by_admin_id` BIGINT UNSIGNED NULL DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_knowledge_slug` (`slug`),
+  INDEX `idx_knowledge_category_active` (`category`, `is_active`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Knowledge Base resmi asisten AI BANTUIN';
+
 
