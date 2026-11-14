@@ -94,7 +94,17 @@ const DEFAULT_FALLBACK_CATEGORIES: PublicServiceCatalogItem[] = [
   },
 ];
 
-export async function getPublicCatalog(): Promise<PublicServiceCatalogItem[]> {
+export type PublicCatalogSource = 'database' | 'fallback-offline' | 'fallback-empty';
+
+/**
+ * A25 — Varian getPublicCatalog yang melaporkan ASAL datanya. Katalog
+ * fallback statis hanya memuat 7 layanan (dari 15 seed) sehingga TIDAK
+ * BOLEH ditampilkan seolah-olah katalog lengkap: pemanggil wajib memberi
+ * label bila source bukan 'database'.
+ * - 'fallback-offline': query gagal (database tidak dapat diakses).
+ * - 'fallback-empty': query sukses tetapi tidak ada kategori aktif di DB.
+ */
+export async function getPublicCatalogWithSource(): Promise<{ items: PublicServiceCatalogItem[]; source: PublicCatalogSource }> {
   try {
     const categories = await query<any[]>(
       `SELECT id, name, slug, description 
@@ -111,28 +121,36 @@ export async function getPublicCatalog(): Promise<PublicServiceCatalogItem[]> {
     );
 
     if (categories && categories.length > 0) {
-      return categories.map(cat => ({
-        categoryId: Number(cat.id),
-        categoryName: cat.name,
-        categorySlug: cat.slug,
-        description: cat.description,
-        services: services
-          .filter(s => Number(s.category_id) === Number(cat.id))
-          .map(s => ({
-            serviceId: Number(s.id),
-            name: s.name,
-            slug: s.slug,
-            basePrice: Number(s.base_price),
-            estimatedDurationMin: Number(s.estimated_duration_min),
-            description: s.description,
-          })),
-      }));
+      return {
+        items: categories.map(cat => ({
+          categoryId: Number(cat.id),
+          categoryName: cat.name,
+          categorySlug: cat.slug,
+          description: cat.description,
+          services: services
+            .filter(s => Number(s.category_id) === Number(cat.id))
+            .map(s => ({
+              serviceId: Number(s.id),
+              name: s.name,
+              slug: s.slug,
+              basePrice: Number(s.base_price),
+              estimatedDurationMin: Number(s.estimated_duration_min),
+              description: s.description,
+            })),
+        })),
+        source: 'database',
+      };
     }
+    return { items: DEFAULT_FALLBACK_CATEGORIES, source: 'fallback-empty' };
   } catch {
     // Gunakan fallback katalog standar saat database offline/sandbox
+    return { items: DEFAULT_FALLBACK_CATEGORIES, source: 'fallback-offline' };
   }
+}
 
-  return DEFAULT_FALLBACK_CATEGORIES;
+export async function getPublicCatalog(): Promise<PublicServiceCatalogItem[]> {
+  const { items } = await getPublicCatalogWithSource();
+  return items;
 }
 
 /**
@@ -177,7 +195,15 @@ export async function getPublicServicePrices(): Promise<Array<{
   }
 }
 
-export async function getPublicApplianceCategories() {
+/**
+ * A25 — Varian getPublicApplianceCategories yang melaporkan ASAL datanya
+ * (lihat getPublicCatalogWithSource): daftar kategori fallback adalah data
+ * tersimpan, bukan hasil baca database.
+ */
+export async function getPublicApplianceCategoriesWithSource(): Promise<{
+  items: Array<{ id: number; name: string; slug: string; description: string | null }>;
+  source: PublicCatalogSource;
+}> {
   try {
     const rows = await query<any[]>(
       `SELECT id, name, slug, description 
@@ -186,23 +212,42 @@ export async function getPublicApplianceCategories() {
        ORDER BY id ASC`
     );
     if (rows && rows.length > 0) {
-      return rows.map(r => ({
-        id: Number(r.id),
-        name: r.name,
-        slug: r.slug,
-        description: r.description,
-      }));
+      return {
+        items: rows.map(r => ({
+          id: Number(r.id),
+          name: r.name,
+          slug: r.slug,
+          description: r.description,
+        })),
+        source: 'database',
+      };
     }
+    return {
+      items: DEFAULT_FALLBACK_CATEGORIES.map(c => ({
+        id: c.categoryId,
+        name: c.categoryName,
+        slug: c.categorySlug,
+        description: c.description,
+      })),
+      source: 'fallback-empty',
+    };
   } catch {
     // Fallback offline
+    return {
+      items: DEFAULT_FALLBACK_CATEGORIES.map(c => ({
+        id: c.categoryId,
+        name: c.categoryName,
+        slug: c.categorySlug,
+        description: c.description,
+      })),
+      source: 'fallback-offline',
+    };
   }
+}
 
-  return DEFAULT_FALLBACK_CATEGORIES.map(c => ({
-    id: c.categoryId,
-    name: c.categoryName,
-    slug: c.categorySlug,
-    description: c.description,
-  }));
+export async function getPublicApplianceCategories() {
+  const { items } = await getPublicApplianceCategoriesWithSource();
+  return items;
 }
 
 export function getAppGuide(topic?: string): { title: string; content: string } {
@@ -354,6 +399,7 @@ export async function getCustomerRepairs(
         rr.updated_at,
         tp.full_name AS technician_name,
         tp.rating_avg AS technician_rating,
+        tp.rating_count AS technician_rating_count,
         u_tech.phone_number AS technician_phone,
         inv.invoice_number,
         inv.total_amount,
@@ -364,11 +410,24 @@ export async function getCustomerRepairs(
        FROM repair_requests rr
        JOIN appliance_categories ac ON rr.category_id = ac.id
        LEFT JOIN services s ON rr.service_id = s.id
-       LEFT JOIN technician_assignments ta ON (ta.repair_request_id = rr.id AND ta.status IN ('accepted', 'completed'))
+       -- A6 — SATU BARIS PER PESANAN: penugasan & diagnosis diambil yang
+       -- TERBARU per pesanan (MAX(id)), bukan JOIN mentah yang melipat-
+       -- gandakan baris — pesanan dengan 2 diagnosis muncul 2× dan LIMIT
+       -- memakan pesanan berbeda (customer mengira pesanannya hilang).
+       -- Invoice tidak perlu didedup: UNIQUE(repair_request_id).
+       LEFT JOIN technician_assignments ta ON (
+         ta.repair_request_id = rr.id
+         AND ta.status IN ('accepted', 'completed')
+         AND ta.id = (SELECT MAX(ta2.id) FROM technician_assignments ta2
+                      WHERE ta2.repair_request_id = rr.id AND ta2.status IN ('accepted', 'completed'))
+       )
        LEFT JOIN technician_profiles tp ON ta.technician_id = tp.user_id
        LEFT JOIN users u_tech ON tp.user_id = u_tech.id
        LEFT JOIN invoices inv ON inv.repair_request_id = rr.id
-       LEFT JOIN repair_diagnoses diag ON diag.repair_request_id = rr.id
+       LEFT JOIN repair_diagnoses diag ON (
+         diag.repair_request_id = rr.id
+         AND diag.id = (SELECT MAX(d2.id) FROM repair_diagnoses d2 WHERE d2.repair_request_id = rr.id)
+       )
        WHERE rr.customer_id = ? AND rr.deleted_at IS NULL ${statusFilterSql}
        ORDER BY rr.created_at DESC
        LIMIT ? OFFSET ?`,
@@ -387,7 +446,11 @@ export async function getCustomerRepairs(
         status: r.current_status,
         technician: r.technician_name ? {
           name: r.technician_name,
-          rating: Number(r.technician_rating || 5.0),
+          // A3 — rating 0.00 berarti BELUM ADA ULASAN, bukan 5.0: `|| 5.0`
+          // mengubah teknisi baru menjadi "rating sempurna" karena 0 falsy.
+          // `?? 0` hanya mengganti NULL (tidak ada profil rating).
+          rating: Number(r.technician_rating ?? 0),
+          ratingCount: Number(r.technician_rating_count ?? 0),
           phone: r.technician_phone || null,
         } : null,
         diagnosis: r.damage_details ? {
@@ -435,6 +498,7 @@ export async function getCustomerRepairDetail(userId: number, identifier: string
         rr.updated_at,
         tp.full_name AS technician_name,
         tp.rating_avg AS technician_rating,
+        tp.rating_count AS technician_rating_count,
         u_tech.phone_number AS technician_phone,
         inv.invoice_number,
         inv.subtotal_labor,
@@ -456,12 +520,33 @@ export async function getCustomerRepairDetail(userId: number, identifier: string
        FROM repair_requests rr
        JOIN appliance_categories ac ON rr.category_id = ac.id
        LEFT JOIN services s ON rr.service_id = s.id
-       LEFT JOIN technician_assignments ta ON (ta.repair_request_id = rr.id AND ta.status IN ('accepted', 'completed'))
+       -- A5 — SATU BARIS PER PESANAN (lihat A6): penugasan, diagnosis, dan
+       -- jadwal diambil yang TERBARU per pesanan lewat subquery, bukan
+       -- satu JOIN perkalian + LIMIT 1 tanpa ORDER BY yang mengambil
+       -- kombinasi sembarang (estimasi lama yang ditolak, jadwal batal).
+       LEFT JOIN technician_assignments ta ON (
+         ta.repair_request_id = rr.id
+         AND ta.status IN ('accepted', 'completed')
+         AND ta.id = (SELECT MAX(ta2.id) FROM technician_assignments ta2
+                      WHERE ta2.repair_request_id = rr.id AND ta2.status IN ('accepted', 'completed'))
+       )
        LEFT JOIN technician_profiles tp ON ta.technician_id = tp.user_id
        LEFT JOIN users u_tech ON tp.user_id = u_tech.id
        LEFT JOIN invoices inv ON inv.repair_request_id = rr.id
-       LEFT JOIN repair_diagnoses diag ON diag.repair_request_id = rr.id
-       LEFT JOIN technician_schedules ts ON ts.repair_request_id = rr.id
+       LEFT JOIN repair_diagnoses diag ON (
+         diag.repair_request_id = rr.id
+         AND diag.id = (SELECT MAX(d2.id) FROM repair_diagnoses d2 WHERE d2.repair_request_id = rr.id)
+       )
+       -- Jadwal yang tampil adalah jadwal AKTIF terbaru (bukan 'cancelled'):
+       -- jadwal lama yang dibatalkan/di-reschedule tidak boleh tampil
+       -- sebagai "Jadwal Kunjungan". Bila semua jadwal dibatalkan, jadwal
+       -- menjadi null (belum ada jadwal aktif) — bukan jadwal batal.
+       LEFT JOIN technician_schedules ts ON (
+         ts.repair_request_id = rr.id
+         AND ts.status <> 'cancelled'
+         AND ts.id = (SELECT MAX(s2.id) FROM technician_schedules s2
+                      WHERE s2.repair_request_id = rr.id AND s2.status <> 'cancelled')
+       )
        WHERE ${whereClause} AND rr.customer_id = ? AND rr.deleted_at IS NULL
        LIMIT 1`,
       params
@@ -495,7 +580,9 @@ export async function getCustomerRepairDetail(userId: number, identifier: string
         } : null,
         technician: r.technician_name ? {
           name: r.technician_name,
-          rating: Number(r.technician_rating || 5.0),
+          // A3 — lihat getCustomerRepairs: 0.00 = belum ada ulasan, bukan 5.0.
+          rating: Number(r.technician_rating ?? 0),
+          ratingCount: Number(r.technician_rating_count ?? 0),
           phone: r.technician_phone,
         } : null,
         diagnosis: r.damage_details ? {
@@ -567,8 +654,20 @@ export async function getCustomerInvoices(
        FROM invoices inv
        JOIN repair_requests rr ON inv.repair_request_id = rr.id
        JOIN appliance_categories ac ON rr.category_id = ac.id
-       LEFT JOIN payments p ON p.invoice_id = inv.id
-       WHERE inv.customer_id = ? ${statusClause}
+       -- A4 — SATU BARIS PER INVOICE: metode pembayaran diambil dari
+       -- payment SETTLEMENT terbaru saja. JOIN mentah menduplikasi invoice
+       -- sekali per baris payment (satu invoice Rp 300.000 dengan 2
+       -- settlement tampil 2×, seolah Rp 600.000) dan bisa menampilkan
+       -- metode dari percobaan yang deny/expire/cancel.
+       LEFT JOIN payments p ON (
+         p.invoice_id = inv.id
+         AND p.payment_status = 'settlement'
+         AND p.id = (SELECT MAX(p2.id) FROM payments p2
+                     WHERE p2.invoice_id = inv.id AND p2.payment_status = 'settlement')
+       )
+       -- A30 — invoice milik pesanan yang sudah di-soft-delete tidak
+       -- ditampilkan (konsisten dengan getter pesanan).
+       WHERE inv.customer_id = ? ${statusClause} AND rr.deleted_at IS NULL
        ORDER BY inv.created_at DESC
        LIMIT 10`,
       params
@@ -582,6 +681,10 @@ export async function getCustomerInvoices(
         laborCost: Number(r.subtotal_labor),
         partsCost: Number(r.subtotal_parts),
         serviceFee: Number(r.service_fee),
+        // A19 — kembalikan discount_amount agar pemanggil bisa
+        // merekonsiliasi komponen dengan total (sebelumnya dipilih tetapi
+        // dibuang di pemetaan).
+        discountAmount: Number(r.discount_amount || 0),
         totalAmount: Number(r.total_amount),
         status: r.status,
         dueDate: r.due_date,
@@ -620,7 +723,10 @@ export async function getCustomerMessages(userId: number, orderCodeOrId: string 
        JOIN users u ON rcm.sender_id = u.id
        LEFT JOIN customer_profiles cp ON cp.user_id = u.id
        LEFT JOIN technician_profiles tp ON tp.user_id = u.id
-       WHERE ${whereClause} AND rr.customer_id = ?
+       -- A13 — HANYA pesan dari teknisi: judul balasan menjanjikan "Pesan
+       -- Teknisi Terbaru", tetapi tanpa filter ini 5 pesan terbaru bisa
+       -- semuanya berasal dari customer sendiri.
+       WHERE ${whereClause} AND rr.customer_id = ? AND u.role = 'technician'
        ORDER BY rcm.created_at DESC
        LIMIT 5`,
       params
@@ -709,7 +815,7 @@ export async function getTechnicianProfile(userId: number) {
 
 export async function getTechnicianAssignedTasks(
   userId: number,
-  options: { status?: string; urgentOnly?: boolean; limit?: number } = {}
+  options: { status?: string; urgentOnly?: boolean; limit?: number; todayOnly?: boolean; orderCode?: string } = {}
 ) {
   const limit = Math.min(20, Math.max(1, options.limit || 10));
   const params: any[] = [userId];
@@ -725,6 +831,50 @@ export async function getTechnicianAssignedTasks(
     statusFilter = 'AND ta.status = ?';
     params.push(options.status);
   }
+
+  // A15 — filter ke satu kode pesanan (handler diagnosis/kontak): teknisi
+  // yang menyebut kode harus mendapat TUGAS ITU, bukan tugas pertama.
+  let orderCodeFilter = '';
+  if (options.orderCode) {
+    orderCodeFilter = 'AND rr.order_code = ?';
+    params.push(options.orderCode);
+  }
+
+  // A14 — "tugas hari ini": ada jadwal AKTIF (bukan cancelled) yang
+  // scheduled_date-nya hari ini (CURDATE, WIB via pool timezone +07:00).
+  // EXISTS dipakai (bukan filter pada jadwal hasil dedup) agar tugas yang
+  // punya jadwal hari ini DAN jadwal lain tetap terhitung.
+  const todayFilter = options.todayOnly
+    ? `AND EXISTS (SELECT 1 FROM technician_schedules tsf
+                    WHERE tsf.repair_request_id = rr.id
+                      AND tsf.status <> 'cancelled'
+                      AND tsf.scheduled_date = CURDATE())`
+    : '';
+
+  // A27 — urgentOnly DIIMPLEMENTASIKAN (sebelumnya diterima tetapi tidak
+  // pernah dibaca): tugas dengan jadwal aktif dalam 24 jam ke depan.
+  const urgentFilter = options.urgentOnly
+    ? `AND EXISTS (SELECT 1 FROM technician_schedules tsf
+                    WHERE tsf.repair_request_id = rr.id
+                      AND tsf.status <> 'cancelled'
+                      AND TIMESTAMP(tsf.scheduled_date, tsf.time_slot_start) >= NOW()
+                      AND TIMESTAMP(tsf.scheduled_date, tsf.time_slot_start) <= DATE_ADD(NOW(), INTERVAL 24 HOUR))`
+    : '';
+
+  // A14 — mode hari-ini/mendesak diurutkan jadwal terdekat (bukan offered
+  // dulu lalu created_at): tugas offered minggu depan tidak boleh tampil
+  // sebelum tugas accepted hari ini pukul 09:00.
+  const orderBySql = (options.todayOnly || options.urgentOnly)
+    ? `ORDER BY (
+         SELECT MIN(TIMESTAMP(ts2.scheduled_date, ts2.time_slot_start))
+         FROM technician_schedules ts2
+         WHERE ts2.repair_request_id = rr.id
+           AND ts2.status <> 'cancelled'
+           AND TIMESTAMP(ts2.scheduled_date, ts2.time_slot_start) >= NOW()
+       ) ASC, rr.created_at ASC`
+    : `ORDER BY
+        CASE WHEN ta.status = 'offered' THEN 1 WHEN ta.status = 'accepted' THEN 2 ELSE 3 END,
+        rr.created_at ASC`;
 
   params.push(limit);
 
@@ -759,12 +909,23 @@ export async function getTechnicianAssignedTasks(
        LEFT JOIN services s ON rr.service_id = s.id
        JOIN users u_cust ON rr.customer_id = u_cust.id
        LEFT JOIN customer_profiles cp ON rr.customer_id = cp.user_id
-       LEFT JOIN technician_schedules ts ON ts.repair_request_id = rr.id
-       LEFT JOIN repair_diagnoses diag ON diag.repair_request_id = rr.id
-       WHERE ta.technician_id = ? AND rr.deleted_at IS NULL ${statusFilter}
-       ORDER BY 
-        CASE WHEN ta.status = 'offered' THEN 1 WHEN ta.status = 'accepted' THEN 2 ELSE 3 END,
-        rr.created_at ASC
+       -- A20 — SATU BARIS PER PENUGASAN (lihat A5/A6): jadwal & diagnosis
+       -- diambil yang TERBARU per pesanan (jadwal aktif terbaru, bukan
+       -- cancelled). JOIN mentah menduplikasi tugas sekali per
+       -- (jadwal × diagnosis) sehingga LIMIT 5 bisa hanya memuat 1–2
+       -- tugas berbeda, dan jadwal yang tampil bisa yang sudah batal.
+       LEFT JOIN technician_schedules ts ON (
+         ts.repair_request_id = rr.id
+         AND ts.status <> 'cancelled'
+         AND ts.id = (SELECT MAX(s2.id) FROM technician_schedules s2
+                      WHERE s2.repair_request_id = rr.id AND s2.status <> 'cancelled')
+       )
+       LEFT JOIN repair_diagnoses diag ON (
+         diag.repair_request_id = rr.id
+         AND diag.id = (SELECT MAX(d2.id) FROM repair_diagnoses d2 WHERE d2.repair_request_id = rr.id)
+       )
+       WHERE ta.technician_id = ? AND rr.deleted_at IS NULL ${statusFilter} ${orderCodeFilter} ${todayFilter} ${urgentFilter}
+       ${orderBySql}
        LIMIT ?`,
       params
     );
@@ -839,8 +1000,11 @@ export async function getTechnicianPerformanceMetrics(userId: number) {
     // mengukur waktu RESPON tawaran, bukan waktu penyelesaian pekerjaan.
     // Bila tidak ada baris riwayat 'completed' (data lama sebelum history
     // ditulis), fallback ke updated_at pesanan yang sudah completed.
+    // A21 — presisi MENIT: TIMESTAMPDIFF(HOUR) membulatkan tiap pekerjaan
+    // ke bawah SEBELUM dirata-rata (pekerjaan 45 menit menyumbang 0 jam),
+    // sehingga rata-rata bias ke bawah secara sistematis.
     const [durationRow]: any = await query<any[]>(
-      `SELECT AVG(TIMESTAMPDIFF(HOUR, COALESCE(ta.responded_at, ta.created_at), h.completed_at)) AS avg_hours
+      `SELECT AVG(TIMESTAMPDIFF(MINUTE, COALESCE(ta.responded_at, ta.created_at), h.completed_at)) AS avg_minutes
        FROM technician_assignments ta
        JOIN (
          SELECT repair_request_id, MIN(created_at) AS completed_at
@@ -852,23 +1016,37 @@ export async function getTechnicianPerformanceMetrics(userId: number) {
       [userId]
     );
 
-    let avgHours = durationRow?.avg_hours != null ? Number(durationRow.avg_hours).toFixed(1) : null;
+    let avgMinutes = durationRow?.avg_minutes != null ? Number(durationRow.avg_minutes) : null;
 
-    if (avgHours === null) {
+    if (avgMinutes === null) {
       const [fallbackRow]: any = await query<any[]>(
-        `SELECT AVG(TIMESTAMPDIFF(HOUR, COALESCE(ta.responded_at, ta.created_at), rr.updated_at)) AS avg_hours
+        `SELECT AVG(TIMESTAMPDIFF(MINUTE, COALESCE(ta.responded_at, ta.created_at), rr.updated_at)) AS avg_minutes
          FROM technician_assignments ta
          JOIN repair_requests rr ON rr.id = ta.repair_request_id
          WHERE ta.technician_id = ? AND ta.status = 'completed' AND rr.current_status = 'completed'`,
         [userId]
       );
-      avgHours = fallbackRow?.avg_hours != null ? Number(fallbackRow.avg_hours).toFixed(1) : null;
+      avgMinutes = fallbackRow?.avg_minutes != null ? Number(fallbackRow.avg_minutes) : null;
     }
+
+    // A21 — format "X jam Y menit" (bukan "1.0 jam"): rata-rata 1 jam 50
+    // menit tampil apa adanya; pekerjaan < 1 jam tampil "45 menit", bukan
+    // "0.0 jam". Nama field dipertahankan (averageCompletionHours) agar
+    // pemanggil tidak berubah — nilainya kini string durasi terformat.
+    const formatDuration = (minutes: number | null): string => {
+      if (minutes === null || Number.isNaN(minutes)) return 'Belum ada data';
+      const totalMinutes = Math.round(minutes);
+      const hours = Math.floor(totalMinutes / 60);
+      const mins = totalMinutes % 60;
+      if (hours > 0 && mins > 0) return `${hours} jam ${mins} menit`;
+      if (hours > 0) return `${hours} jam`;
+      return `${mins} menit`;
+    };
 
     // Statistik riil (0 bila teknisi belum punya tugas — bukan angka demo).
     return {
       stats,
-      averageCompletionHours: avgHours ? `${avgHours} jam` : 'Belum ada data',
+      averageCompletionHours: formatDuration(avgMinutes),
       pendingTasksCount: stats.offered + stats.accepted,
     };
   } catch (err) {
@@ -914,9 +1092,13 @@ export async function getAdminOperationalOverview() {
     );
 
     const [openComplaints]: any = await query<any[]>(
+      // B20 — "terbuka" = belum selesai: submitted, in_investigation, DAN
+      // waiting_customer (menunggu respons pelanggan). Hanya resolved /
+      // rejected yang tertutup. Sebelumnya waiting_customer tidak dihitung
+      // sehingga kasus yang menunggu pelanggan hilang dari radar admin.
       `SELECT COUNT(*) AS total_open_complaints 
        FROM repair_complaints 
-       WHERE status IN ('submitted', 'in_investigation')`
+       WHERE status IN ('submitted', 'in_investigation', 'waiting_customer')`
     );
 
     // N6: hitungan berfilter tanggal — D#1 menjawab "pesanan hari ini /
@@ -969,18 +1151,52 @@ export async function getAdminOperationalOverview() {
   }
 }
 
+// ============================================================================
+// N15 — Definisi "tertunda" BERSAMA (B18/B23/B24).
+//
+// Ambang per status (jam), diukur dari saat pesanan MEMASUKI statusnya saat
+// ini (entri terakhir repair_status_history untuk status itu; fallback ke
+// created_at bila tidak ada riwayat). Definisi lama (status IN (...) AND
+// umur sejak dibuat >= 2 jam) salah dua arah: pesanan in_repair 3 jam
+// adalah pekerjaan normal, sementara pesanan yang macet di in_diagnosis /
+// estimated / customer_approved tidak pernah muncul.
+// Ambang (jam): submitted 24, assigned 24, scheduled 48, in_diagnosis 48,
+// estimated 48, customer_approved 72. in_repair hanya tertunda bila
+// melebihi estimasi durasi layanannya (minimal 24 jam) — pekerjaan yang
+// sedang berjalan bukan keterlambatan.
+// B24 — konversi durasi layanan (MENIT) ke jam memakai / 60 (dulu / 30
+// sehingga ambangnya 2× durasi sebenarnya; untuk layanan seed 45–120
+// menit, GREATEST(24, …) selalu 24 sehingga logika durasi menjadi dead
+// code).
+// Dipakai getAdminDelayedRepairs, countAdminDelayedRepairs, DAN
+// getAdminOperationalReport agar D#4 dan D#6 tidak pernah berbeda definisi
+// (sebelumnya D#6 memakai definisi lama dari created_at — B18).
+// CATATAN: setiap kueri yang memakai DELAYED_REPAIRS_WHERE_SQL WAJIB
+// menyertakan JOIN services s (ambang in_repair memakai
+// s.estimated_duration_min) dan DELAYED_STATUS_SINCE_JOIN_SQL.
+const DELAYED_STATUS_SINCE_JOIN_SQL = `LEFT JOIN (
+         SELECT h1.repair_request_id, MAX(h1.created_at) AS status_since
+         FROM repair_status_history h1
+         JOIN repair_requests rr1 ON rr1.id = h1.repair_request_id
+         WHERE h1.new_status = rr1.current_status
+         GROUP BY h1.repair_request_id
+       ) h ON h.repair_request_id = rr.id`;
+const DELAYED_THRESHOLD_SQL = `CASE rr.current_status
+           WHEN 'submitted' THEN 24
+           WHEN 'assigned' THEN 24
+           WHEN 'scheduled' THEN 48
+           WHEN 'in_diagnosis' THEN 48
+           WHEN 'estimated' THEN 48
+           WHEN 'customer_approved' THEN 72
+           WHEN 'in_repair' THEN GREATEST(24, CEIL(COALESCE(s.estimated_duration_min, 60) / 60))
+           ELSE 999999
+         END`;
+const DELAYED_REPAIRS_WHERE_SQL = `rr.current_status IN ('submitted', 'assigned', 'scheduled', 'in_diagnosis', 'estimated', 'customer_approved', 'in_repair')
+         AND rr.deleted_at IS NULL
+         AND TIMESTAMPDIFF(HOUR, COALESCE(h.status_since, rr.created_at), NOW()) >= ${DELAYED_THRESHOLD_SQL}`;
+
 export async function getAdminDelayedRepairs() {
   try {
-    // N15: definisi "tertunda" per status, diukur dari saat pesanan MEMASUKI
-    // statusnya saat ini (entri terakhir repair_status_history untuk status
-    // itu; fallback ke created_at bila tidak ada riwayat). Definisi lama
-    // (status IN (...) AND umur sejak dibuat >= 2 jam) salah dua arah:
-    // pesanan in_repair 3 jam adalah pekerjaan normal, sementara pesanan
-    // yang macet di in_diagnosis/estimated/customer_approved tidak pernah
-    // muncul. Ambang per status (jam): submitted 24, assigned 24,
-    // scheduled 48, in_diagnosis 48, estimated 48, customer_approved 72.
-    // in_repair hanya tertunda bila melebihi estimasi durasi layanannya
-    // (minimal 24 jam) — pekerjaan yang sedang berjalan bukan keterlambatan.
     const rows = await query<any[]>(
       `SELECT
         rr.id,
@@ -994,27 +1210,22 @@ export async function getAdminDelayedRepairs() {
        FROM repair_requests rr
        JOIN appliance_categories ac ON rr.category_id = ac.id
        LEFT JOIN services s ON s.id = rr.service_id
-       LEFT JOIN (
-         SELECT h1.repair_request_id, MAX(h1.created_at) AS status_since
-         FROM repair_status_history h1
-         JOIN repair_requests rr1 ON rr1.id = h1.repair_request_id
-         WHERE h1.new_status = rr1.current_status
-         GROUP BY h1.repair_request_id
-       ) h ON h.repair_request_id = rr.id
-       LEFT JOIN technician_assignments ta ON (ta.repair_request_id = rr.id AND ta.status IN ('accepted', 'offered'))
+       ${DELAYED_STATUS_SINCE_JOIN_SQL}
+       -- B23 — SATU BARIS PER PESANAN: penugasan yang tampil adalah yang
+       -- TERBARU per pesanan, diutamakan 'accepted' (bila belum ada yang
+       -- diterima, 'offered' terbaru). JOIN mentah menduplikasi pesanan
+       -- sekali per baris assignment (penawaran disiarkan ke beberapa
+       -- teknisi; penugasan ulang membuat baris baru) sehingga satu
+       -- pesanan bisa muncul 2–3× dalam daftar 10 dan pesanan tertunda
+       -- yang sebenarnya terpotong LIMIT.
+       LEFT JOIN technician_assignments ta ON ta.id = (
+         SELECT ta2.id FROM technician_assignments ta2
+         WHERE ta2.repair_request_id = rr.id AND ta2.status IN ('accepted', 'offered')
+         ORDER BY CASE WHEN ta2.status = 'accepted' THEN 0 ELSE 1 END, ta2.created_at DESC, ta2.id DESC
+         LIMIT 1
+       )
        LEFT JOIN technician_profiles tp ON ta.technician_id = tp.user_id
-       WHERE rr.current_status IN ('submitted', 'assigned', 'scheduled', 'in_diagnosis', 'estimated', 'customer_approved', 'in_repair')
-         AND rr.deleted_at IS NULL
-         AND TIMESTAMPDIFF(HOUR, COALESCE(h.status_since, rr.created_at), NOW()) >= CASE rr.current_status
-           WHEN 'submitted' THEN 24
-           WHEN 'assigned' THEN 24
-           WHEN 'scheduled' THEN 48
-           WHEN 'in_diagnosis' THEN 48
-           WHEN 'estimated' THEN 48
-           WHEN 'customer_approved' THEN 72
-           WHEN 'in_repair' THEN GREATEST(24, CEIL(COALESCE(s.estimated_duration_min, 60) / 30))
-           ELSE 999999
-         END
+       WHERE ${DELAYED_REPAIRS_WHERE_SQL}
        ORDER BY rr.created_at ASC
        LIMIT 10`
     );
@@ -1027,6 +1238,12 @@ export async function getAdminDelayedRepairs() {
         problem: r.problem_description,
         elapsedHours: Number(r.elapsed_hours),
         technician: r.assigned_technician || 'Belum ada teknisi ditugaskan (Menunggu Penugasan)',
+        // B22 — teks penyebab mengikuti ALUR STATUS (in_diagnosis ->
+        // estimated -> customer_approved -> in_repair). Teks lama
+        // menggambarkan status SEBELUMNYA: estimated diklaim "estimasi
+        // belum diselesaikan" padahal estimasi SUDAH selesai dan yang
+        // ditunggu adalah keputusan pelanggan; customer_approved diklaim
+        // "menunggu persetujuan" padahal persetujuan SUDAH diberikan.
         cause: r.current_status === 'submitted'
           ? 'Belum ada teknisi yang menerima tawaran penugasan'
           : r.current_status === 'assigned'
@@ -1036,9 +1253,9 @@ export async function getAdminDelayedRepairs() {
           : r.current_status === 'in_diagnosis'
           ? 'Diagnosis belum selesai'
           : r.current_status === 'estimated'
-          ? 'Estimasi biaya belum diselesaikan'
+          ? 'Estimasi selesai, menunggu persetujuan pelanggan'
           : r.current_status === 'customer_approved'
-          ? 'Menunggu persetujuan/pembayaran pelanggan'
+          ? 'Sudah disetujui pelanggan, pengerjaan belum dimulai'
           : 'Pengerjaan melebihi estimasi durasi layanan',
       }));
     }
@@ -1050,22 +1267,54 @@ export async function getAdminDelayedRepairs() {
   }
 }
 
+// B24/A24 — total pesanan tertunda (tanpa LIMIT) agar D#4 bisa memberi
+// tahu pemotongan daftar ("menampilkan 10 dari N total"). Definisi sama
+// persis dengan getAdminDelayedRepairs (N15, lihat konstanta bersama di
+// atas) — JOIN assignment tidak diperlukan di sini karena assignment hanya
+// LEFT JOIN penampil, bukan filter.
+export async function countAdminDelayedRepairs(): Promise<number | null> {
+  try {
+    const [row]: any = await query<any[]>(
+      `SELECT COUNT(*) AS total
+       FROM repair_requests rr
+       LEFT JOIN services s ON s.id = rr.service_id
+       ${DELAYED_STATUS_SINCE_JOIN_SQL}
+       WHERE ${DELAYED_REPAIRS_WHERE_SQL}`
+    );
+    return Number(row?.total || 0);
+  } catch (err) {
+    console.error('[data-service] countAdminDelayedRepairs gagal:', err);
+    return null;
+  }
+}
+
 export async function getAdminTechnicianWorkload() {
   try {
     const rows = await query<any[]>(
+      // B30 — "Tugas Aktif" HANYA penugasan 'accepted' (pekerjaan yang
+      // sudah diterima teknisi); penawaran 'offered' yang belum dijawab
+      // BUKAN pekerjaan yang sedang dikerjakan dan dilaporkan terpisah
+      // (offered_tasks). Teknisi suspended / belum terverifikasi TETAP
+      // tampil di daftar (jangan disembunyikan diam-diam) — status akun
+      // (users.status) dan status verifikasi dokumen
+      // (technician_profiles.verified_status) dikembalikan agar balasan
+      // D#3 bisa menampilkannya.
       `SELECT 
         u.id AS technician_id,
+        u.status AS account_status,
         tp.full_name,
         tp.rating_avg,
         tp.rating_count,
         tp.is_available,
-        COUNT(CASE WHEN ta.status IN ('offered', 'accepted') THEN 1 END) AS active_tasks,
+        tp.verified_status,
+        COUNT(CASE WHEN ta.status = 'accepted' THEN 1 END) AS active_tasks,
+        COUNT(CASE WHEN ta.status = 'offered' THEN 1 END) AS offered_tasks,
         COUNT(CASE WHEN ta.status = 'completed' THEN 1 END) AS completed_tasks
        FROM users u
        JOIN technician_profiles tp ON u.id = tp.user_id
        LEFT JOIN technician_assignments ta ON u.id = ta.technician_id
        WHERE u.role = 'technician' AND u.deleted_at IS NULL
-       GROUP BY u.id, tp.full_name, tp.rating_avg, tp.rating_count, tp.is_available
+       GROUP BY u.id, u.status, tp.full_name, tp.rating_avg, tp.rating_count, tp.is_available, tp.verified_status
        ORDER BY active_tasks DESC, tp.rating_avg DESC
        LIMIT 10`
     );
@@ -1077,8 +1326,11 @@ export async function getAdminTechnicianWorkload() {
         ratingAvg: Number(r.rating_avg || 0),
         ratingCount: Number(r.rating_count || 0),
         activeTasks: Number(r.active_tasks || 0),
+        offeredTasks: Number(r.offered_tasks || 0),
         completedTasks: Number(r.completed_tasks || 0),
         isAvailable: Boolean(r.is_available),
+        accountStatus: r.account_status,
+        verifiedStatus: r.verified_status,
       }));
     }
     // Tidak ada teknisi: [] (bukan teknisi demo).
@@ -1094,9 +1346,36 @@ export async function getAdminFinancialAnalytics() {
     const [invoicesSummary]: any = await query<any[]>(
       `SELECT 
         COUNT(*) AS total_invoices,
+        -- A2 — invoice PER STATUS (bukan hanya satu angka all-status):
+        -- tanpa hitungan "invoice lunas", jawaban D#5 tidak bisa
+        -- direkonsiliasi dengan jumlah transaksi pembayaran.
+        SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) AS paid_invoices,
+        SUM(CASE WHEN status = 'unpaid' THEN 1 ELSE 0 END) AS unpaid_invoices,
+        SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_invoices,
+        SUM(CASE WHEN status = 'refunded' THEN 1 ELSE 0 END) AS refunded_invoices,
         SUM(CASE WHEN status = 'unpaid' THEN total_amount ELSE 0 END) AS total_unpaid_amount,
-        SUM(CASE WHEN status = 'paid' THEN service_fee ELSE 0 END) AS total_platform_fee
+        -- B26 — piutang "tertunggak" HANYA invoice yang sudah lewat jatuh
+        -- tempo (due_date < NOW()); invoice yang baru terbit dan jatuh
+        -- tempo minggu depan BUKAN tunggakan — dipisah sebagai
+        -- "belum jatuh tempo". (due_date NOT NULL di skema, jadi kedua
+        -- kelompok ini selalu berjumlah sama dengan total_unpaid_amount.)
+        SUM(CASE WHEN status = 'unpaid' AND due_date < NOW() THEN total_amount ELSE 0 END) AS total_unpaid_overdue,
+        SUM(CASE WHEN status = 'unpaid' AND due_date >= NOW() THEN total_amount ELSE 0 END) AS total_unpaid_not_yet_due
        FROM invoices`
+    );
+
+    // B26 — DEFINISI PLATFORM FEE: SUM(service_fee) atas invoice
+    // berstatus 'paid' YANG SUDAH PUNYA ≥1 pembayaran settlement.
+    // Definisi lama (semua invoice 'paid') menghitung fee atas invoice
+    // yang uangnya belum masuk (webhook belum diproses) dan berlawanan
+    // arah dengan pendapatan N31 bila invoice di-refund tanpa statusnya
+    // berubah. Fee mengikuti uang yang benar-benar masuk, konsisten
+    // dengan definisi pendapatan.
+    const [platformFeeRow]: any = await query<any[]>(
+      `SELECT COALESCE(SUM(inv.service_fee), 0) AS total_platform_fee
+       FROM invoices inv
+       WHERE inv.status = 'paid'
+         AND EXISTS (SELECT 1 FROM payments p WHERE p.invoice_id = inv.id AND p.payment_status = 'settlement')`
     );
 
     // N31: pendapatan dihitung dari uang yang benar-benar masuk — pembayaran
@@ -1112,7 +1391,13 @@ export async function getAdminFinancialAnalytics() {
     const [revenueSummary]: any = await query<any[]>(
       `SELECT
         COALESCE(SUM(CASE WHEN payment_status = 'settlement' THEN amount ELSE 0 END), 0) AS settled_total,
-        COALESCE(SUM(CASE WHEN payment_status = 'refunded' THEN amount ELSE 0 END), 0) AS refunded_total
+        COALESCE(SUM(CASE WHEN payment_status = 'refunded' THEN amount ELSE 0 END), 0) AS refunded_total,
+        -- A2 — JEMBATAN REKONSILIASI: berapa INVOICE BERBEDA yang punya
+        -- ≥1 pembayaran settlement. Satu invoice boleh punya banyak baris
+        -- payments (cicilan / percobaan ulang), sehingga 18 transaksi
+        // settlement bisa berasal dari < 18 invoice — kalimat "18
+        // pembayaran untuk X invoice" menjelaskan selisihnya.
+        COUNT(DISTINCT CASE WHEN payment_status = 'settlement' THEN invoice_id END) AS settled_invoice_count
        FROM payments`
     );
 
@@ -1124,11 +1409,24 @@ export async function getAdminFinancialAnalytics() {
     );
 
     // Angka riil — termasuk 0 bila belum ada invoice (bukan angka demo).
+    const settledTotal = Number(revenueSummary?.settled_total || 0);
+    const refundedTotal = Number(revenueSummary?.refunded_total || 0);
     return {
       totalInvoices: Number(invoicesSummary?.total_invoices || 0),
-      totalRevenuePaid: Number(revenueSummary?.settled_total || 0) - Number(revenueSummary?.refunded_total || 0),
+      invoicesByStatus: {
+        paid: Number(invoicesSummary?.paid_invoices || 0),
+        unpaid: Number(invoicesSummary?.unpaid_invoices || 0),
+        cancelled: Number(invoicesSummary?.cancelled_invoices || 0),
+        refunded: Number(invoicesSummary?.refunded_invoices || 0),
+      },
+      settledInvoiceCount: Number(revenueSummary?.settled_invoice_count || 0),
+      settledTotal,
+      refundedTotal,
+      totalRevenuePaid: settledTotal - refundedTotal,
       totalUnpaidAmount: Number(invoicesSummary?.total_unpaid_amount || 0),
-      totalPlatformFee: Number(invoicesSummary?.total_platform_fee || 0),
+      totalUnpaidOverdue: Number(invoicesSummary?.total_unpaid_overdue || 0),
+      totalUnpaidNotYetDue: Number(invoicesSummary?.total_unpaid_not_yet_due || 0),
+      totalPlatformFee: Number(platformFeeRow?.total_platform_fee || 0),
       paymentMethodsBreakdown: (paymentMethods || []).map(p => ({
         method: p.payment_method,
         transactionCount: Number(p.count),
@@ -1170,19 +1468,63 @@ export async function getAdminSystemHealth() {
     fonnteStatus = { lastStatus: 'tidak diketahui', lastAttempt: null, error: 'database tidak dapat diakses' };
   }
 
-  const geminiConfig = {
-    model: process.env.GEMINI_MODEL || 'gemini-3.5-flash',
-    apiKeyConfigured: Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.length > 10),
-  };
+  // B16 — provider AI AKTIF dibaca dari DATABASE (sumber kebenaran sejak
+  // PR #2: ai_global_settings.active_provider -> ai_provider_configs),
+  // BUKAN env var GEMINI_MODEL / GEMINI_API_KEY yang usang. Bila provider
+  // aktif adalah Groq/DeepSeek, atau key hanya tersimpan di DB, balasan
+  // lama ("Model Gemini AI: gemini-3.5-flash, API Key Belum Disetel")
+  // SALAH di kedua sisinya. Nilai encrypted_api_key TIDAK PERNAH dibaca
+  // — hanya keberadaannya (IS NOT NULL) untuk boolean apiKeyConfigured.
+  let aiProvider: {
+    provider: string | null;
+    name: string | null;
+    model: string | null;
+    apiKeyConfigured: boolean;
+    lastConnectionStatus: string | null;
+  } = { provider: null, name: null, model: null, apiKeyConfigured: false, lastConnectionStatus: null };
+  try {
+    const [globalRow]: any = await query<any[]>(
+      `SELECT active_provider FROM ai_global_settings WHERE id = 1 LIMIT 1`
+    );
+    const activeProvider = globalRow?.active_provider || null;
+    if (activeProvider) {
+      const [cfg]: any = await query<any[]>(
+        `SELECT provider, name, selected_model, last_connection_status,
+                (encrypted_api_key IS NOT NULL AND encrypted_api_key <> '') AS has_api_key
+         FROM ai_provider_configs
+         WHERE provider = ?
+         LIMIT 1`,
+        [activeProvider]
+      );
+      if (cfg) {
+        aiProvider = {
+          provider: cfg.provider,
+          name: cfg.name,
+          model: cfg.selected_model,
+          apiKeyConfigured: Boolean(cfg.has_api_key),
+          lastConnectionStatus: cfg.last_connection_status,
+        };
+      } else {
+        // Provider aktif tercatat di global settings tetapi tidak punya
+        // baris konfigurasi — laporkan namanya apa adanya, bukan model
+        // tebakan.
+        aiProvider = { provider: activeProvider, name: null, model: null, apiKeyConfigured: false, lastConnectionStatus: 'not_configured' };
+      }
+    }
+  } catch (err) {
+    console.error('[data-service] getAdminSystemHealth gagal membaca konfigurasi provider AI:', err);
+  }
 
   return {
     database: {
       connected: dbHealth.connected,
-      latencyMs: dbHealth.latencyMs || 0,
+      // B31 — latensi null (ditampilkan "-") bila DB tidak terhubung;
+      // "0 ms" untuk DB yang mati menyesatkan.
+      latencyMs: dbHealth.connected ? (dbHealth.latencyMs ?? null) : null,
       statusText: dbHealth.connected ? 'Operational (Connected)' : 'Degraded',
     },
     whatsappFonnte: fonnteStatus,
-    geminiAi: geminiConfig,
+    aiProvider,
     serverTime: new Date().toISOString(),
   };
 }
@@ -1293,7 +1635,10 @@ export async function getAdminUserStats() {
       totalUsers: 0,
       customers: { total: 0, active: 0, inactive: 0, pending: 0, suspended: 0 },
       technicians: { total: 0, active: 0, inactive: 0, pending: 0, suspended: 0 },
-      admins: { total: 0, active: 0, inactive: 0 },
+      // B27 — bucket admin dilengkapi pending/suspended (sebelumnya hanya
+      // active/inactive sehingga admin pending/suspended masuk total
+      // tetapi tidak masuk bucket mana pun: jumlah bucket < total).
+      admins: { total: 0, active: 0, inactive: 0, pending: 0, suspended: 0 },
     };
 
     for (const r of rows || []) {
@@ -1315,6 +1660,8 @@ export async function getAdminUserStats() {
         stats.admins.total += count;
         if (r.status === 'active') stats.admins.active += count;
         if (r.status === 'inactive') stats.admins.inactive += count;
+        if (r.status === 'pending_verification') stats.admins.pending += count;
+        if (r.status === 'suspended') stats.admins.suspended += count;
       }
     }
 
@@ -1350,20 +1697,34 @@ export async function getAdminCustomerAnalytics() {
     );
 
     const pendingOrders = await query<any[]>(
+      // B28 — "sedang berjalan" mencakup estimated (estimasi terbit,
+      // menunggu persetujuan) dan customer_approved (sudah disetujui,
+      // menunggu pengerjaan) — keduanya JELAS pesanan berjalan; yang
+      // bukan berjalan hanya draft / completed / cancelled / complained.
       `SELECT rr.order_code, rr.current_status, rr.created_at, cp.full_name, u.phone_number, ac.name AS category_name
        FROM repair_requests rr
        JOIN users u ON rr.customer_id = u.id
        LEFT JOIN customer_profiles cp ON u.id = cp.user_id
        JOIN appliance_categories ac ON rr.category_id = ac.id
-       WHERE rr.current_status IN ('submitted', 'assigned', 'scheduled', 'in_diagnosis', 'in_repair')
+       WHERE rr.current_status IN ('submitted', 'assigned', 'scheduled', 'in_diagnosis', 'estimated', 'customer_approved', 'in_repair')
          AND rr.deleted_at IS NULL
        ORDER BY rr.created_at DESC LIMIT 5`
+    );
+
+    // A24 — total pesanan berjalan (tanpa LIMIT) agar D#2 bisa memberi
+    // tahu pemotongan daftar ("menampilkan 5 terbaru dari N total").
+    const [pendingTotal]: any = await query<any[]>(
+      `SELECT COUNT(*) AS total
+       FROM repair_requests rr
+       WHERE rr.current_status IN ('submitted', 'assigned', 'scheduled', 'in_diagnosis', 'estimated', 'customer_approved', 'in_repair')
+         AND rr.deleted_at IS NULL`
     );
 
     // Angka riil — 0 dan daftar kosong bila belum ada customer (bukan data demo).
     return {
       totalCustomers: Number(counts?.total_customers || 0),
       newCustomersThisMonth: Number(counts?.new_this_month || 0),
+      pendingOrdersTotal: Number(pendingTotal?.total || 0),
       recentCustomers: (recent || []).map(r => ({
         name: r.full_name || 'Pelanggan',
         email: r.email,
@@ -1398,14 +1759,27 @@ export async function getAdminOperationalReport() {
        WHERE deleted_at IS NULL`
     );
 
-    // Pendapatan = invoice berstatus 'paid', dikelompokkan per bulan pembayaran (paid_at).
+    // B17 — pendapatan memakai definisi N31 yang SAMA dengan
+    // getAdminFinancialAnalytics (D#5): pembayaran settlement dikurangi
+    // refunded, dikelompokkan per bulan COALESCE(settled_at, created_at).
+    // Definisi lama (SUM total_amount invoice 'paid' per bulan paid_at)
+    // menghitung invoice paid tanpa settlement, tidak mengurangkan refund,
+    // dan membuat angka bulan lalu berubah retroaktif bila invoice
+    // di-refund — sehingga D#6 dan D#5 tidak bisa direkonsiliasi.
     const [revenue]: any = await query<any[]>(
       `SELECT
-        SUM(CASE WHEN paid_at >= DATE_FORMAT(NOW(), '%Y-%m-01') THEN total_amount ELSE 0 END) AS current_revenue,
-        SUM(CASE WHEN paid_at >= DATE_FORMAT(DATE_SUB(NOW(), INTERVAL 1 MONTH), '%Y-%m-01')
-                  AND paid_at < DATE_FORMAT(NOW(), '%Y-%m-01') THEN total_amount ELSE 0 END) AS previous_revenue
-       FROM invoices
-       WHERE status = 'paid'`
+        COALESCE(SUM(CASE
+          WHEN COALESCE(settled_at, created_at) >= DATE_FORMAT(NOW(), '%Y-%m-01')
+          THEN CASE WHEN payment_status = 'settlement' THEN amount
+                    WHEN payment_status = 'refunded' THEN -amount ELSE 0 END
+          ELSE 0 END), 0) AS current_revenue,
+        COALESCE(SUM(CASE
+          WHEN COALESCE(settled_at, created_at) >= DATE_FORMAT(DATE_SUB(NOW(), INTERVAL 1 MONTH), '%Y-%m-01')
+           AND COALESCE(settled_at, created_at) < DATE_FORMAT(NOW(), '%Y-%m-01')
+          THEN CASE WHEN payment_status = 'settlement' THEN amount
+                    WHEN payment_status = 'refunded' THEN -amount ELSE 0 END
+          ELSE 0 END), 0) AS previous_revenue
+       FROM payments`
     );
 
     // Layanan paling diminati bulan berjalan (GROUP BY service_id, nama dari tabel services).
@@ -1422,16 +1796,40 @@ export async function getAdminOperationalReport() {
     );
 
     // Kendala yang dapat diukur dari data: dibatalkan & dikomplain bulan ini,
-    // serta pesanan yang menunggu penugasan/penjadwalan lebih dari 24 jam.
-    const [issueCounts]: any = await query<any[]>(
+    // serta pesanan tertunda (definisi N15, sama dengan D#4).
+    // B19 — dibatalkan/dikomplain bulan ini dihitung dari PERISTIWA-nya
+    // (entri repair_status_history bulan berjalan), bukan dari bulan
+    // pembuatan pesanan. Pesanan yang dibuat bulan lalu lalu dibatalkan
+    // bulan ini sebelumnya tidak pernah terhitung di bulan mana pun.
+    // (Peristiwa dihitung apa adanya dari riwayat — pesanan yang kemudian
+    // di-soft-delete tetap terhitung karena pembatalannya memang terjadi.)
+    const [eventCounts]: any = await query<any[]>(
       `SELECT
-        SUM(CASE WHEN current_status = 'cancelled' AND created_at >= DATE_FORMAT(NOW(), '%Y-%m-01') THEN 1 ELSE 0 END) AS cancelled_this_month,
-        SUM(CASE WHEN current_status = 'complained' AND created_at >= DATE_FORMAT(NOW(), '%Y-%m-01') THEN 1 ELSE 0 END) AS complained_this_month,
-        SUM(CASE WHEN current_status IN ('submitted', 'assigned', 'scheduled')
-                  AND TIMESTAMPDIFF(HOUR, created_at, NOW()) >= 24 THEN 1 ELSE 0 END) AS delayed_over_24h
-       FROM repair_requests
-       WHERE deleted_at IS NULL`
+        COUNT(DISTINCT CASE WHEN new_status = 'cancelled' THEN repair_request_id END) AS cancelled_this_month,
+        COUNT(DISTINCT CASE WHEN new_status = 'complained' THEN repair_request_id END) AS complained_this_month
+       FROM repair_status_history
+       WHERE created_at >= DATE_FORMAT(NOW(), '%Y-%m-01')
+         AND new_status IN ('cancelled', 'complained')`
     );
+
+    // B18 — "tertunda" memakai definisi N15 yang sama dengan D#4 (ambang
+    // per status dari saat pesanan memasuki statusnya — lihat konstanta
+    // DELAYED_REPAIRS_WHERE_SQL), bukan definisi lama (umur sejak
+    // created_at >= 24 jam untuk 3 status saja) yang salah dua arah.
+    const [delayedRow]: any = await query<any[]>(
+      `SELECT COUNT(*) AS delayed_over_24h
+       FROM repair_requests rr
+       LEFT JOIN services s ON s.id = rr.service_id
+       ${DELAYED_STATUS_SINCE_JOIN_SQL}
+       WHERE ${DELAYED_REPAIRS_WHERE_SQL}`
+    );
+
+    // Bentuk issueCounts dipertahankan agar sisa fungsi tidak berubah.
+    const issueCounts = {
+      cancelled_this_month: Number(eventCounts?.cancelled_this_month || 0),
+      complained_this_month: Number(eventCounts?.complained_this_month || 0),
+      delayed_over_24h: Number(delayedRow?.delayed_over_24h || 0),
+    };
 
     const currentMonthOrders = Number(orderCounts?.current_orders || 0);
     const previousMonthOrders = Number(orderCounts?.previous_orders || 0);
@@ -1459,7 +1857,7 @@ export async function getAdminOperationalReport() {
     const delayedCount = Number(issueCounts?.delayed_over_24h || 0);
     if (delayedCount > 0) {
       frequentIssues.push({
-        issue: `${delayedCount} pesanan menunggu penugasan/penjadwalan lebih dari 24 jam`,
+        issue: `${delayedCount} pesanan tertunda (melebihi ambang waktu statusnya)`,
         count: delayedCount,
         impact: impactOf(delayedCount),
       });
@@ -1473,7 +1871,7 @@ export async function getAdminOperationalReport() {
     }
     if (complainedCount > 0) {
       frequentIssues.push({
-        issue: `${complainedCount} pesanan berstatus komplain pada bulan berjalan`,
+        issue: `${complainedCount} pesanan dikomplain pada bulan berjalan`,
         count: complainedCount,
         impact: impactOf(complainedCount),
       });
@@ -1482,7 +1880,7 @@ export async function getAdminOperationalReport() {
     // Rekomendasi diturunkan dari angka di atas; kosong bila tidak ada kendala.
     const efficiencyRecommendations: string[] = [];
     if (delayedCount > 0) {
-      efficiencyRecommendations.push(`Tinjau ketersediaan teknisi dan percepat penugasan untuk ${delayedCount} pesanan yang menunggu lebih dari 24 jam.`);
+      efficiencyRecommendations.push(`Tinjau ketersediaan teknisi dan percepat penanganan untuk ${delayedCount} pesanan tertunda.`);
     }
     if (cancelledCount > 0) {
       efficiencyRecommendations.push(`Tinjau alasan pembatalan ${cancelledCount} pesanan bulan ini untuk menemukan pola yang bisa dicegah.`);
@@ -1513,10 +1911,15 @@ export async function getAdminOperationalReport() {
 export async function getAdminNotificationStatus() {
   try {
     const [counts]: any = await query<any[]>(
+      // B25 — total_sent = UPAYA KIRIM (sent + failed), BUKAN COUNT(*)
+      // seluruh baris: OTP 'pending' belum dikirim dan tidak boleh
+      // dihitung "terkirim" (sebelumnya delivered + failed ≠ total begitu
+      // ada yang pending). Pending dilaporkan terpisah.
       `SELECT
-        COUNT(*) AS total_sent,
+        SUM(CASE WHEN delivery_status IN ('sent', 'failed') THEN 1 ELSE 0 END) AS total_sent,
         SUM(CASE WHEN delivery_status = 'sent' THEN 1 ELSE 0 END) AS delivered_count,
-        SUM(CASE WHEN delivery_status = 'failed' THEN 1 ELSE 0 END) AS failed_count
+        SUM(CASE WHEN delivery_status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+        SUM(CASE WHEN delivery_status = 'pending' THEN 1 ELSE 0 END) AS pending_count
        FROM user_otps`
     );
 
@@ -1532,9 +1935,13 @@ export async function getAdminNotificationStatus() {
       totalSent: Number(counts?.total_sent || 0),
       delivered: Number(counts?.delivered_count || 0),
       failed: Number(counts?.failed_count || 0),
+      pending: Number(counts?.pending_count || 0),
       failedLogs: (failedLogs || []).map(f => ({
         phone: f.target_phone,
-        reason: f.delivery_error || 'Nomor WhatsApp tidak aktif atau timeout koneksi gateway Fonnte',
+        // B25 — alasan NULL berarti "tidak tercatat": JANGAN mengarang
+        // penyebab spesifik ("Nomor WhatsApp tidak aktif atau timeout")
+        // atas kegagalan yang penyebabnya tidak pernah dicatat.
+        reason: f.delivery_error || 'Alasan tidak tercatat',
         createdAt: f.created_at,
       })),
     };
@@ -1683,7 +2090,7 @@ const INVOICE_STATUSES = new Set(['unpaid', 'paid', 'cancelled', 'refunded']);
 export async function searchDatabaseUsers(
   searchTerm: string,
   options: { role?: string; limit?: number } = {}
-): Promise<DatabaseUserRecord[]> {
+): Promise<DatabaseUserRecord[] | null> {
   const cleanTerm = (searchTerm || '').trim();
   if (!cleanTerm) return [];
 
@@ -1783,7 +2190,10 @@ export async function searchDatabaseUsers(
     return [];
   } catch (err) {
     console.error('[data-service] searchDatabaseUsers gagal:', err);
-    return [];
+    // A16 — aturan tiga keadaan (N1/T9): error -> null, BUKAN [].
+    // [] berarti "pencarian sukses, tidak ada hasil"; mengembalikan []
+    // saat DB down membuat chatbot mengklaim data "tidak ditemukan".
+    return null;
   }
 }
 
@@ -1836,10 +2246,23 @@ export async function searchDatabaseOrders(
        JOIN appliance_categories ac ON rr.category_id = ac.id
        JOIN users u_cust ON rr.customer_id = u_cust.id
        LEFT JOIN customer_profiles cp ON rr.customer_id = cp.user_id
-       LEFT JOIN technician_assignments ta ON (ta.repair_request_id = rr.id AND ta.status IN ('accepted', 'completed'))
+       -- A31 — SATU BARIS PER PESANAN (pola yang sama dengan A6): penugasan
+       -- & diagnosis diambil yang TERBARU per pesanan (MAX(id)), bukan JOIN
+       -- mentah yang melipatgandakan baris — pesanan dengan 2 diagnosis
+       -- muncul 2× di hasil pencarian D#13 dan LIMIT memakan pesanan lain.
+       -- Invoice tidak perlu didedup: UNIQUE(repair_request_id).
+       LEFT JOIN technician_assignments ta ON (
+         ta.repair_request_id = rr.id
+         AND ta.status IN ('accepted', 'completed')
+         AND ta.id = (SELECT MAX(ta2.id) FROM technician_assignments ta2
+                      WHERE ta2.repair_request_id = rr.id AND ta2.status IN ('accepted', 'completed'))
+       )
        LEFT JOIN technician_profiles tp ON ta.technician_id = tp.user_id
        LEFT JOIN invoices inv ON inv.repair_request_id = rr.id
-       LEFT JOIN repair_diagnoses diag ON diag.repair_request_id = rr.id
+       LEFT JOIN repair_diagnoses diag ON (
+         diag.repair_request_id = rr.id
+         AND diag.id = (SELECT MAX(d2.id) FROM repair_diagnoses d2 WHERE d2.repair_request_id = rr.id)
+       )
        WHERE rr.deleted_at IS NULL
          ${statusFilter}
          AND (
@@ -1868,7 +2291,13 @@ export async function searchDatabaseOrders(
         technicianName: r.technician_name || 'Belum ditugaskan',
         technicianRating: r.technician_rating ? Number(r.technician_rating) : null,
         invoiceNumber: r.invoice_number || null,
-        totalAmount: r.invoice_total ? Number(r.invoice_total) : (r.total_estimate ? Number(r.total_estimate) : null),
+        // A28 — totalAmount HANYA total invoice (null bila invoice belum
+        // terbit); estimasi diagnosis dipisah ke estimateAmount. Satu
+        // field sebelumnya mencampur dua arti — dan invoice total 0
+        // (falsy) ikut jatuh ke estimasi. Cek `!= null` (bukan truthy)
+        // agar total 0 tetap 0.
+        totalAmount: r.invoice_total != null ? Number(r.invoice_total) : null,
+        estimateAmount: r.total_estimate != null ? Number(r.total_estimate) : null,
         invoiceStatus: r.invoice_status || 'Belum terbit',
         createdAt: r.created_at,
       }));
@@ -1877,7 +2306,8 @@ export async function searchDatabaseOrders(
     return [];
   } catch (err) {
     console.error('[data-service] searchDatabaseOrders gagal:', err);
-    return [];
+    // A16 — error -> null (lihat searchDatabaseUsers).
+    return null;
   }
 }
 
@@ -1954,10 +2384,19 @@ export async function searchDatabaseTechnicians(
            tp.full_name LIKE ? ESCAPE '!'
            OR u.phone_number LIKE ? ESCAPE '!'
            OR u.email LIKE ? ESCAPE '!'
+           -- A17 — cari juga berdasarkan SPESIALISASI (nama kategori
+           -- keahlian), sesuai deskripsi tool ("berdasarkan nama atau
+           -- keahlian spesialisasi"). Sebelumnya "cari teknisi AC" hanya
+           -- menemukan teknisi yang NAMANYA mengandung "AC".
+           OR EXISTS (
+             SELECT 1 FROM technician_specializations tsq
+             JOIN appliance_categories acq ON tsq.category_id = acq.id
+             WHERE tsq.technician_profile_id = tp.id AND acq.name LIKE ? ESCAPE '!'
+           )
          )
        ORDER BY tp.rating_avg DESC, tp.rating_count DESC
        LIMIT ?`,
-      [...categoryParams, termPattern, termPattern, termPattern, limit]
+      [...categoryParams, termPattern, termPattern, termPattern, termPattern, limit]
     );
 
     if (rows && rows.length > 0) {
@@ -1980,7 +2419,8 @@ export async function searchDatabaseTechnicians(
     return [];
   } catch (err) {
     console.error('[data-service] searchDatabaseTechnicians gagal:', err);
-    return [];
+    // A16 — error -> null (lihat searchDatabaseUsers).
+    return null;
   }
 }
 
@@ -2016,6 +2456,7 @@ export async function searchDatabaseInvoices(
         inv.subtotal_labor,
         inv.subtotal_parts,
         inv.service_fee,
+        inv.discount_amount,
         inv.total_amount,
         inv.status,
         inv.due_date,
@@ -2035,6 +2476,9 @@ export async function searchDatabaseInvoices(
           OR rr.order_code LIKE ? ESCAPE '!'
           OR cp.full_name LIKE ? ESCAPE '!'
           OR u.phone_number LIKE ? ESCAPE '!')
+         -- A30 — invoice milik pesanan yang sudah di-soft-delete tidak
+         -- ditampilkan (konsisten dengan getter pesanan).
+         AND rr.deleted_at IS NULL
          ${statusFilter}
        ORDER BY inv.created_at DESC
        LIMIT ?`,
@@ -2051,6 +2495,9 @@ export async function searchDatabaseInvoices(
         laborCost: Number(r.subtotal_labor),
         partsCost: Number(r.subtotal_parts),
         serviceFee: Number(r.service_fee),
+        // A19 — diskon dikembalikan agar D#14 bisa menampilkannya:
+        // komponen (jasa + suku cadang + layanan) − diskon = total.
+        discountAmount: Number(r.discount_amount || 0),
         totalAmount: Number(r.total_amount),
         status: r.status,
         dueDate: r.due_date,
@@ -2061,7 +2508,8 @@ export async function searchDatabaseInvoices(
     return [];
   } catch (err) {
     console.error('[data-service] searchDatabaseInvoices gagal:', err);
-    return [];
+    // A16 — error -> null (lihat searchDatabaseUsers).
+    return null;
   }
 }
 
@@ -2441,18 +2889,23 @@ export async function executeGovernedDatabaseQuery(
 // 1. Pengguna tanpa profil (tanpa full_name) tidak lagi ditampilkan sebagai
 //    alamat email — melainkan "Tanpa nama (#id)" (id pengguna dicantumkan
 //    agar admin tetap bisa membedakan dan mencari akunnya).
+//    A23 — pengecualian: admin TIDAK PUNYA baris profil (bukan "tanpa
+//    nama"), jadi untuk admin tampilkan email sebagai pengganti nama —
+//    "Tanpa nama (#3)" padahal emailnya diketahui menyesatkan.
 // 2. getUserNameListWithTotal mengembalikan total baris yang cocok agar
 //    pemanggil bisa memberi tahu bahwa daftar dipotong di LIMIT
 //    ("menampilkan 50 terbaru dari N total") — jangan biarkan admin
 //    mengira 50 nama itu seluruh pengguna. getUserNameList sendiri tetap
 //    mengembalikan array nama (kompatibilitas pemanggil lama).
+// A23 — 'inactive' ditambahkan ke allowlist status: "customer tidak aktif"
+// sebelumnya tidak bisa difilter sehingga semua customer ditampilkan.
 async function queryUserNameList(
   role: 'customer' | 'technician' | null,
   limit: number,
-  status?: 'active' | 'pending_verification' | 'suspended'
+  status?: 'active' | 'pending_verification' | 'suspended' | 'inactive'
 ): Promise<{ names: string[]; total: number } | null> {
   const cleanLimit = Math.min(100, Math.max(1, Math.floor(limit) || 50));
-  const cleanStatus = status === 'active' || status === 'pending_verification' || status === 'suspended' ? status : null;
+  const cleanStatus = status === 'active' || status === 'pending_verification' || status === 'suspended' || status === 'inactive' ? status : null;
   try {
     const whereParts = ['u.deleted_at IS NULL'];
     const params: any[] = [];
@@ -2471,7 +2924,7 @@ async function queryUserNameList(
     );
     const total = Number(countRow?.total || 0);
     const rows = await query<any[]>(
-      `SELECT u.id, cp.full_name AS customer_name, tp.full_name AS technician_name
+      `SELECT u.id, u.role, u.email, cp.full_name AS customer_name, tp.full_name AS technician_name
        FROM users u
        LEFT JOIN customer_profiles cp ON u.id = cp.user_id
        LEFT JOIN technician_profiles tp ON u.id = tp.user_id
@@ -2482,7 +2935,10 @@ async function queryUserNameList(
     );
     const names = (rows || []).map((r) => {
       const name = String(r.customer_name || r.technician_name || '').trim();
-      return name || `Tanpa nama (#${r.id})`;
+      // A23 — admin tanpa profil: tampilkan email (bukan "Tanpa nama").
+      if (name) return name;
+      if (r.role === 'admin' && r.email) return String(r.email);
+      return `Tanpa nama (#${r.id})`;
     });
     return { names, total };
   } catch {
@@ -2493,7 +2949,7 @@ async function queryUserNameList(
 export async function getUserNameList(
   role: 'customer' | 'technician' | null,
   limit: number = 50,
-  status?: 'active' | 'pending_verification' | 'suspended'
+  status?: 'active' | 'pending_verification' | 'suspended' | 'inactive'
 ): Promise<string[] | null> {
   const result = await queryUserNameList(role, limit, status);
   return result === null ? null : result.names;
@@ -2505,7 +2961,7 @@ export async function getUserNameList(
 export async function getUserNameListWithTotal(
   role: 'customer' | 'technician' | null,
   limit: number = 50,
-  status?: 'active' | 'pending_verification' | 'suspended'
+  status?: 'active' | 'pending_verification' | 'suspended' | 'inactive'
 ): Promise<{ names: string[]; total: number } | null> {
   return queryUserNameList(role, limit, status);
 }
