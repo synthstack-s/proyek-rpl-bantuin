@@ -2524,9 +2524,17 @@ export async function searchDatabaseInvoices(
 //    token_hash, gateway_response_json).
 // 3. Hanya SELECT. Tidak ada INSERT/UPDATE/DELETE, tidak ada SQL mentah dari AI.
 // 4. Row-level scoping: peran non-admin dipaksa filter owner
-//    (user_id / customer_id / technician_id / complainant_user_id).
+//    (user_id / customer_id / technician_id / complainant_user_id), atau
+//    scope relasional (B14: payments customer lewat invoices.customer_id).
 // 5. Semua nilai diparameterisasi (?); semua identifier dikutip dari registry.
 // 6. JOIN hanya lewat relasi yang dideklarasikan di registry.
+// 7. Filter soft-delete/is_active ditambahkan otomatis (B6) agar hitungan
+//    governed sama dengan getter deterministik.
+// 8. Nilai filter divalidasi terhadap ENUM registry (B10); nilai tak dikenal
+//    ditolak dengan daftar nilai sah, bukan menghasilkan nol palsu.
+// 9. Scoping lintas peran ditolak keras (B9), bukan mengembalikan kosong.
+// 10. Agregasi sum/avg atas kolom tabel dasar DIBLOKIR bila ada JOIN (B7:
+//     fan-out); gunakan count_distinct untuk menghitung baris dasar unik.
 
 export interface GovernedQueryFilter {
   column: string; // 'kolom' atau 'tabel.kolom'
@@ -2557,7 +2565,9 @@ export interface GovernedQuerySpec {
   columns?: string[]; // 'kolom' atau 'tabel.kolom'; kosong = semua kolom non-sensitif
   joins?: Array<string | GovernedJoinSpec>; // nama tabel, atau { table, via }
   filters?: GovernedQueryFilter[];
-  aggregate?: { function: 'count' | 'sum' | 'avg' | 'min' | 'max'; column?: string };
+  // B7: 'count_distinct' menghitung nilai unik (COUNT DISTINCT) — satu-satunya
+  // cara yang benar menghitung baris tabel dasar di atas JOIN one-to-many.
+  aggregate?: { function: 'count' | 'count_distinct' | 'sum' | 'avg' | 'min' | 'max'; column?: string };
   groupBy?: string; // 'kolom' atau 'tabel.kolom'
   orderBy?: { column: string; direction?: 'ASC' | 'DESC' };
   limit?: number; // default 20, maks 100
@@ -2565,7 +2575,10 @@ export interface GovernedQuerySpec {
 
 export interface GovernedQueryResult {
   success: boolean;
-  data?: { table: string; rows: any[]; rowCount: number };
+  // B8: total = jumlah baris/grup yang cocok (tanpa LIMIT); truncated = true
+  // bila LIMIT memotong hasil. B12: isEmpty = true bila himpunan yang
+  // diagregasi kosong (AVG/MIN/MAX mengembalikan value null).
+  data?: { table: string; rows: any[]; rowCount: number; total: number; truncated: boolean; isEmpty: boolean };
   error?: string;
 }
 
@@ -2573,7 +2586,7 @@ export interface GovernedQueryResult {
 const PUBLIC_TABLES = new Set(['appliance_categories', 'services']);
 
 const ALLOWED_OPERATORS = new Set(['=', '!=', '>', '>=', '<', '<=', 'LIKE', 'IN']);
-const ALLOWED_AGGREGATES = new Set(['count', 'sum', 'avg', 'min', 'max']);
+const ALLOWED_AGGREGATES = new Set(['count', 'count_distinct', 'sum', 'avg', 'min', 'max']);
 
 function resolveTable(name: string): TableMetadata | null {
   if (typeof name !== 'string') return null;
@@ -2618,6 +2631,12 @@ function isTableAllowedForRole(table: TableMetadata, role: string): boolean {
   if (role === 'admin') return true;
   if (role === 'guest') return PUBLIC_TABLES.has(table.tableName);
   if (PUBLIC_TABLES.has(table.tableName)) return true;
+  // B9: tabel yang pemiliknya hanya bermakna bagi satu peran (mis.
+  // technician_profiles.user_id selalu teknisi) tidak boleh dibaca peran
+  // lain — scoping ke id peran lain SELALU kosong dan menyesatkan.
+  if (table.ownerRole && table.ownerRole !== role) return false;
+  // B14: scope relasional (mis. payments untuk customer lewat invoices).
+  if (table.relationalScope && table.relationalScope.roles.includes(role as 'customer' | 'technician')) return true;
   const owner = table.ownerForeignKey;
   if (!owner) return false;
   if (role === 'customer') return owner === 'user_id' || owner === 'customer_id' || owner === 'complainant_user_id';
@@ -2625,12 +2644,131 @@ function isTableAllowedForRole(table: TableMetadata, role: string): boolean {
   return false;
 }
 
+// B9 — Pesan penolakan akses yang eksplisit. Penolakan lintas peran harus
+// menjelaskan ALASANNYA agar AI tidak menafsirkannya sebagai "tidak ada
+// data" (mis. customer yang ditolak membaca technician_profiles tidak boleh
+// dijawab "tidak ada teknisi yang tersedia").
+function tableAccessError(table: TableMetadata, role: string): string {
+  if (table.ownerRole && role !== 'admin' && role !== table.ownerRole) {
+    const ownerName = table.ownerRole === 'technician' ? 'teknisi' : 'pelanggan';
+    return `Akses ditolak: tabel ${table.tableName} hanya dapat dibaca oleh ${ownerName} (data ${ownerName} milik sendiri). Peran ${role} tidak dapat mengkueri tabel ini — ini adalah batasan akses, BUKAN berarti datanya kosong.`;
+  }
+  return `Akses ditolak: peran ${role} tidak diizinkan membaca tabel ${table.tableName}.`;
+}
+
+// Metadata kolom penuh (untuk validasi ENUM di B10).
+function getColumnMeta(table: TableMetadata, colName: string): TableMetadata['columns'][number] | null {
+  return table.columns.find((c) => c.name === colName) || null;
+}
+
+// B10 — Parse daftar nilai dari tipe ENUM registry, mis.
+// "ENUM('draft', 'submitted')" -> ['draft', 'submitted']. Null bila bukan ENUM.
+function parseEnumValues(type: string): string[] | null {
+  const m = /^ENUM\((.+)\)$/i.exec((type || '').trim());
+  if (!m) return null;
+  const values: string[] = [];
+  const re = /'((?:[^'\\]|\\.)*)'/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(m[1])) !== null) {
+    values.push(match[1].replace(/\\'/g, "'").replace(/\\\\/g, '\\'));
+  }
+  return values;
+}
+
+// B10 — Peta alias Bahasa Indonesia -> nilai ENUM, PER KOLOM, eksplisit dan
+// kecil. Hanya istilah umum yang tidak ambigu. Kunci 'tabel.kolom', alias
+// huruf kecil. Nilai yang tidak ada di peta ini DAN tidak ada di ENUM
+// ditolak dengan error yang mencantumkan nilai-nilai sah.
+const ENUM_VALUE_ALIASES: Record<string, Record<string, string>> = {
+  'repair_requests.current_status': {
+    selesai: 'completed',
+    dibatalkan: 'cancelled',
+    dikomplain: 'complained',
+    disetujui: 'customer_approved',
+  },
+  'invoices.status': {
+    lunas: 'paid',
+    dibatalkan: 'cancelled',
+    dikembalikan: 'refunded',
+    belum_lunas: 'unpaid',
+  },
+  'payments.payment_status': {
+    lunas: 'settlement',
+    ditolak: 'deny',
+    dibatalkan: 'cancel',
+    kadaluarsa: 'expire',
+    dikembalikan: 'refunded',
+  },
+  'payments.payment_method': {
+    cod: 'cash_on_delivery',
+  },
+  'repair_complaints.status': {
+    selesai: 'resolved',
+    ditolak: 'rejected',
+  },
+  'repair_diagnoses.customer_approval': {
+    disetujui: 'approved',
+    ditolak: 'rejected',
+    menunggu: 'pending',
+  },
+  'technician_profiles.verified_status': {
+    terverifikasi: 'verified',
+    ditolak: 'rejected',
+    ditangguhkan: 'suspended',
+  },
+  'technician_assignments.status': {
+    diterima: 'accepted',
+    ditolak: 'rejected',
+    selesai: 'completed',
+    dibatalkan: 'cancelled',
+  },
+  'technician_documents.verification_status': {
+    disetujui: 'approved',
+    ditolak: 'rejected',
+  },
+  'technician_schedules.status': {
+    selesai: 'completed',
+    dibatalkan: 'cancelled',
+  },
+  'users.status': {
+    aktif: 'active',
+    nonaktif: 'inactive',
+    ditangguhkan: 'suspended',
+  },
+  'users.role': {
+    pelanggan: 'customer',
+    teknisi: 'technician',
+  },
+};
+
+// B10 — Normalisasi satu nilai filter untuk kolom ENUM: alias Indonesia ->
+// nilai kanonis (huruf kecil dicocokkan tanpa peka huruf besar/kecil).
+// Mengembalikan nilai kanonis atau error yang mencantumkan nilai sah.
+function resolveEnumFilterValue(
+  tableName: string,
+  columnName: string,
+  rawValue: string,
+  allowed: string[]
+): { value: string } | { error: string } {
+  const norm = String(rawValue).trim().toLowerCase();
+  const aliasMap = ENUM_VALUE_ALIASES[`${tableName}.${columnName}`];
+  const candidate = (aliasMap && aliasMap[norm]) || norm;
+  const canonical = allowed.find((v) => v.toLowerCase() === candidate);
+  if (canonical) return { value: canonical };
+  return {
+    error: `Nilai filter '${rawValue}' tidak dikenal untuk kolom ${tableName}.${columnName}. Nilai yang sah: ${allowed.join(', ')}.`,
+  };
+}
+
 // Mengubah satu deklarasi relasi menjadi klausa ON (dengan backtick).
 // Menangani dua format foreignKey di registry: 'tabel.kolom' dan 'kolom' saja
 // (kolom tanpa tabel: one-to-many -> FK ada di target; selain itu di declaring table).
+// B4: bila relasi mendeklarasikan targetColumn, FK dirujuk ke kolom itu di
+// tabel lawan (bukan ke primary key-nya) — mis. technician_assignments.
+// technician_id -> technician_profiles.user_id.
 function relationToOnClause(
   declaring: TableMetadata,
-  rel: { targetTable: string; relationshipType: string; foreignKey: string },
+  rel: { targetTable: string; relationshipType: string; foreignKey: string; targetColumn?: string },
   base: TableMetadata,
   target: TableMetadata
 ): string | null {
@@ -2653,7 +2791,9 @@ function relationToOnClause(
   }
   if (!fkTable.columns.some((c) => c.name === fkCol)) return null;
   const pkTable = fkTable.tableName === base.tableName ? target : base;
-  return `\`${fkTable.tableName}\`.\`${fkCol}\` = \`${pkTable.tableName}\`.\`${pkTable.primaryKey}\``;
+  const refCol = rel.targetColumn || pkTable.primaryKey;
+  if (!pkTable.columns.some((c) => c.name === refCol)) return null;
+  return `\`${fkTable.tableName}\`.\`${fkCol}\` = \`${pkTable.tableName}\`.\`${refCol}\``;
 }
 
 // Cari relasi langsung antara dua tabel (satu hop); kembalikan klausa ON atau null.
@@ -2682,7 +2822,22 @@ function resolveJoinOn(base: TableMetadata, target: TableMetadata, via?: string)
   return null;
 }
 
-// Cari jalur JOIN base -> target, maksimal 2 hop lewat satu tabel perantara.
+// B4 — Penjaga semantik: bila targetnya technician_profiles dan sumbernya
+// repair_requests atau invoices, jalur JOIN TIDAK BOLEH melewati users.
+// Relasi users dari kedua tabel itu adalah PELANGGAN (customer_id), sehingga
+// jalur lewat users mengembalikan profil teknisi milik pelanggan — hampir
+// selalu NULL, dan pada akun ganda justru profil orang yang salah. Jalur
+// yang benar adalah lewat technician_assignments (teknisi yang ditugaskan).
+function joinPathMustNotPassUsers(base: TableMetadata, target: TableMetadata): boolean {
+  return (
+    target.tableName === 'technician_profiles' &&
+    (base.tableName === 'repair_requests' || base.tableName === 'invoices')
+  );
+}
+
+// Cari jalur JOIN base -> target, maksimal 2 hop lewat satu tabel perantara,
+// lalu 3 hop bila 2 hop gagal (B4: invoices -> technician_profiles yang
+// benar adalah 3 hop lewat repair_requests + technician_assignments).
 // Mengembalikan daftar langkah { table, on } atau null bila tidak ada jalur.
 function findJoinPath(
   base: TableMetadata,
@@ -2691,15 +2846,36 @@ function findJoinPath(
 ): Array<{ table: TableMetadata; on: string }> | null {
   const direct = resolveJoinOn(base, target);
   if (direct) return [{ table: target, on: direct }];
-  const candidates = new Set<string>();
-  for (const rel of base.relations) candidates.add(rel.targetTable);
-  for (const [name, tbl] of Object.entries(BANTUIN_SCHEMA_REGISTRY)) {
-    if (tbl.relations.some((r) => r.targetTable === base.tableName)) candidates.add(name);
-  }
-  for (const midName of candidates) {
-    if (midName === base.tableName || midName === target.tableName) continue;
-    const mid = BANTUIN_SCHEMA_REGISTRY[midName];
-    if (!mid || !isTableAllowedForRole(mid, role)) continue;
+  const noUsers = joinPathMustNotPassUsers(base, target);
+  // Kandidat perantara: tabel yang berelasi dengan base (dua arah), dalam
+  // urutan deklarasi relasi base lebih dulu — urutan ini SEMANTIK (B4:
+  // technician_assignments mendahului users di repair_requests).
+  const midCandidates = (from: TableMetadata): string[] => {
+    const names: string[] = [];
+    const seen = new Set<string>();
+    const add = (n: string) => {
+      if (!seen.has(n)) {
+        seen.add(n);
+        names.push(n);
+      }
+    };
+    for (const rel of from.relations) add(rel.targetTable);
+    for (const [name, tbl] of Object.entries(BANTUIN_SCHEMA_REGISTRY)) {
+      if (tbl.relations.some((r) => r.targetTable === from.tableName)) add(name);
+    }
+    return names;
+  };
+  const usableMid = (name: string): TableMetadata | null => {
+    if (name === base.tableName || name === target.tableName) return null;
+    if (noUsers && name === 'users') return null;
+    const mid = BANTUIN_SCHEMA_REGISTRY[name];
+    if (!mid || !isTableAllowedForRole(mid, role)) return null;
+    return mid;
+  };
+  // 2 hop
+  for (const midName of midCandidates(base)) {
+    const mid = usableMid(midName);
+    if (!mid) continue;
     const on1 = resolveJoinOn(base, mid);
     if (!on1) continue;
     const on2 = resolveJoinOn(mid, target);
@@ -2709,22 +2885,44 @@ function findJoinPath(
       { table: target, on: on2 },
     ];
   }
+  // 3 hop (hanya bila 2 hop gagal): base -> mid1 -> mid2 -> target.
+  for (const mid1Name of midCandidates(base)) {
+    const mid1 = usableMid(mid1Name);
+    if (!mid1) continue;
+    const on1 = resolveJoinOn(base, mid1);
+    if (!on1) continue;
+    for (const mid2Name of midCandidates(mid1)) {
+      if (mid2Name === mid1.tableName) continue;
+      const mid2 = usableMid(mid2Name);
+      if (!mid2) continue;
+      const on2 = resolveJoinOn(mid1, mid2);
+      if (!on2) continue;
+      const on3 = resolveJoinOn(mid2, target);
+      if (!on3) continue;
+      return [
+        { table: mid1, on: on1 },
+        { table: mid2, on: on2 },
+        { table: target, on: on3 },
+      ];
+    }
+  }
   return null;
 }
 
 // Membangun SQL SELECT dari spesifikasi (fungsi murni — tidak menyentuh DB).
-// Mengembalikan { sql, params } atau { error }.
+// Mengembalikan { sql, params, sqlWithoutLimit, paramsWithoutLimit } atau { error }.
+// sqlWithoutLimit dipakai executeGovernedDatabaseQuery untuk kueri hitung total.
 export function buildGovernedQuerySQL(
   spec: GovernedQuerySpec,
   userContext: ChatUserContext
-): { sql: string; params: any[] } | { error: string } {
+): { sql: string; params: any[]; sqlWithoutLimit: string; paramsWithoutLimit: any[] } | { error: string } {
   const role = userContext.role || 'guest';
 
   if (!spec || typeof spec !== 'object') return { error: 'Spesifikasi kueri tidak valid.' };
   const base = resolveTable(spec.table);
   if (!base) return { error: `Tabel '${spec.table}' tidak dikenal.` };
   if (!isTableAllowedForRole(base, role)) {
-    return { error: `Akses ditolak: peran ${role} tidak diizinkan membaca tabel ${base.tableName}.` };
+    return { error: tableAccessError(base, role) };
   }
 
   // JOIN (hanya lewat relasi registry, maksimal 2 hop)
@@ -2740,7 +2938,7 @@ export function buildGovernedQuerySQL(
     if (target.tableName === base.tableName) return { error: 'Tidak dapat JOIN tabel ke dirinya sendiri.' };
     if (joined.has(target.tableName)) continue;
     if (!isTableAllowedForRole(target, role)) {
-      return { error: `Akses ditolak: peran ${role} tidak diizinkan membaca tabel ${target.tableName}.` };
+      return { error: tableAccessError(target, role) };
     }
     let path: Array<{ table: TableMetadata; on: string }> | null;
     if (via) {
@@ -2756,12 +2954,19 @@ export function buildGovernedQuerySQL(
       path = [{ table: target, on: directOn }];
     } else {
       path = findJoinPath(base, target, role);
-      if (!path) return { error: `Tidak ada relasi antara ${base.tableName} dan ${target.tableName}.` };
+      if (!path) {
+        // B4: bila penjaga semantik yang memblokir jalur lewat users,
+        // jelaskan agar AI tidak mencoba lagi dengan rumusan yang sama.
+        if (joinPathMustNotPassUsers(base, target)) {
+          return { error: `Tidak ada jalur JOIN yang benar dari ${base.tableName} ke ${target.tableName}: jalur lewat users (pelanggan) tidak pernah dipakai karena akan mengembalikan profil teknisi yang salah. Pastikan pesanan memiliki penugasan teknisi, atau kueri technician_assignments secara langsung.` };
+        }
+        return { error: `Tidak ada relasi antara ${base.tableName} dan ${target.tableName}.` };
+      }
     }
     for (const step of path) {
       if (joined.has(step.table.tableName)) continue;
       if (!isTableAllowedForRole(step.table, role)) {
-        return { error: `Akses ditolak: peran ${role} tidak diizinkan membaca tabel ${step.table.tableName}.` };
+        return { error: tableAccessError(step.table, role) };
       }
       joined.set(step.table.tableName, step.table);
       joinClauses.push(`LEFT JOIN \`${step.table.tableName}\` ON ${step.on}`);
@@ -2787,7 +2992,23 @@ export function buildGovernedQuerySQL(
       if (!spec.aggregate.column) return { error: `Agregasi ${fn} membutuhkan kolom.` };
       const col = parseQualifiedColumn(spec.aggregate.column, base, joined);
       if (!col) return { error: `Kolom agregasi '${spec.aggregate.column}' tidak valid atau sensitif.` };
-      selectClause = `${fn.toUpperCase()}(\`${col.table.tableName}\`.\`${col.column}\`) AS \`value\``;
+      const qcol = `\`${col.table.tableName}\`.\`${col.column}\``;
+      // B7: sum/avg atas kolom TABEL DASAR bersama JOIN mana pun DIBLOKIR —
+      // satu baris dasar terhitung berulang kali (sekali per baris JOIN)
+      // sehingga hasilnya membengkak (fan-out). min/max aman (tidak
+      // terpengaruh duplikasi), sum/avg atas kolom tabel JOIN aman.
+      if ((fn === 'sum' || fn === 'avg') && joined.size > 0 && col.table.tableName === base.tableName) {
+        return { error: `Agregasi ${fn} atas kolom tabel dasar (${base.tableName}.${col.column}) tidak dapat dipakai bersama JOIN: satu baris ${base.tableName} terhitung berulang kali (sekali per baris JOIN) sehingga hasilnya membengkak. Gunakan count_distinct untuk menghitung baris dasar yang unik, agregasi atas kolom tabel JOIN, atau kueri tanpa JOIN.` };
+      }
+      if (fn === 'count_distinct') {
+        selectClause = `COUNT(DISTINCT ${qcol}) AS \`value\``;
+      } else if (fn === 'sum') {
+        // B12: SUM atas himpunan kosong mengembalikan NULL di MySQL —
+        // COALESCE agar AI menerima 0, bukan null.
+        selectClause = `COALESCE(SUM(${qcol}), 0) AS \`value\``;
+      } else {
+        selectClause = `${fn.toUpperCase()}(${qcol}) AS \`value\``;
+      }
     }
     if (groupCol) {
       selectClause = `\`${groupCol.table.tableName}\`.\`${groupCol.column}\` AS \`group_value\`, ${selectClause}`;
@@ -2815,28 +3036,81 @@ export function buildGovernedQuerySQL(
     const op = String(f.operator || '').toUpperCase();
     if (!ALLOWED_OPERATORS.has(op)) return { error: `Operator '${f.operator}' tidak diizinkan.` };
     const qcol = `\`${col.table.tableName}\`.\`${col.column}\``;
+    // B10: nilai filter pada kolom ENUM divalidasi terhadap daftar nilai
+    // registry (dengan alias Indonesia, mis. 'selesai' -> 'completed').
+    // Nilai tak dikenal DITOLAK dengan daftar nilai sah — tanpa ini,
+    // filter 'selesai' diam-diam menghasilkan nol palsu. Kolom non-ENUM
+    // tidak divalidasi dan nilainya diteruskan apa adanya.
+    const colMeta = getColumnMeta(col.table, col.column);
+    const enumValues = colMeta ? parseEnumValues(colMeta.type) : null;
+    const validateEnum = (raw: string): { value: string } | { error: string } => {
+      if (!enumValues) return { value: raw };
+      return resolveEnumFilterValue(col.table.tableName, col.column, raw, enumValues);
+    };
     if (op === 'IN') {
       const raw = String(f.value ?? '');
       const items = raw.split(',').map((s) => s.trim()).filter((s) => s !== '').slice(0, 50);
       if (items.length === 0) return { error: 'Operator IN membutuhkan minimal satu nilai.' };
-      whereParts.push(`${qcol} IN (${items.map(() => '?').join(', ')})`);
-      params.push(...items);
+      const resolved: string[] = [];
+      for (const item of items) {
+        const r = validateEnum(item);
+        if ('error' in r) return { error: r.error };
+        resolved.push(r.value);
+      }
+      whereParts.push(`${qcol} IN (${resolved.map(() => '?').join(', ')})`);
+      params.push(...resolved);
     } else if (op === 'LIKE') {
       // N14: nilai LIKE dari AI juga di-escape (tanpa ini nilai `%` cocok
       // dengan semua baris). `ESCAPE '!'` — lihat escapeLikePattern.
       whereParts.push(`${qcol} LIKE ? ESCAPE '!'`);
       params.push(`%${escapeLikePattern(String(f.value ?? ''))}%`);
+    } else if ((op === '=' || op === '!=') && enumValues) {
+      const r = validateEnum(String(f.value ?? ''));
+      if ('error' in r) return { error: r.error };
+      whereParts.push(`${qcol} ${op} ?`);
+      params.push(r.value);
     } else {
       whereParts.push(`${qcol} ${op} ?`);
       params.push(f.value);
     }
   }
 
+  // B6: filter otomatis agar hitungan governed sama dengan getter
+  // deterministik — baris soft-delete dan katalog nonaktif tidak pernah
+  // terhitung. Berlaku untuk tabel dasar DAN semua tabel yang di-JOIN.
+  // (Tidak ada jalan bagi AI untuk meminta baris yang dihapus/nonaktif
+  // lewat jalur ini — itu disengaja, sama seperti getter deterministik.)
+  for (const tbl of [base, ...joined.values()]) {
+    if (tbl.columns.some((c) => c.name === 'deleted_at')) {
+      whereParts.push(`\`${tbl.tableName}\`.\`deleted_at\` IS NULL`);
+    }
+    if (tbl.tableName === 'services' || tbl.tableName === 'appliance_categories') {
+      whereParts.push(`\`${tbl.tableName}\`.\`is_active\` = TRUE`);
+    }
+  }
+
   // Row-level scoping untuk peran non-admin (wajib; gagal bila userId tidak ada).
-  if (role !== 'admin' && role !== 'guest' && base.ownerForeignKey) {
-    if (!userContext.userId) return { error: 'Konteks pengguna tidak valid: userId tidak tersedia.' };
-    whereParts.push(`\`${base.tableName}\`.\`${base.ownerForeignKey}\` = ?`);
-    params.push(userContext.userId);
+  if (role !== 'admin' && role !== 'guest') {
+    if (!userContext.userId) {
+      // Tabel publik tidak butuh scoping sehingga tidak butuh userId;
+      // tabel ber-owner / berscope relasional wajib punya userId.
+      if (base.ownerForeignKey || base.relationalScope) {
+        return { error: 'Konteks pengguna tidak valid: userId tidak tersedia.' };
+      }
+    } else if (base.ownerForeignKey) {
+      whereParts.push(`\`${base.tableName}\`.\`${base.ownerForeignKey}\` = ?`);
+      params.push(userContext.userId);
+    } else if (base.relationalScope && base.relationalScope.roles.includes(role as 'customer' | 'technician')) {
+      // B14: scope relasional — baris hanya terlihat bila terhubung ke baris
+      // viaTable milik pemanggil (mis. payments atas invoice sendiri).
+      const scope = base.relationalScope;
+      const via = BANTUIN_SCHEMA_REGISTRY[scope.viaTable];
+      if (!via) return { error: `Konfigurasi scope tabel ${base.tableName} tidak valid.` };
+      whereParts.push(
+        `EXISTS (SELECT 1 FROM \`${via.tableName}\` WHERE \`${via.tableName}\`.\`${via.primaryKey}\` = \`${base.tableName}\`.\`${scope.viaForeignKey}\` AND \`${via.tableName}\`.\`${scope.ownerColumn}\` = ?)`
+      );
+      params.push(userContext.userId);
+    }
   }
 
   let sql = `SELECT ${selectClause} FROM \`${base.tableName}\``;
@@ -2857,10 +3131,14 @@ export function buildGovernedQuerySQL(
   }
 
   const limit = Math.min(100, Math.max(1, Math.floor(Number(spec.limit) || 20)));
+  // B8: simpan versi tanpa LIMIT beserta parameternya untuk kueri hitung
+  // total pendamping (SELECT COUNT(*) FROM (<kueri tanpa LIMIT>) t).
+  const sqlWithoutLimit = sql;
+  const paramsWithoutLimit = [...params];
   sql += ' LIMIT ?';
   params.push(limit);
 
-  return { sql, params };
+  return { sql, params, sqlWithoutLimit, paramsWithoutLimit };
 }
 
 export async function executeGovernedDatabaseQuery(
@@ -2872,9 +3150,40 @@ export async function executeGovernedDatabaseQuery(
     if ('error' in built) return { success: false, error: built.error };
     const rows = await query<any[]>(built.sql, built.params);
     const list = Array.isArray(rows) ? rows : [];
+    // B8: hitung total baris/grup yang cocok lewat kueri pendamping yang
+    // membungkus kueri utama tanpa LIMIT (parameter diduplikasi tanpa nilai
+    // LIMIT). Bila kueri hitung gagal, total jatuh ke rowCount agar data
+    // utama tetap terkirim — pemotongan tidak dilaporkan (kasus langka:
+    // klausa WHERE-nya identik dengan kueri utama yang baru saja sukses).
+    let total = list.length;
+    try {
+      const countRows = await query<any[]>(
+        `SELECT COUNT(*) AS \`total\` FROM (${built.sqlWithoutLimit}) \`__gov_total\``,
+        built.paramsWithoutLimit
+      );
+      const n = Number(countRows?.[0]?.total);
+      if (Number.isFinite(n) && n >= 0) total = n;
+    } catch {
+      // Fallback: total = rowCount, truncated = false (lihat komentar di atas).
+    }
+    // B12: isEmpty menandai himpunan kosong — agregasi AVG/MIN/MAX atas
+    // himpunan kosong mengembalikan value null; daftar/GROUP BY kosong
+    // mengembalikan 0 baris. AI memakai ini untuk menjawab "tidak ada
+    // data" alih-alih "null".
+    const isAggregate = Boolean(spec.aggregate);
+    const singleNullValue =
+      isAggregate && !spec.groupBy && list.length === 1 && (list[0]?.value === null || list[0]?.value === undefined);
+    const isEmpty = list.length === 0 || singleNullValue;
     return {
       success: true,
-      data: { table: spec.table, rows: list, rowCount: list.length },
+      data: {
+        table: spec.table,
+        rows: list,
+        rowCount: list.length,
+        total,
+        truncated: list.length < total,
+        isEmpty,
+      },
     };
   } catch (err: any) {
     return { success: false, error: err?.message || 'Kueri database gagal.' };
