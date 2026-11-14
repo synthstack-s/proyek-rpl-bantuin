@@ -368,6 +368,16 @@ export async function executeRoleBasedTool(
         // Menerjemahkan argumen datar dari AI menjadi spesifikasi kueri terjaga.
         // Validasi keamanan (allowlist tabel/kolom, kolom sensitif, row-level
         // scoping) ditegakkan di dalam executeGovernedDatabaseQuery.
+        //
+        // B7/B13 (didokumentasikan ke AI lewat system prompt; teks deskripsi
+        // tool di engine.ts perlu diselaraskan — lihat FIX_NOTES.md):
+        // - count/sum di atas JOIN menghitung BARIS HASIL JOIN (satu baris
+        //   dasar bisa terhitung berkali-kali); gunakan count_distinct
+        //   untuk menghitung baris dasar yang unik, dan sum/avg atas kolom
+        //   tabel dasar bersama JOIN ditolak server dengan penjelasan.
+        // - Filter pada kolom tabel JOIN membuat LEFT JOIN berperilaku
+        //   seperti INNER JOIN (baris tanpa pasangan terbuang) — pisahkan
+        //   kueri hitungan total dan hitungan berfilter.
         const splitList = (v: any): string[] | undefined => {
           if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
           if (typeof v === 'string' && v.trim()) return v.split(',').map((x) => x.trim()).filter(Boolean);
@@ -386,12 +396,41 @@ export async function executeRoleBasedTool(
             return { table: entry.slice(0, idx).trim(), via: entry.slice(idx + 1).trim() };
           });
         };
+        // B11: filter sebagai array (maksimal 5) — kueri status + rentang
+        // tanggal butuh 3 kondisi dan tidak muat dalam 2 filter lama.
+        // Bentuk array didukung server; bentuk DEKLARASI di engine.ts adalah
+        // flat filterColumn..filterColumn5 (array tidak dideklarasikan
+        // karena adapter Gemini hanya mengubah tipe properti level-atas
+        // menjadi huruf besar — tipe bersarang huruf kecil akan ditolak
+        // Gemini, huruf besar akan ditolak Groq/OpenAI).
         const filters: DataService.GovernedQueryFilter[] = [];
-        if (args?.filterColumn && args?.filterOperator) {
-          filters.push({ column: args.filterColumn, operator: args.filterOperator, value: args.filterValue ?? '' });
-        }
-        if (args?.filterColumn2 && args?.filterOperator2) {
-          filters.push({ column: args.filterColumn2, operator: args.filterOperator2, value: args.filterValue2 ?? '' });
+        if (Array.isArray(args?.filters) && args.filters.length > 0) {
+          if (args.filters.length > 5) {
+            return { success: false, error: 'Maksimal 5 filter per kueri.' };
+          }
+          for (const raw of args.filters) {
+            const column = typeof raw?.column === 'string' ? raw.column.trim() : '';
+            const operator = typeof raw?.operator === 'string' ? raw.operator.trim() : '';
+            if (!column || !operator) {
+              return { success: false, error: 'Setiap filter harus memiliki column dan operator.' };
+            }
+            filters.push({ column, operator: operator as DataService.GovernedQueryFilter['operator'], value: raw?.value ?? '' });
+          }
+        } else {
+          // Bentuk flat: filterColumn..filterColumn5 (dideklarasikan di
+          // engine.ts) — loop agar tidak ada filter yang terlewat.
+          const flatFilters: Array<[string, string, any]> = [
+            [args?.filterColumn, args?.filterOperator, args?.filterValue],
+            [args?.filterColumn2, args?.filterOperator2, args?.filterValue2],
+            [args?.filterColumn3, args?.filterOperator3, args?.filterValue3],
+            [args?.filterColumn4, args?.filterOperator4, args?.filterValue4],
+            [args?.filterColumn5, args?.filterOperator5, args?.filterValue5],
+          ];
+          for (const [column, operator, value] of flatFilters) {
+            if (column && operator) {
+              filters.push({ column, operator, value: value ?? '' });
+            }
+          }
         }
         const spec: DataService.GovernedQuerySpec = {
           table: args?.table,

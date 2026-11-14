@@ -2175,7 +2175,7 @@ ${inv.discountAmount > 0 ? `- **Diskon:** −Rp ${inv.discountAmount.toLocaleStr
           },
           {
             name: 'queryDatabase',
-            description: 'Kueri BACA data dari tabel database BANTUIN mana pun yang diizinkan untuk peran pengguna. Gunakan untuk pertanyaan data apa pun yang tidak terjawab alat pencarian lain: total, jumlah, daftar, rekap, dan perbandingan. Hanya SELECT; server yang membangun SQL-nya dan menegakkan izin peran, kolom sensitif tidak pernah dikembalikan. Satu putaran tool saja: bila perlu beberapa kueri, panggil queryDatabase beberapa kali sekaligus.',
+            description: 'Kueri BACA data dari tabel database BANTUIN mana pun yang diizinkan untuk peran pengguna. Gunakan untuk pertanyaan data apa pun yang tidak terjawab alat pencarian lain: total, jumlah, daftar, rekap, dan perbandingan. Hanya SELECT; server yang membangun SQL-nya dan menegakkan izin peran, kolom sensitif tidak pernah dikembalikan. Satu putaran tool saja: bila perlu beberapa kueri, panggil queryDatabase beberapa kali sekaligus. Agregasi di atas JOIN: count/sum menghitung BARIS HASIL JOIN, bukan baris tabel dasar — gunakan count_distinct pada id tabel dasar untuk menghitung baris unik; sum/avg atas kolom tabel dasar bersama JOIN ditolak. Filter pada kolom tabel JOIN membuat LEFT JOIN berperilaku seperti INNER JOIN (baris tanpa pasangan terbuang) — pisahkan kueri hitungan total dan hitungan berfilter. Status pembayaran yang benar dibaca dari payments.payment_status settlement, bukan dari invoices.status.',
             parameters: {
               type: 'object',
               properties: {
@@ -2188,7 +2188,16 @@ ${inv.discountAmount > 0 ? `- **Diskon:** −Rp ${inv.discountAmount.toLocaleStr
                 filterColumn2: { type: 'string', description: 'Kolom filter kedua (opsional)' },
                 filterOperator2: { type: 'string', enum: ['=', '!=', '>', '>=', '<', '<=', 'LIKE', 'IN'], description: 'Operator filter kedua' },
                 filterValue2: { type: 'string', description: 'Nilai filter kedua' },
-                aggregateFunction: { type: 'string', enum: ['count', 'sum', 'avg', 'min', 'max'], description: 'Fungsi agregasi (misal: "sum" untuk total, "count" untuk jumlah)' },
+                filterColumn3: { type: 'string', description: 'Kolom filter ketiga (opsional; misal batas atas rentang tanggal)' },
+                filterOperator3: { type: 'string', enum: ['=', '!=', '>', '>=', '<', '<=', 'LIKE', 'IN'], description: 'Operator filter ketiga' },
+                filterValue3: { type: 'string', description: 'Nilai filter ketiga' },
+                filterColumn4: { type: 'string', description: 'Kolom filter keempat (opsional)' },
+                filterOperator4: { type: 'string', enum: ['=', '!=', '>', '>=', '<', '<=', 'LIKE', 'IN'], description: 'Operator filter keempat' },
+                filterValue4: { type: 'string', description: 'Nilai filter keempat' },
+                filterColumn5: { type: 'string', description: 'Kolom filter kelima (opsional)' },
+                filterOperator5: { type: 'string', enum: ['=', '!=', '>', '>=', '<', '<=', 'LIKE', 'IN'], description: 'Operator filter kelima' },
+                filterValue5: { type: 'string', description: 'Nilai filter kelima' },
+                aggregateFunction: { type: 'string', enum: ['count', 'count_distinct', 'sum', 'avg', 'min', 'max'], description: 'Fungsi agregasi (misal: "sum" untuk total, "count" untuk jumlah, "count_distinct" untuk jumlah baris unik tabel dasar di atas JOIN)' },
                 aggregateColumn: { type: 'string', description: 'Kolom yang diagregasi (misal: "total_amount"; kosongkan untuk count semua baris)' },
                 groupBy: { type: 'string', description: 'Kolom GROUP BY (misal: "current_status" untuk rekap per status)' },
                 orderByColumn: { type: 'string', description: 'Kolom pengurutan' },
