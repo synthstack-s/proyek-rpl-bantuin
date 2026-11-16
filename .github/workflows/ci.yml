@@ -1,0 +1,144 @@
+# CI BANTUIN — Proyek Akhir Rekayasa Perangkat Lunak (TIKB2503021)
+# Menjalankan typecheck, build, verifikasi database, dan integration test
+# otomatis pada setiap push dan pull request.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ci:
+    name: Typecheck, build & integration test
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: bantuin_db
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout kode
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependensi
+        run: npm ci
+
+      # Kredensial di bawah ini hanya untuk CI (database sementara di runner).
+      # File .env.local ini dibuat di runner saja dan TIDAK di-commit.
+      - name: Buat .env.local untuk CI
+        run: |
+          cat > .env.local <<'EOF'
+          NODE_ENV=test
+          PORT=3000
+          DB_HOST=127.0.0.1
+          DB_PORT=3306
+          DB_USER=root
+          DB_PASSWORD=root
+          DB_NAME=bantuin_db
+          JWT_ACCESS_SECRET=ci-dummy-jwt-access-secret-bantuin-2026-01
+          JWT_REFRESH_SECRET=ci-dummy-jwt-refresh-secret-bantuin-2026-02
+          AI_MASTER_KEY=ci-dummy-ai-master-key-bantuin-2026-03
+          ADMIN_INITIAL_EMAIL=admin@bantuin.id
+          ADMIN_INITIAL_PHONE=+628110000001
+          ADMIN_INITIAL_PASSWORD=BantuinAdmin2026!
+          FONNTE_API_TOKEN=dummy-ci-token
+          FONNTE_API_URL=https://api.fonnte.com/send
+          EOF
+
+      - name: Tunggu MySQL siap
+        run: |
+          for i in $(seq 1 30); do
+            if mysqladmin ping -h 127.0.0.1 -uroot -proot --silent; then
+              echo "MySQL siap"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "MySQL tidak siap setelah 60 detik"
+          exit 1
+
+      - name: Siapkan database (skema + migrasi + seed)
+        run: |
+          set -e
+          mysql -h 127.0.0.1 -uroot -proot < database/schema.sql
+          mysql -h 127.0.0.1 -uroot -proot bantuin_db < database/migrations/001_enhance_user_otps.sql
+          mysql -h 127.0.0.1 -uroot -proot bantuin_db < database/migrations/002_ai_provider_management.sql
+          mysql -h 127.0.0.1 -uroot -proot bantuin_db < database/migrations/003_allow_dynamic_ai_providers.sql
+          mysql -h 127.0.0.1 -uroot -proot bantuin_db < database/migrations/004_add_token_version_to_users.sql
+          mysql -h 127.0.0.1 -uroot -proot bantuin_db < database/migrations/005_add_revoked_tokens.sql
+          mysql -h 127.0.0.1 -uroot -proot bantuin_db < database/migrations/006_whatsapp_notifications.sql
+          mysql -h 127.0.0.1 -uroot -proot bantuin_db < database/seed.sql
+
+      - name: Verifikasi database
+        run: npm run verify:db
+
+      - name: Typecheck (tsc --noEmit)
+        run: npx tsc --noEmit
+
+      - name: Build aplikasi
+        run: npm run build
+
+      - name: Seed akun admin
+        run: npm run seed:admin
+
+      - name: Jalankan server (hasil build)
+        run: |
+          PORT=3000 nohup npm start > /tmp/next-server.log 2>&1 &
+          echo $! > /tmp/next-server.pid
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:3000/ > /dev/null; then
+              echo "Server siap"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Server tidak merespons setelah 60 detik"
+          cat /tmp/next-server.log
+          exit 1
+
+      # Tes chatbot/AI sengaja TIDAK dijalankan di CI karena membutuhkan
+      # API key provider AI asli (Gemini/Groq/DeepSeek).
+      - name: Jalankan integration test (HTTP + DB)
+        run: |
+          set -e
+          set -o pipefail
+          npm run test:auth
+          npm run test:categories 2>&1 | tee /tmp/test-categories.log
+          # test-categories mengembalikan exit 0 meski ada assertion yang
+          # gagal, jadi periksa ringkasan akhirnya.
+          if grep -q "ADA PENGUJIAN YANG GAGAL" /tmp/test-categories.log; then
+            echo "test:categories: ada pengujian yang gagal"
+            exit 1
+          fi
+          npm run test:services 2>&1 | tee /tmp/test-services.log
+          # test-services sama: exit 0 meski ada assertion yang gagal.
+          if grep -q "ADA PENGUJIAN YANG GAGAL" /tmp/test-services.log; then
+            echo "test:services: ada pengujian yang gagal"
+            exit 1
+          fi
+          npm run test:users
+          npm run test:technicians
+
+      - name: Hentikan server
+        if: always()
+        run: |
+          if [ -f /tmp/next-server.pid ]; then
+            kill "$(cat /tmp/next-server.pid)" 2>/dev/null || true
+          fi
+          pkill -f "next start" 2>/dev/null || true
