@@ -2,6 +2,8 @@
  * In-memory sliding window rate limiter untuk melindungi endpoint autentikasi dari serangan brute-force.
  */
 
+import type { NextRequest } from 'next/server';
+
 /**
  * S5/F3 — Mengurai IP klien dari header `x-forwarded-for` dengan benar.
  *
@@ -32,6 +34,19 @@ export function parseClientIpFromForwardedHeader(headerValue: string | null | un
   }
   if (isValidIPv4(first) || isValidIPv6(first)) return first;
   return null;
+}
+
+/**
+ * F21 — IP klien dari request untuk log audit. Mendelegasikan parsing ke
+ * `parseClientIpFromForwardedHeader` (S5/F3): entri PERTAMA daftar
+ * `x-forwarded-for`, tervalidasi bentuk IPv4/IPv6, `null` bila tidak
+ * ada/tidak valid — jangan pernah memakai IP palsu seperti '127.0.0.1'
+ * untuk audit. Dipindah ke sini dari `src/app/api/chat/message/route.ts`
+ * karena Next.js 16 menolak export selain handler/config dari file route
+ * (build gagal di `.next/types` bila ada export lain).
+ */
+export function getClientIpFromRequest(req: NextRequest): string | null {
+  return parseClientIpFromForwardedHeader(req.headers.get('x-forwarded-for'));
 }
 
 function isValidIPv4(s: string): boolean {
