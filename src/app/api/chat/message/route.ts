@@ -1,21 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getUserSession, getAdminSession } from '@/lib/auth';
-import { checkChatRateLimit, parseClientIpFromForwardedHeader } from '@/lib/rate-limiter';
+import { checkChatRateLimit, getClientIpFromRequest } from '@/lib/rate-limiter';
 import { getOrCreateSession, isSessionForbiddenError } from '@/lib/chatbot/repository';
 import { processChatMessage } from '@/lib/chatbot/engine';
 import { checkDailyAIQuota } from '@/lib/ai/repository';
 import { ChatUserContext } from '@/lib/chatbot/types';
-
-/**
- * F21 — IP klien dari request untuk log audit. Mendelegasikan parsing ke
- * `parseClientIpFromForwardedHeader` (S5/F3): entri PERTAMA daftar
- * `x-forwarded-for`, tervalidasi bentuk IPv4/IPv6, `null` bila tidak
- * ada/tidak valid — jangan pernah memakai IP palsu seperti '127.0.0.1'
- * untuk audit. Diekspor agar dapat diuji.
- */
-export function getClientIpFromRequest(req: NextRequest): string | null {
-  return parseClientIpFromForwardedHeader(req.headers.get('x-forwarded-for'));
-}
 
 /**
  * S5/F3 — Rate limit chat berlapis (menggantikan kunci header mentah):
