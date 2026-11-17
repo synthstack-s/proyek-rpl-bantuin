@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getUserSession, getAdminSession } from '@/lib/auth';
 import { checkChatRateLimit, getClientIpFromRequest } from '@/lib/rate-limiter';
 import { getOrCreateSession, isSessionForbiddenError } from '@/lib/chatbot/repository';
+import { getCurrentUserIdentity } from '@/lib/chatbot/data-service';
 import { processChatMessage } from '@/lib/chatbot/engine';
 import { checkDailyAIQuota } from '@/lib/ai/repository';
 import { ChatUserContext } from '@/lib/chatbot/types';
@@ -103,6 +104,25 @@ export async function POST(req: NextRequest) {
     // userContext diteruskan utuh (engine -> tools -> action-service) tanpa
     // dibangun ulang, sehingga tidak perlu perubahan di engine/tools.
     userContext.clientIp = getClientIpFromRequest(req);
+
+    // BUG IDENTITAS (2026-11-17) — nama dari JWT tidak dapat diandalkan:
+    // token admin tidak membawa nama asli (login admin tidak membaca
+    // admin_profiles, sehingga createAdminToken memakai fallback
+    // 'Administrator'). Resolve nama asli dari DB berdasarkan userId sesi
+    // agar prompt peran + fallback nama di engine memakai nama yang benar.
+    // Best-effort: bila lookup gagal / tidak ada nama, nama sesi dipakai
+    // apa adanya dan chat tetap jalan (penanganan identitas deterministik
+    // di engine tetap membaca DB langsung).
+    if (userContext.userId) {
+      try {
+        const identity = await getCurrentUserIdentity(userContext.userId);
+        if (identity && identity !== 'NOT_FOUND' && identity.fullName) {
+          userContext.name = identity.fullName;
+        }
+      } catch {
+        // Abaikan — nama sesi dipakai apa adanya.
+      }
+    }
 
     // 3. Dapatkan atau Buat Sesi Chat
     const session = await getOrCreateSession(

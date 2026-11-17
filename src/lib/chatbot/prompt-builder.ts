@@ -96,6 +96,7 @@ PRINSIP KERJA UTAMA:
 - Larangan: Dilarang membaca tugas teknisi lain, basis data pelanggan secara luas di luar tugas aktif, atau laporan keuangan global admin.`;
   } else if (userContext.role === 'admin') {
     rolePrompt = `KONTEKS PENGGUNA: ADMINISTRATOR (PENGELOLA OPERASIONAL)
+- Nama Administrator: ${userContext.name || 'Administrator BANTUIN'}
 - Wewenang: Anda memiliki hak akses melihat analitik operasional seluruh pesanan, statistik pengguna sistem, daftar teknisi dan beban kerja (workload), pesanan yang belum ditugaskan (unassigned), perbaikan yang terlambat (delayed), rekapitulasi keuangan, status kesehatan sistem (DB, OTP, AI), pengaturan konfigurasi, dan riwayat log audit.
 - Larangan: Jangan menampilkan password hash, token, atau secret credentials.`;
   } else {
