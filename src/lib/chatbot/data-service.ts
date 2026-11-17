@@ -2792,7 +2792,7 @@ function isTableAllowedForRole(table: TableMetadata, role: string): boolean {
 // dijawab "tidak ada teknisi yang tersedia").
 function tableAccessError(table: TableMetadata, role: string): string {
   if (table.ownerRole && role !== 'admin' && role !== table.ownerRole) {
-    const ownerName = table.ownerRole === 'technician' ? 'teknisi' : 'pelanggan';
+    const ownerName = table.ownerRole === 'technician' ? 'teknisi' : table.ownerRole === 'admin' ? 'admin' : 'pelanggan';
     return `Akses ditolak: tabel ${table.tableName} hanya dapat dibaca oleh ${ownerName} (data ${ownerName} milik sendiri). Peran ${role} tidak dapat mengkueri tabel ini — ini adalah batasan akses, BUKAN berarti datanya kosong.`;
   }
   return `Akses ditolak: peran ${role} tidak diizinkan membaca tabel ${table.tableName}.`;

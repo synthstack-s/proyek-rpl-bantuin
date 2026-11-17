@@ -33,7 +33,7 @@ export interface TableMetadata {
   // milik technician_profiles selalu menunjuk akun TEKNISI, sehingga
   // scoping ke id pelanggan akan SELALU kosong dan menyesatkan ("0 teknisi").
   // Tanpa field ini, owner 'user_id' berlaku untuk semua peran terautentikasi.
-  ownerRole?: 'customer' | 'technician';
+  ownerRole?: 'customer' | 'technician' | 'admin';
   // B14 — Scope relasional untuk tabel TANPA ownerForeignKey: baris boleh
   // dibaca bila terhubung (lewat viaForeignKey) ke baris viaTable yang
   // ownerColumn-nya sama dengan userId pemanggil. Contoh: payments boleh
