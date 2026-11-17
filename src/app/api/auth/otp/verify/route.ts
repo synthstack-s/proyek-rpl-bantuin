@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { otpVerifySchema } from '@/lib/validations/auth';
 import { verifyOtpCode } from '@/lib/otp';
-import { createUserToken, getUserCookieOptions } from '@/lib/auth';
+import { createUserToken, getUserCookieOptions, createAdminToken, getAdminCookieOptions } from '@/lib/auth';
 import { getUserTokenVersion } from '@/lib/token-revocation';
 
 export async function POST(request: NextRequest) {
@@ -95,26 +95,42 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const fullName = user.customer_name || user.technician_name || 'Pengguna BANTUIN';
+    const fullName = user.customer_name || user.technician_name || (user.role === 'admin' ? 'Administrator' : 'Pengguna BANTUIN');
 
-    // 3. Terbitkan token sesi JWT pengguna (Customer atau Teknisi)
+    // 3. Terbitkan token sesi JWT berdasarkan peran.
+    // Admin memakai token + cookie ADMIN (bukan token pengguna): middleware
+    // hanya mengakui cookie admin untuk rute /admin — token pengguna
+    // ber-role admin akan menjebak admin dalam loop redirect
+    // /login <-> /customer/dashboard <-> /admin.
     // T5: sematkan tokenVersion terkini agar token yang diterbitkan sesudah
     // reset password tidak langsung ditolak oleh pemeriksaan pencabutan.
     const tokenVersion = await getUserTokenVersion(user.id);
-    const token = await createUserToken(
-      {
-        userId: user.id,
-        uuid: user.uuid,
-        email: user.email,
-        phoneNumber: user.phone_number,
-        role: user.role,
-        status: user.status,
-        isVerified: true,
-        name: fullName,
-        tokenVersion,
-      },
-      false
-    );
+    const isAdmin = user.role === 'admin';
+    const token = isAdmin
+      ? await createAdminToken(
+          {
+            userId: user.id,
+            uuid: user.uuid,
+            email: user.email,
+            role: 'admin',
+            name: fullName,
+            tokenVersion,
+          }
+        )
+      : await createUserToken(
+          {
+            userId: user.id,
+            uuid: user.uuid,
+            email: user.email,
+            phoneNumber: user.phone_number,
+            role: user.role,
+            status: user.status,
+            isVerified: true,
+            name: fullName,
+            tokenVersion,
+          },
+          false
+        );
 
     // 4. Tentukan URL pengalihan berdasarkan peran
     let redirectUrl = '/customer/dashboard';
@@ -143,8 +159,9 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // 5. Tanamkan HttpOnly cookie sesi yang aman
-    const cookieOpts = getUserCookieOptions(false);
+    // 5. Tanamkan HttpOnly cookie sesi yang aman (cookie admin untuk
+    // admin, cookie pengguna untuk pelanggan/teknisi).
+    const cookieOpts = isAdmin ? getAdminCookieOptions() : getUserCookieOptions(false);
     response.cookies.set(cookieOpts.name, token, cookieOpts);
 
     return response;
