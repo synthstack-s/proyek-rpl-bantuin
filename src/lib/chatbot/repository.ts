@@ -52,10 +52,26 @@ function logDbFailure(where: string, context: Record<string, unknown>, err: unkn
 
 /**
  * F14 — Normalisasi waktu simpan ke epoch ms untuk pengurutan gabungan:
- * createdAt DB berbentuk DATETIME MySQL ('YYYY-MM-DD HH:mm:ss', zona +07:00
- * sesuai konfigurasi pool) sedangkan memori memakai ISO UTC.
+ * createdAt DB berbentuk DATETIME MySQL, sedangkan memori memakai ISO UTC.
+ *
+ * BUG URUTAN RIWAYAT (2026-11-17): mysql2 mengembalikan kolom DATETIME
+ * sebagai objek Date (BUKAN string) bila `dateStrings` tidak disetel —
+ * dan src/lib/db.ts tidak menyetelnya. Cabang lama yang hanya menerima
+ * string mengembalikan 0 untuk SEMUA baris DB, sehingga sortMessagesByTime
+ * menjadi no-op dan riwayat ber-limit (yang diambil ORDER BY id DESC)
+ * sampai ke pemanggil dalam urutan TERBALIK (terbaru dulu). Engine lalu
+ * membangun pesan LLM dari riwayat terbalik itu: balasan pertama dibuang
+ * trim "pesan pertama harus user", lalu pertanyaan SAAT INI ditempel ke
+ * pertanyaan PERTAMA ("Q1\nQ2" dalam satu turn user) — LLM pun menjawab
+ * kedua pertanyaan sekaligus, sehingga jawaban pertanyaan kedua memuat
+ * pertanyaan pertama. Karena itu Date WAJIB ditangani di sini.
  */
 function parseStoredTime(value: unknown): number {
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isNaN(ms) ? 0 : ms;
+  }
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
   if (typeof value !== 'string') return 0;
   if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(value)) {
     const ms = Date.parse(value.replace(' ', 'T') + '+07:00');
@@ -66,17 +82,28 @@ function parseStoredTime(value: unknown): number {
 }
 
 /**
- * F14 — Urutan gabungan diurutkan HANYA berdasarkan waktu (stable sort).
- * Sengaja TANPA tiebreak ID: ID DB positif mengurut searah waktu (makin
- * besar = makin baru), sedangkan ID fallback negatif mengurut BERLAWANAN
- * (makin kecil/negatif = makin baru, karena counter menurun dari -1) —
- * satu tiebreak ID tidak bisa benar untuk keduanya. Stable sort
- * mempertahankan urutan sisip di dalam tiap kelompok waktu yang sama:
- * daftar memori sudah terurut sisip, baris DB sudah terurut id ASC dari
- * SQL — keduanya sama dengan urutan kronologis.
+ * F14 — Urutan gabungan diurutkan berdasarkan waktu (stable sort), dengan
+ * tiebreak deterministik untuk pesan sedetik yang sama.
+ *
+ * DATETIME MySQL hanya presisi detik — pertanyaan + balasan deterministik
+ * yang cepat sangat sering berbagi detik yang sama, sehingga tiebreak
+ * BUKAN kasus pinggiran. Dalam satu namespace, urutan ID = urutan
+ * kronologis: ID DB positif menaik seiring waktu, sedangkan ID fallback
+ * negatif MENURUN seiring waktu (counter menurun dari -1) — karena itu
+ * tiebreak-nya berbeda per namespace. Lintas namespace ID tidak dapat
+ * dibandingkan (angka ID DB dan ID fallback tidak sepadan), jadi untuk
+ * pasangan campuran urutan sisip dipertahankan (stable sort); dengan
+ * dbRows yang sudah dibalik ke ASC sebelum merge (lihat
+ * getSessionMessages), urutan sisip itu sendiri sudah kronologis.
  */
 function sortMessagesByTime(list: StoredChatMessage[]): StoredChatMessage[] {
-  return list.sort((a, b) => parseStoredTime(a.createdAt) - parseStoredTime(b.createdAt));
+  return list.sort((a, b) => {
+    const byTime = parseStoredTime(a.createdAt) - parseStoredTime(b.createdAt);
+    if (byTime !== 0) return byTime;
+    if (a.id > 0 && b.id > 0) return a.id - b.id;
+    if (a.id < 0 && b.id < 0) return b.id - a.id;
+    return 0;
+  });
 }
 
 /**
@@ -761,6 +788,14 @@ export async function getSessionMessages(
         );
 
     dbRows = (rows || []).map(mapMessageRow);
+    // Kueri ber-limit memakai ORDER BY id DESC hanya untuk mengambil N
+    // pesan TERBARU — kembalikan ke urutan kronologis menaik sebelum merge
+    // (invarian fungsi ini; pola yang sama seperti getSessionMessagesPage
+    // yang me-reverse halaman DESC-nya). Tanpa ini, sort di bawah adalah
+    // satu-satunya yang menjaga urutan — dan sort itu pernah buta terhadap
+    // Date sehingga riwayat sampai ke engine dalam keadaan terbalik (lihat
+    // parseStoredTime).
+    if (limit !== undefined) dbRows.reverse();
     // DB terbukti dapat dijangkau — coba drain pesan fallback yang tertunda.
     triggerDrainIfPending();
   } catch (err) {
