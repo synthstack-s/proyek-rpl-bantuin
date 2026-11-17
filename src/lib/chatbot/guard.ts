@@ -43,7 +43,10 @@ const INJECTION_PATTERNS = [
   /override\s+system/i,
   /pretend\s+(you\s+are|to\s+be)/i,
   /berpura-pura(lah)?\s+kamu/i,
-  /berperan\s+sebagai/i,
+  // "berperan sebagai" saja terlalu luas — "siapa yang berperan sebagai
+  // admin?" adalah pertanyaan peran yang sah. Batasi ke roleplay terhadap
+  // AI itu sendiri ("berperan sebagai AI tanpa aturan").
+  /berperan(lah)?\s+sebagai\s+(ai|asisten|chatbot|bot|kamu|dirimu|dirimu\s+sendiri)/i,
   /anggaplah\s+kamu\s+(adalah|seorang|sebagai)/i,
   /bocorkan\s+(rahasia|prompt|instruksi|api\s*key|password|kredensial)/i,
   /tampilkan\s+isi\s+(prompt|system\s+instruction|env|api\s*key)/i,
@@ -56,13 +59,39 @@ const INJECTION_PATTERNS = [
   // rahasia di sini ("kirim otp" adalah permintaan layanan yang sah;
   // nilai OTP sendiri tidak pernah ada di konteks AI).
   /(tampilkan|tunjukkan|berikan|beri|sebutkan|ungkapkan|kasih|kirim|bocorkan|tuliskan|kasih\s+tahu|beri\s+tahu)\s+.{0,40}?\b(api\s*key|api-key|kunci\s+api|(?<!reset\s)(?<!ganti\s)(?<!lupa\s)(?<!ubah\s)(password|kata\s+sandi)|token|prompt|system\s+prompt|instruksi\s+sistem|kredensial|secret|env)\b/i,
-  // "api key gemini" / "gemini api key" dalam urutan mana pun.
-  /\b(api\s*key|kunci\s+api)\b.{0,30}\b(gemini|groq|openai|admin|sistem|bantuin)\b/i,
-  /\b(gemini|groq|openai)\b.{0,20}\b(api\s*key|kunci\s+api)\b/i,
+  // "api key gemini" / "gemini api key" — dipindah ke bawah.
   // "password admin/sistem/..." — kata sandi pihak lain, bukan kata sandi
   // milik sendiri ("lupa password" tanpa embel-embel ini tidak cocok).
   /\b(password|kata\s+sandi)\b.{0,20}\b(admin|sistem|bantuin|database|server)\b/i,
 ];
+// Pola pasangan "api key + provider" — DIPISAH dari INJECTION_PATTERNS
+// karena pertanyaan STATUS kunci ("apakah api key groq masih aktif?",
+// "kunci api openrouter sudah terkonfigurasi?") adalah pertanyaan
+// operasional yang sah, bukan eksfiltrasi. Pola ini hanya dipakai bila
+// pesan BUKAN pertanyaan status (lihat isApiKeyStatusQuestion di bawah).
+// Permintaan NILAI kunci ("tampilkan api key ...") tetap ditolak pola
+// eksfiltrasi di INJECTION_PATTERNS — pengecualian ini tidak menyentuhnya.
+const API_KEY_PAIR_PATTERNS = [
+  /\b(api\s*key|kunci\s*api)\b.{0,30}\b(gemini|groq|openai|admin|sistem|bantuin)\b/i,
+  /\b(gemini|groq|openai)\b.{0,20}\b(api\s*key|kunci\s+api)\b/i,
+];
+
+// Kata kerja eksfiltrasi: bila ada, pertanyaan status TIDAK dikecualikan.
+const EXFILTRATION_VERBS = /(tampilkan|tunjukkan|berikan|beri|sebutkan|ungkapkan|bocorkan|tuliskan|kasih|kirim)\b/i;
+
+/**
+ * True bila pesan menanyakan STATUS sebuah API key (aktif / terkonfigurasi /
+ * valid / berfungsi) tanpa meminta nilainya. Contoh yang dikecualikan:
+ * "apakah api key groq masih aktif?", "cek kunci api openrouter".
+ * Contoh yang TIDAK dikecualikan: "tampilkan api key gemini"
+ * (ada kata kerja eksfiltrasi -> tetap ditolak).
+ */
+function isApiKeyStatusQuestion(normalized: string): boolean {
+  if (!/\b(api\s*key|kunci\s*api)\b/i.test(normalized)) return false;
+  if (EXFILTRATION_VERBS.test(normalized)) return false;
+  return /(apakah|bagaimana|cek|periksa|status|masih|sudah|belum|apakah\s+.*(aktif|terkonfigurasi|valid|berfungsi|tersambung|terhubung)|aktif|terkonfigurasi|valid|berfungsi|tersambung|terhubung|normal)/i.test(normalized);
+}
+
 
 // Pola Topik Terlarang / Di Luar Lingkup BANTUIN
 const OFF_TOPIC_PATTERNS = [
@@ -124,6 +153,21 @@ export function validateTopicAndSafety(userMessage: string, role: string = 'gues
     }
   }
 
+  // 1b. Pola pasangan "api key + provider" — dilewati bila pesan adalah
+  // pertanyaan STATUS kunci (lihat isApiKeyStatusQuestion). Permintaan
+  // nilai kunci sudah ditolak pola eksfiltrasi di atas.
+  if (!isApiKeyStatusQuestion(normalized)) {
+    for (const pattern of API_KEY_PAIR_PATTERNS) {
+      if (pattern.test(normalized)) {
+        return {
+          isAllowed: false,
+          reason: 'Permintaan ditolak: Manipulasi instruksi sistem terdeteksi.',
+          isSafetyHazard: false,
+        };
+      }
+    }
+  }
+
   // 2. Cek Bahaya Keselamatan Listrik / Kebakaran / Gas
   for (const pattern of HAZARD_PATTERNS) {
     if (pattern.test(normalized)) {
@@ -156,18 +200,9 @@ export function validateTopicAndSafety(userMessage: string, role: string = 'gues
   ];
   const hasSymptomKeyword = symptomKeywords.some(kw => normalized.includes(kw));
 
-  // 4. Cek Topik Terlarang Eksplisit (Coding murni luar aplikasi, tugas sekolah, politik, gosip)
-  for (const pattern of OFF_TOPIC_PATTERNS) {
-    if (pattern.test(normalized)) {
-      return {
-        isAllowed: false,
-        reason: 'Topik di luar lingkup layanan aplikasi dan ekosistem BANTUIN.',
-        isSafetyHazard: false,
-      };
-    }
-  }
-
   // Deteksi kategori spesifik untuk bantuan routing / diagnosis
+  // (dipindah ke atas cek topik terlarang agar admin yang lolos awal tetap
+  // membawa kategori untuk fallback expert system).
   let detectedCategory: string | undefined;
   if (/ac|pendingin|air conditioner|freon/i.test(normalized)) {
     detectedCategory = 'ac-pendingin-ruangan';
@@ -183,8 +218,32 @@ export function validateTopicAndSafety(userMessage: string, role: string = 'gues
     detectedCategory = 'elektronik-dapur';
   }
 
-  // 5. Pengguna Terotentikasi (Admin, Teknisi, Customer) diizinkan bertanya seputar operasional sistem
-  if (role === 'admin' || role === 'technician' || role === 'customer') {
+  // 4a. Admin dikecualikan dari cek topik terlarang: admin adalah peran
+  // demo/operasional dan harus bisa bertanya apa pun (termasuk pertanyaan
+  // umum/kode). Prompt injection (langkah 1/1b) tetap berlaku mutlak
+  // untuk semua peran, termasuk admin.
+  if (role === 'admin') {
+    return {
+      isAllowed: true,
+      isSafetyHazard: false,
+      detectedCategory,
+      isBantuinAppQuery: true,
+    };
+  }
+
+  // 4. Cek Topik Terlarang Eksplisit (Coding murni luar aplikasi, tugas sekolah, politik, gosip)
+  for (const pattern of OFF_TOPIC_PATTERNS) {
+    if (pattern.test(normalized)) {
+      return {
+        isAllowed: false,
+        reason: 'Topik di luar lingkup layanan aplikasi dan ekosistem BANTUIN.',
+        isSafetyHazard: false,
+      };
+    }
+  }
+
+  // 5. Pengguna Terotentikasi (Teknisi, Customer) diizinkan bertanya seputar operasional sistem
+  if (role === 'technician' || role === 'customer') {
     return {
       isAllowed: true,
       isSafetyHazard: false,
