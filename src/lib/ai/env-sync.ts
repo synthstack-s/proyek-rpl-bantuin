@@ -118,15 +118,20 @@ export function syncProviderToEnvLocal(options: EnvSyncOptions): {
     let lines = content.split(/\r?\n/);
     const existingKeysInFile = new Set<string>();
 
-    // Update baris yang sudah ada
+    // Update baris yang sudah ada — hanya bila nilainya benar-benar
+    // berubah, agar updatedKeys jujur dan penulisan bisa dilewati bila
+    // tidak ada yang berubah (lihat penjaga sebelum writeFileSync).
     lines = lines.map((line) => {
       const match = line.match(/^([A-Za-z0-9_]+)=(.*)$/);
       if (match) {
         const key = match[1];
         existingKeysInFile.add(key);
         if (updates[key] !== undefined) {
-          updatedKeys.push(key);
-          return `${key}=${formatEnvValue(updates[key])}`;
+          const newLine = `${key}=${formatEnvValue(updates[key])}`;
+          if (line !== newLine) {
+            updatedKeys.push(key);
+            return newLine;
+          }
         }
       }
       return line;
@@ -157,9 +162,13 @@ export function syncProviderToEnvLocal(options: EnvSyncOptions): {
       finalContent += newLinesToAppend.join('\n') + '\n';
     }
 
-    // Tulis ke .env.local
-    fs.writeFileSync(envPath, finalContent, 'utf8');
-    console.info(`[EnvSync] Berhasil sinkronisasi provider '${options.provider}' ke .env.local: [${updatedKeys.join(', ')}]`);
+    // Tulis ke .env.local — HANYA bila isi berubah. Menulis ulang file
+    // yang identik tetap mengubah mtime dan memicu recompile/restart
+    // pada dev server (Next memantau .env.local) tanpa manfaat apa pun.
+    if (finalContent !== content) {
+      fs.writeFileSync(envPath, finalContent, 'utf8');
+      console.info(`[EnvSync] Berhasil sinkronisasi provider '${options.provider}' ke .env.local: [${updatedKeys.join(', ')}]`);
+    }
 
     return { success: true, updatedKeys };
   } catch (err: any) {
@@ -248,19 +257,21 @@ export function syncActiveProviderToEnvLocal(activeProvider: string): void {
     const envPath = path.resolve(process.cwd(), '.env.local');
     if (!fs.existsSync(envPath)) return;
 
-    let content = fs.readFileSync(envPath, 'utf8');
+    const content = fs.readFileSync(envPath, 'utf8');
     const cleanProvider = activeProvider.trim().toLowerCase();
 
     const regex = /^ACTIVE_AI_PROVIDER=.*$/m;
-    if (regex.test(content)) {
-      content = content.replace(regex, `ACTIVE_AI_PROVIDER=${cleanProvider}`);
-    } else {
-      content += `\n# Provider AI Aktif Terpilih\nACTIVE_AI_PROVIDER=${cleanProvider}\n`;
-    }
+    const newContent = regex.test(content)
+      ? content.replace(regex, `ACTIVE_AI_PROVIDER=${cleanProvider}`)
+      : `${content}\n# Provider AI Aktif Terpilih\nACTIVE_AI_PROVIDER=${cleanProvider}\n`;
 
     process.env['ACTIVE_AI_PROVIDER'] = cleanProvider;
-    fs.writeFileSync(envPath, content, 'utf8');
-    console.info(`[EnvSync] ACTIVE_AI_PROVIDER disinkronkan ke .env.local: '${cleanProvider}'`);
+    // Tulis hanya bila isi berubah — penulisan ulang yang identik tetap
+    // mengubah mtime dan memicu recompile pada dev server.
+    if (newContent !== content) {
+      fs.writeFileSync(envPath, newContent, 'utf8');
+      console.info(`[EnvSync] ACTIVE_AI_PROVIDER disinkronkan ke .env.local: '${cleanProvider}'`);
+    }
   } catch (err: any) {
     console.warn('[EnvSync] Gagal memperbarui ACTIVE_AI_PROVIDER di .env.local:', err.message);
   }
