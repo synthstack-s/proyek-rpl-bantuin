@@ -35,7 +35,8 @@ function assert(condition: boolean, name: string, details: string) {
 
 async function runTestSuite() {
   console.log('===============================================================');
-  console.log('     BANTUIN - SUITE PENGUJIAN KEAMANAN AUTENTIKASI ADMIN');
+  console.log('     BANTUIN - SUITE PENGUJIAN LOGIN TERPADU (SATU PANEL)');
+  console.log('     Satu endpoint login /api/auth/login untuk semua peran');
   console.log('===============================================================\n');
 
   // Inisialisasi Database Connection
@@ -58,7 +59,7 @@ async function runTestSuite() {
       console.log('Membuat akun admin uji sesuai konfigurasi .env.local...');
       const adminHash = await bcrypt.hash(ADMIN_PASSWORD, 12);
       await connection.execute(
-        `INSERT INTO users (uuid, email, phone_number, password_hash, role, status, is_verified) 
+        `INSERT INTO users (uuid, email, phone_number, password_hash, role, status, is_verified)
          VALUES (?, ?, ?, ?, 'admin', 'active', 1)`,
         [crypto.randomUUID(), ADMIN_EMAIL, ADMIN_PHONE, adminHash]
       );
@@ -67,27 +68,27 @@ async function runTestSuite() {
       console.log(`✔ Akun admin uji "${ADMIN_EMAIL}" sudah tersedia di database.\n`);
     }
 
-    // 2. Buat Akun Non-Admin (Customer) untuk Pengujian Penolakan Role
+    // 2. Buat Akun Non-Admin (Customer) untuk Pengujian Pemisahan Peran
     await connection.execute('DELETE FROM users WHERE email = ?', [CUSTOMER_EMAIL]);
     const customerHash = await bcrypt.hash(CUSTOMER_PASSWORD, 12);
     await connection.execute(
-      `INSERT INTO users (uuid, email, phone_number, password_hash, role, status, is_verified) 
+      `INSERT INTO users (uuid, email, phone_number, password_hash, role, status, is_verified)
        VALUES (?, ?, ?, ?, 'customer', 'active', 1)`,
       [crypto.randomUUID(), CUSTOMER_EMAIL, CUSTOMER_PHONE, customerHash]
     );
 
     // -------------------------------------------------------------
-    // UJI 1: Validasi Input (Email & Password Kosong)
+    // UJI 1: Validasi Input (Identifier & Password Kosong)
     // -------------------------------------------------------------
     {
-      const res = await fetch(`${BASE_URL}/api/admin/auth/login`, {
+      const res = await fetch(`${BASE_URL}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: '', password: '' }),
+        body: JSON.stringify({ identifier: '', password: '' }),
       });
       const data = await res.json();
       assert(
-        res.status === 400 && data.success === false,
+        res.status === 422 && data.success === false,
         'Uji Validasi Input',
         `Input kosong ditolak dengan HTTP ${res.status} ("${data.message}")`
       );
@@ -97,10 +98,10 @@ async function runTestSuite() {
     // UJI 2: Login Akun yang Tidak Terdaftar
     // -------------------------------------------------------------
     {
-      const res = await fetch(`${BASE_URL}/api/admin/auth/login`, {
+      const res = await fetch(`${BASE_URL}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: 'ghost_user@bantuin.id', password: 'SomeRandomPassword123!' }),
+        body: JSON.stringify({ identifier: 'ghost_user@bantuin.id', password: 'SomeRandomPassword123!' }),
       });
       const data = await res.json();
       assert(
@@ -114,10 +115,10 @@ async function runTestSuite() {
     // UJI 3: Login dengan Password Salah (Kredensial Invalid)
     // -------------------------------------------------------------
     {
-      const res = await fetch(`${BASE_URL}/api/admin/auth/login`, {
+      const res = await fetch(`${BASE_URL}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: ADMIN_EMAIL, password: 'SalahPassword123!' }),
+        body: JSON.stringify({ identifier: ADMIN_EMAIL, password: 'SalahPassword123!' }),
       });
       const data = await res.json();
       assert(
@@ -128,39 +129,56 @@ async function runTestSuite() {
     }
 
     // -------------------------------------------------------------
-    // UJI 4: Login dengan Akun Non-Admin (Customer)
+    // UJI 4: Login Customer via Endpoint Terpadu (Pemisahan Peran)
+    // Satu endpoint untuk semua peran: customer yang login lewat
+    // /api/auth/login HARUS berhasil, tetapi mendapat cookie PENGGUNA
+    // (bukan cookie admin) dan redirect ke dasbor customer.
     // -------------------------------------------------------------
+    let customerCookie = '';
     {
-      const res = await fetch(`${BASE_URL}/api/admin/auth/login`, {
+      const res = await fetch(`${BASE_URL}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: CUSTOMER_EMAIL, password: CUSTOMER_PASSWORD }),
+        body: JSON.stringify({ identifier: CUSTOMER_EMAIL, password: CUSTOMER_PASSWORD }),
       });
       const data = await res.json();
+      const rawCookie = res.headers.get('set-cookie') || '';
+
+      const is200 = res.status === 200;
+      const isCustomer = data.data?.user?.role === 'customer';
+      const redirectOk = data.data?.redirectUrl === '/customer/dashboard';
+      const hasUserCookie = rawCookie.includes('bantuin_user_token=');
+      const noAdminCookie = !rawCookie.includes('bantuin_admin_token=');
+
+      if (rawCookie) {
+        customerCookie = rawCookie.split(';')[0];
+      }
+
       assert(
-        res.status === 401 && data.success === false,
-        'Uji Penolakan Akun Non-Admin',
-        `Akun ber-role 'customer' ditolak masuk admin dengan HTTP ${res.status} ("${data.message}")`
+        is200 && isCustomer && redirectOk && hasUserCookie && noAdminCookie,
+        'Uji Login Customer via Endpoint Terpadu',
+        `Customer login HTTP 200, role='customer', redirect='/customer/dashboard', cookie pengguna diterima, TIDAK ada cookie admin.`
       );
     }
 
     // -------------------------------------------------------------
-    // UJI 5: Login dengan Kredensial Admin Valid
+    // UJI 5: Login dengan Kredensial Admin Valid (via Endpoint Terpadu)
     // -------------------------------------------------------------
     let adminCookie = '';
     {
-      const res = await fetch(`${BASE_URL}/api/admin/auth/login`, {
+      const res = await fetch(`${BASE_URL}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: ADMIN_EMAIL, password: ADMIN_PASSWORD, rememberMe: true }),
+        body: JSON.stringify({ identifier: ADMIN_EMAIL, password: ADMIN_PASSWORD, rememberMe: true }),
       });
       const data = await res.json();
       const rawCookie = res.headers.get('set-cookie');
 
       const is200 = res.status === 200;
       const isSuccess = data.success === true;
-      const isRoleAdmin = data.user?.role === 'admin';
-      const noPasswordHash = data.user?.password_hash === undefined && data.password_hash === undefined;
+      const isRoleAdmin = data.data?.user?.role === 'admin';
+      const redirectOk = data.data?.redirectUrl === '/admin';
+      const noPasswordHash = data.data?.user?.password_hash === undefined && data.password_hash === undefined;
       const hasCookie = rawCookie !== null && rawCookie.includes('bantuin_admin_token=');
       const isHttpOnly = rawCookie?.toLowerCase().includes('httponly') ?? false;
 
@@ -169,9 +187,9 @@ async function runTestSuite() {
       }
 
       assert(
-        is200 && isSuccess && isRoleAdmin && noPasswordHash && hasCookie && isHttpOnly,
+        is200 && isSuccess && isRoleAdmin && redirectOk && noPasswordHash && hasCookie && isHttpOnly,
         'Uji Login Admin Valid',
-        `Berhasil login HTTP 200, cookie HttpOnly diterima, role='admin', password_hash tidak bocor.`
+        `Berhasil login HTTP 200, cookie admin HttpOnly diterima, role='admin', redirect='/admin', password_hash tidak bocor.`
       );
     }
 
@@ -200,39 +218,54 @@ async function runTestSuite() {
       const isRedirect = res.status === 307 || res.status === 302;
       const location = res.headers.get('location') || '';
       assert(
-        isRedirect && location.includes('/admin/login'),
+        isRedirect && location.includes('/login') && !location.includes('/admin/login'),
         'Uji Proteksi Route Halaman /admin',
         `Akses tanpa cookie dicegat oleh middleware dan diarahkan ke ${location} (Status: ${res.status})`
       );
     }
 
     // -------------------------------------------------------------
-    // UJI 8: Akses API Terproteksi /api/admin/auth/me Tanpa Cookie
+    // UJI 8: Akses API Terproteksi /api/admin/auth/me Tanpa Sesi Admin
+    // Tanpa cookie DAN dengan cookie customer (bukan admin) sama-sama
+    // harus ditolak 401 — pemisahan peran ditegakkan di server.
     // -------------------------------------------------------------
     {
-      const res = await fetch(`${BASE_URL}/api/admin/auth/me`);
-      const data = await res.json();
+      const resNoCookie = await fetch(`${BASE_URL}/api/admin/auth/me`);
+      const dataNoCookie = await resNoCookie.json();
+      const resCustomer = await fetch(`${BASE_URL}/api/admin/auth/me`, {
+        headers: { Cookie: customerCookie },
+      });
+      const dataCustomer = await resCustomer.json();
       assert(
-        res.status === 401 && data.success === false,
-        'Uji Proteksi API Admin Tanpa Sesi',
-        `API /api/admin/auth/me menolak request tanpa cookie dengan HTTP ${res.status} ("${data.message}")`
+        resNoCookie.status === 401 && dataNoCookie.success === false &&
+        resCustomer.status === 401 && dataCustomer.success === false,
+        'Uji Proteksi API Admin Tanpa Sesi Admin',
+        `Tanpa cookie: HTTP ${resNoCookie.status}; dengan cookie customer: HTTP ${resCustomer.status} (keduanya ditolak).`
       );
     }
 
     // -------------------------------------------------------------
-    // UJI 9: Akses /admin/login Ketika Sudah Memiliki Sesi Valid
+    // UJI 9: Rute Lama /admin/login Mengalihkan ke /login
+    // Panel login terpisah dihapus; /admin/login adalah redirect ke
+    // panel terpadu — baik tanpa sesi maupun dengan sesi admin.
     // -------------------------------------------------------------
     {
-      const res = await fetch(`${BASE_URL}/admin/login`, {
+      const resAnon = await fetch(`${BASE_URL}/admin/login`, {
+        redirect: 'manual',
+      });
+      const locAnon = resAnon.headers.get('location') || '';
+      const resAuthed = await fetch(`${BASE_URL}/admin/login`, {
         headers: { Cookie: adminCookie },
         redirect: 'manual',
       });
-      const isRedirect = res.status === 307 || res.status === 302;
-      const location = res.headers.get('location') || '';
+      const locAuthed = resAuthed.headers.get('location') || '';
+      const isRedirect = (s: number) => s === 307 || s === 302;
+      const toLogin = (l: string) => l.includes('/login') && !l.includes('/admin/login');
       assert(
-        isRedirect && location.endsWith('/admin'),
-        'Uji Redirect Pengguna Berotentikasi di /admin/login',
-        `Admin yang sudah login dialihkan kembali ke ${location} (Status: ${res.status})`
+        isRedirect(resAnon.status) && toLogin(locAnon) &&
+        isRedirect(resAuthed.status) && toLogin(locAuthed),
+        'Uji Redirect /admin/login ke /login',
+        `Tanpa sesi -> ${locAnon} (${resAnon.status}); dengan sesi admin -> ${locAuthed} (${resAuthed.status}).`
       );
     }
 
@@ -280,10 +313,10 @@ async function runTestSuite() {
     // UJI 12: Integritas Keamanan (Tidak Ada Kebocoran Rahasia)
     // -------------------------------------------------------------
     {
-      const res = await fetch(`${BASE_URL}/api/admin/auth/login`, {
+      const res = await fetch(`${BASE_URL}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: ADMIN_EMAIL, password: ADMIN_PASSWORD }),
+        body: JSON.stringify({ identifier: ADMIN_EMAIL, password: ADMIN_PASSWORD }),
       });
       const responseText = await res.text();
       const hasHash = responseText.includes('$2a$') || responseText.includes('$2b$');
@@ -303,7 +336,7 @@ async function runTestSuite() {
     console.log('===============================================================\n');
 
     if (totalPassed === results.length) {
-      console.log('🎉 SELURUH SKENARIO PENGUJIAN AUTENTIKASI BERHASIL MEMENUHI STANDAR!');
+      console.log('🎉 SELURUH SKENARIO PENGUJIAN LOGIN TERPADU BERHASIL MEMENUHI STANDAR!');
     } else {
       console.error('⚠️  BEBERAPA PENGUJIAN GAGAL, PERIKSA DETAIL DI ATAS.');
       process.exit(1);

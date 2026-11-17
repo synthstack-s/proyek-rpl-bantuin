@@ -134,7 +134,7 @@ async function seedAdmin() {
     console.log('Catatan Keamanan:');
     console.log('- Kredensial telah disimpan dengan aman.');
     console.log('- Password tidak pernah dicetak dalam log ini.');
-    console.log('- Silakan masuk ke /admin/login menggunakan kredensial tersebut.\n');
+    console.log('- Silakan masuk ke /login menggunakan kredensial tersebut.\n');
   } catch (err: any) {
     console.error('❌ Terjadi kesalahan saat mengeksekusi query database:');
     console.error(`  ${err.message}`);

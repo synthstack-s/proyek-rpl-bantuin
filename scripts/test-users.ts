@@ -95,11 +95,11 @@ async function runUserTestSuite() {
     // UJI 3: Autentikasi Admin untuk Memperoleh Sesi
     // -----------------------------------------------------------------
     {
-      const res = await fetch(`${BASE_URL}/api/admin/auth/login`, {
+      const res = await fetch(`${BASE_URL}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email: ADMIN_EMAIL,
+          identifier: ADMIN_EMAIL,
           password: ADMIN_PASSWORD,
         }),
       });
@@ -501,7 +501,7 @@ async function runUserTestSuite() {
     // UJI 15: Rendering Halaman /admin/users
     // -----------------------------------------------------------------
     {
-      // 1. Unauthenticated -> 307 Redirect ke /admin/login
+      // 1. Unauthenticated -> 307 Redirect ke /login
       const resUnauth = await fetch(`${BASE_URL}/admin/users`, { redirect: 'manual' });
       assert(
         resUnauth.status === 307,
