@@ -306,6 +306,17 @@ Keamanan: Tidak ada biaya tersembunyi. Pelanggan hanya membayar sesuai nominal i
     };
   }
 
+  if (norm.includes('login') || norm.includes('masuk') || norm.includes('sign in')) {
+    return {
+      title: 'Panduan Masuk (Login) BANTUIN',
+      content: `Cara Masuk ke Akun BANTUIN:
+1. Buka halaman Masuk dan isi email serta kata sandi akun Anda, lalu tekan tombol Masuk.
+2. Bila diminta, masukkan 6 digit kode OTP yang dikirim via WhatsApp untuk verifikasi.
+3. Setelah masuk, Anda diarahkan otomatis sesuai peran: pelanggan ke beranda pelanggan, teknisi ke portal teknisi, dan admin ke dasbor admin.
+Lupa kata sandi? Gunakan tautan 'Lupa Kata Sandi' di halaman Masuk untuk mengatur ulang lewat email terdaftar.`,
+    };
+  }
+
   if (norm.includes('batal') || norm.includes('cancel')) {
     return {
       title: 'Ketentuan Pembatalan Pesanan',
@@ -3221,26 +3232,38 @@ export function buildGovernedQuerySQL(
   }
 
   // Row-level scoping untuk peran non-admin (wajib; gagal bila userId tidak ada).
+  // D1: scope berlaku untuk SEMUA tabel dalam kueri (dasar + yang di-JOIN),
+  // bukan hanya tabel dasar. Sebelumnya, customer yang bertanya "berapa
+  // pesanan per kategori" (tabel dasar appliance_categories yang publik,
+  // JOIN ke repair_requests) mendapat hitungan dari SELURUH pelanggan —
+  // kebocoran data lintas-customer. Pola scope per tabel sama persis dengan
+  // yang dulu hanya diterapkan ke tabel dasar; tabel yang di-JOIN sudah
+  // divalidasi isTableAllowedForRole, sehingga kolom owner-nya dijamin
+  // bermakna untuk peran pemanggil.
   if (role !== 'admin' && role !== 'guest') {
-    if (!userContext.userId) {
-      // Tabel publik tidak butuh scoping sehingga tidak butuh userId;
-      // tabel ber-owner / berscope relasional wajib punya userId.
-      if (base.ownerForeignKey || base.relationalScope) {
-        return { error: 'Konteks pengguna tidak valid: userId tidak tersedia.' };
+    for (const tbl of [base, ...joined.values()]) {
+      const hasRelationalScope =
+        tbl.relationalScope && tbl.relationalScope.roles.includes(role as 'customer' | 'technician');
+      if (!userContext.userId) {
+        // Tabel publik tidak butuh scoping sehingga tidak butuh userId;
+        // tabel ber-owner / berscope relasional wajib punya userId.
+        if (tbl.ownerForeignKey || hasRelationalScope) {
+          return { error: 'Konteks pengguna tidak valid: userId tidak tersedia.' };
+        }
+      } else if (tbl.ownerForeignKey) {
+        whereParts.push(`\`${tbl.tableName}\`.\`${tbl.ownerForeignKey}\` = ?`);
+        params.push(userContext.userId);
+      } else if (hasRelationalScope) {
+        // B14: scope relasional — baris hanya terlihat bila terhubung ke baris
+        // viaTable milik pemanggil (mis. payments atas invoice sendiri).
+        const scope = tbl.relationalScope!;
+        const via = BANTUIN_SCHEMA_REGISTRY[scope.viaTable];
+        if (!via) return { error: `Konfigurasi scope tabel ${tbl.tableName} tidak valid.` };
+        whereParts.push(
+          `EXISTS (SELECT 1 FROM \`${via.tableName}\` WHERE \`${via.tableName}\`.\`${via.primaryKey}\` = \`${tbl.tableName}\`.\`${scope.viaForeignKey}\` AND \`${via.tableName}\`.\`${scope.ownerColumn}\` = ?)`
+        );
+        params.push(userContext.userId);
       }
-    } else if (base.ownerForeignKey) {
-      whereParts.push(`\`${base.tableName}\`.\`${base.ownerForeignKey}\` = ?`);
-      params.push(userContext.userId);
-    } else if (base.relationalScope && base.relationalScope.roles.includes(role as 'customer' | 'technician')) {
-      // B14: scope relasional — baris hanya terlihat bila terhubung ke baris
-      // viaTable milik pemanggil (mis. payments atas invoice sendiri).
-      const scope = base.relationalScope;
-      const via = BANTUIN_SCHEMA_REGISTRY[scope.viaTable];
-      if (!via) return { error: `Konfigurasi scope tabel ${base.tableName} tidak valid.` };
-      whereParts.push(
-        `EXISTS (SELECT 1 FROM \`${via.tableName}\` WHERE \`${via.tableName}\`.\`${via.primaryKey}\` = \`${base.tableName}\`.\`${scope.viaForeignKey}\` AND \`${via.tableName}\`.\`${scope.ownerColumn}\` = ?)`
-      );
-      params.push(userContext.userId);
     }
   }
 
@@ -3317,7 +3340,11 @@ export async function executeGovernedDatabaseQuery(
       },
     };
   } catch (err: any) {
-    return { success: false, error: err?.message || 'Kueri database gagal.' };
+    // D4: jangan kembalikan pesan error mentah (mysql2) ke pemanggil — teks
+    // itu diteruskan ke LLM sebagai konteks tool dan bisa membocorkan nama
+    // tabel/kolom serta detail internal. Detail tetap dicatat di log server.
+    console.error('[DataService] executeGovernedDatabaseQuery gagal:', err?.message);
+    return { success: false, error: 'Kueri database gagal. Coba lagi nanti.' };
   }
 }
 
