@@ -78,7 +78,14 @@ export interface StoredChatMessage {
   tokensUsed?: number | null;
   responseTimeMs?: number | null;
   rawMetadata?: ChatMessageMetadata | null;
-  createdAt: string;
+  /**
+   * Waktu simpan pesan. Baris DB memakai objek Date (mysql2 mengembalikan
+   * kolom DATETIME sebagai Date bila `dateStrings` tidak disetel — dan
+   * src/lib/db.ts tidak menyetelnya); pesan fallback in-memory memakai
+   * string ISO UTC. Konsumen WAJIB menormalisasi lewat parseStoredTime
+   * (repository.ts) — jangan mengasumsikan string.
+   */
+  createdAt: string | Date;
   /**
    * F6 — Dari mana pesan ini berasal: 'database' (tersimpan di MySQL) atau
    * 'memory' (hanya di fallback in-memory selama DB tidak dapat dijangkau).
