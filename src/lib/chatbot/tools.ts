@@ -77,6 +77,63 @@ export function toPublicTechnicianView(t: any): {
  * tool tidak dapat diselesaikan (pemanggil wajib mengopernya bila tool
  * aksi dideklarasikan ke AI).
  */
+// Kata umum yang tidak membedakan satu baris pun — diabaikan saat filter
+// kata kunci agar "pesanan saya yang terakhir" tidak memfilter apa-apa
+// (dan perilaku lamanya dipertahankan: seluruh daftar dikembalikan).
+const SEARCH_STOPWORDS = new Set([
+  'saya', 'yang', 'dan', 'atau', 'pesanan', 'pesan', 'tugas', 'cari',
+  'lihat', 'tampilkan', 'tolong', 'adalah', 'ini', 'itu', 'ada', 'punya',
+  'milik', 'semua', 'daftar', 'terakhir', 'pertama', 'saja', 'untuk',
+  'dari', 'dengan', 'mohon', 'apa', 'mana', 'nya',
+]);
+
+/**
+ * T1 — Filter daftar hasil (pesanan/tugas/invoice milik sendiri) dengan kata
+ * kunci pencarian di JavaScript. Getter per-peran (getCustomerRepairs,
+ * getTechnicianAssignedTasks, getCustomerInvoices) tidak menerima kata kunci,
+ * sehingga sebelumnya searchOrders/searchInvoices MEMBUANG query dan selalu
+ * mengembalikan seluruh daftar — "cari pesanan kulkas saya" bisa dijawab
+ * dengan pesanan AC. Aturan:
+ * - Kode eksplisit (BAN/REP/INV + angka): filter ketat pada kode.
+ * - Selain itu: cocokkan token kata (>= 3 huruf, bukan stopword) ke field
+ *   yang relevan (OR antar token).
+ * - Bila tidak ada baris yang cocok, kembalikan daftar utuh (perilaku lama)
+ *   agar pertanyaan kabur ("pesanan saya yang terakhir") tetap terjawab dan
+ *   LLM yang memilih — bukan daftar kosong yang menyesatkan.
+ */
+function filterRowsByKeyword<T extends Record<string, any>>(
+  rows: T[],
+  query: string,
+  fields: string[]
+): T[] {
+  const q = (query || '').trim();
+  if (!q || rows.length === 0) return rows;
+
+  // Kode eksplisit (BAN/REP/INV + angka, termasuk kelompok angka lanjutan
+  // seperti REP-2026-0002): filter ketat pada kode.
+  const codeMatch = q.match(/\b(BAN|REP|INV)[-\s]?\d+(?:[-\s]?\d+)*\b/i);
+  if (codeMatch) {
+    const needle = codeMatch[0].replace(/[-\s]/g, '').toLowerCase();
+    const strict = rows.filter((r) =>
+      fields.some((f) => String(r[f] ?? '').replace(/[-\s]/g, '').toLowerCase().includes(needle))
+    );
+    return strict.length > 0 ? strict : rows;
+  }
+
+  const tokens = q
+    .toLowerCase()
+    .split(/[^a-z0-9]+/i)
+    .filter((t) => t.length >= 3 && !SEARCH_STOPWORDS.has(t));
+  if (tokens.length === 0) return rows;
+
+  const filtered = rows.filter((r) =>
+    tokens.some((tok) =>
+      fields.some((f) => String(r[f] ?? '').toLowerCase().includes(tok))
+    )
+  );
+  return filtered.length > 0 ? filtered : rows;
+}
+
 export async function executeRoleBasedTool(
   toolName: string,
   args: any,
@@ -480,18 +537,27 @@ export async function executeRoleBasedTool(
             limit: args?.limit,
           }));
         } else if (userContext.role === 'customer' && userContext.userId) {
+          const repairs = await DataService.getCustomerRepairs(userContext.userId, {
+            status: args?.status,
+            limit: args?.limit,
+          });
+          // T1: kata kunci pencarian sebelumnya DIBUANG di sini — filter
+          // hasil di JS agar "cari pesanan kulkas" tidak dijawab pesanan AC.
           return dbResult(
-            await DataService.getCustomerRepairs(userContext.userId, {
-              status: args?.status,
-              limit: args?.limit,
-            })
+            repairs === null
+              ? null
+              : filterRowsByKeyword(repairs, orderQuery, ['orderCode', 'device', 'problem', 'categoryName'])
           );
         } else if (userContext.role === 'technician' && userContext.userId) {
+          const tasks = await DataService.getTechnicianAssignedTasks(userContext.userId, {
+            status: args?.status,
+            limit: args?.limit,
+          });
+          // T1: sama seperti customer — filter kata kunci di JS.
           return dbResult(
-            await DataService.getTechnicianAssignedTasks(userContext.userId, {
-              status: args?.status,
-              limit: args?.limit,
-            })
+            tasks === null
+              ? null
+              : filterRowsByKeyword(tasks, orderQuery, ['orderCode', 'device', 'problem', 'customerName'])
           );
         }
         return {
@@ -540,10 +606,15 @@ export async function executeRoleBasedTool(
             limit: args?.limit,
           }));
         } else if (userContext.role === 'customer' && userContext.userId) {
+          const invoices = await DataService.getCustomerInvoices(userContext.userId, {
+            status: args?.status,
+          });
+          // T1: kata kunci pencarian sebelumnya DIBUANG di sini — filter
+          // hasil di JS agar "invoice INV-..." dijawab invoice yang benar.
           return dbResult(
-            await DataService.getCustomerInvoices(userContext.userId, {
-              status: args?.status,
-            })
+            invoices === null
+              ? null
+              : filterRowsByKeyword(invoices, invoiceQuery, ['invoiceNumber', 'orderCode'])
           );
         }
         return {
@@ -569,6 +640,10 @@ export async function executeRoleBasedTool(
         return { success: false, error: `Tool ${toolName} tidak dikenal.` };
     }
   } catch (err: any) {
-    return { success: false, error: err.message || 'Gagal mengeksekusi tool basis data.' };
+    // T2: jangan teruskan pesan error mentah ke LLM sebagai isi tool —
+    // teks itu bisa berisi detail internal (nama tabel/kolom, jejak DB).
+    // Detail tetap dicatat di log server.
+    console.error('[Chatbot Tools] executeRoleBasedTool gagal:', err?.message);
+    return { success: false, error: 'Gagal mengeksekusi tool basis data. Coba lagi nanti.' };
   }
 }
