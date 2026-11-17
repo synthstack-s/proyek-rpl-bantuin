@@ -15,6 +15,16 @@
 import { query, checkDatabaseConnection } from '@/lib/db';
 import { ChatUserContext } from './types';
 import { BANTUIN_SCHEMA_REGISTRY, TableMetadata } from './schema-registry';
+// Definisi metrik dasbor yang dipakai BERSAMA chatbot dan dasbor admin
+// (src/lib/admin-dashboard.ts) — satu kueri, dua konsumen, angka yang
+// sama. Pembungkus di bawah mengubah throw (database error) menjadi null
+// sesuai aturan tiga keadaan chatbot (N1).
+import {
+  getTechnicianVerificationStats as fetchVerificationStats,
+  getSatisfactionStats as fetchSatisfactionStats,
+  getCategoryBreakdown as fetchCategoryBreakdown,
+  getTopTechnicians as fetchTopTechnicians,
+} from '@/lib/admin-dashboard';
 
 // ============================================================================
 // 1. DATA SERVICES UNTUK GUEST & PUBLIK
@@ -1356,7 +1366,20 @@ export async function getAdminTechnicianWorkload() {
       // (users.status) dan status verifikasi dokumen
       // (technician_profiles.verified_status) dikembalikan agar balasan
       // D#3 bisa menampilkannya.
-      `SELECT 
+      // DASH-1 — "Pekerjaan Selesai" memakai definisi yang SAMA dengan
+      // dasbor admin dan rute /api/technician/tasks: pesanan yang
+      // BERHASIL diselesaikan (repair_requests.current_status =
+      // 'completed') dengan penugasan teknisi yang bersangkutan
+      // berstatus 'accepted'/'completed'. Definisi lama (ta.status =
+      // 'completed' saja) menghitung 0 untuk semua teknisi karena
+      // aplikasi tidak selalu menandai penugasan 'completed' saat
+      // pesanan selesai — rute tasks sendiri memakai OR (ta.status =
+      // 'completed' OR rr.current_status = 'completed'). COUNT(DISTINCT
+      // rr.id) agar penugasan ulang tidak menghitung satu pesanan dua
+      // kali. "Tugas Aktif" juga mengecualikan pesanan yang sudah
+      // selesai/dibatalkan (penugasan 'accepted' yang basi bukan tugas
+      // aktif — definisi yang sama dengan filter 'active' rute tasks).
+      `SELECT
         u.id AS technician_id,
         u.status AS account_status,
         tp.full_name,
@@ -1364,12 +1387,13 @@ export async function getAdminTechnicianWorkload() {
         tp.rating_count,
         tp.is_available,
         tp.verified_status,
-        COUNT(CASE WHEN ta.status = 'accepted' THEN 1 END) AS active_tasks,
+        COUNT(CASE WHEN ta.status = 'accepted' AND rr.current_status NOT IN ('completed', 'cancelled') THEN 1 END) AS active_tasks,
         COUNT(CASE WHEN ta.status = 'offered' THEN 1 END) AS offered_tasks,
-        COUNT(CASE WHEN ta.status = 'completed' THEN 1 END) AS completed_tasks
+        COUNT(DISTINCT CASE WHEN ta.status IN ('accepted', 'completed') AND rr.current_status = 'completed' THEN rr.id END) AS completed_tasks
        FROM users u
        JOIN technician_profiles tp ON u.id = tp.user_id
        LEFT JOIN technician_assignments ta ON u.id = ta.technician_id
+       LEFT JOIN repair_requests rr ON ta.repair_request_id = rr.id AND rr.deleted_at IS NULL
        WHERE u.role = 'technician' AND u.deleted_at IS NULL
        GROUP BY u.id, u.status, tp.full_name, tp.rating_avg, tp.rating_count, tp.is_available, tp.verified_status
        ORDER BY active_tasks DESC, tp.rating_avg DESC
@@ -1394,6 +1418,50 @@ export async function getAdminTechnicianWorkload() {
     return [];
   } catch (err) {
     console.error('[data-service] getAdminTechnicianWorkload gagal:', err);
+    return null;
+  }
+}
+
+// ============================================================================
+// DASH-2 — Metrik dasbor untuk chatbot: pembungkus tipis atas definisi
+// BERSAMA di src/lib/admin-dashboard.ts. Dasbor admin dan chatbot memakai
+// kueri yang SAMA PERSIS, sehingga angka yang ditampilkan di layar dan
+// angka yang dijawab chatbot tidak pernah berbeda untuk data yang sama.
+// (Aturan tiga keadaan: database error -> null.)
+// ============================================================================
+
+export async function getAdminTechnicianVerificationStats() {
+  try {
+    return await fetchVerificationStats();
+  } catch (err) {
+    console.error('[data-service] getAdminTechnicianVerificationStats gagal:', err);
+    return null;
+  }
+}
+
+export async function getAdminSatisfactionStats() {
+  try {
+    return await fetchSatisfactionStats();
+  } catch (err) {
+    console.error('[data-service] getAdminSatisfactionStats gagal:', err);
+    return null;
+  }
+}
+
+export async function getAdminCategoryRevenue() {
+  try {
+    return await fetchCategoryBreakdown();
+  } catch (err) {
+    console.error('[data-service] getAdminCategoryRevenue gagal:', err);
+    return null;
+  }
+}
+
+export async function getAdminTopTechnicians() {
+  try {
+    return await fetchTopTechnicians();
+  } catch (err) {
+    console.error('[data-service] getAdminTopTechnicians gagal:', err);
     return null;
   }
 }
