@@ -71,9 +71,15 @@ export default function UniversalLoginPage() {
         return;
       }
 
-      // Berhasil masuk!
+      // Berhasil masuk! Arahkan ke callback (bila berupa path relatif
+      // internal — URL absolut ditolak untuk mencegah open redirect)
+      // atau ke URL redirect berbasis peran dari server.
       const callback = new URLSearchParams(window.location.search).get('callbackUrl');
-      const targetUrl = callback || data.data?.redirectUrl || '/customer/dashboard';
+      const safeCallback =
+        callback && callback.startsWith('/') && !callback.startsWith('//')
+          ? callback
+          : null;
+      const targetUrl = safeCallback || data.data?.redirectUrl || '/customer/dashboard';
 
       router.push(targetUrl);
       router.refresh();
@@ -118,7 +124,7 @@ export default function UniversalLoginPage() {
           Masuk ke Akun Anda
         </h2>
         <p className="mt-2 text-xs sm:text-sm text-[#ABA291] max-w-sm mx-auto">
-          Akses layanan servis untuk Pelanggan atau pantau order perbaikan bagi Mitra Teknisi.
+          Satu panel masuk untuk Pelanggan, Mitra Teknisi, dan Staf Administrator — dasbor tujuan menyesuaikan peran akun Anda.
         </p>
       </div>
 
@@ -233,11 +239,8 @@ export default function UniversalLoginPage() {
                 Mitra Teknisi
               </Link>
             </p>
-            <p className="pt-2">
-              Pengelola Sistem?{' '}
-              <Link href="/admin/login" className="text-[#8C8678] hover:text-[#FFFBF4] underline transition-colors">
-                Masuk ke Panel Administrator
-              </Link>
+            <p className="pt-2 text-[#8C8678]">
+              Staf administrator juga masuk lewat panel ini.
             </p>
           </div>
         </div>
