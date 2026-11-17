@@ -1298,6 +1298,15 @@ export async function recordAIUsageLog(params: {
 /**
  * S5/F8 — Kuota harian pemakaian AI di jalur chat.
  *
+ * DINONAKTIFKAN 2026-11-17 atas keputusan pemilik ("bebaskan penggunaan
+ * chatbot, jangan dibatasi"): nilai batas 0 berarti TANPA BATAS, dan
+ * default-nya adalah 0 — selama batas 0, tidak ada pemblokiran dan tidak
+ * ada pesan kuota habis. Mekanisme kuota di bawah ini DIPERTAHANKAN agar
+ * bisa dihidupkan lagi kapan saja: cukup set
+ * `system_settings.ai_daily_free_quota` ke angka positif lewat panel
+ * Pengaturan (atau UPDATE langsung di DB); perubahan berlaku paling
+ * lambat 60 detik kemudian (cache batas, lihat getDailyAIQuotaLimit).
+ *
  * KOREKSI TERHADAP AUDIT: audit-2 menyatakan setting `ai_daily_free_quota`
  * "tidak ditemukan di kode" (grep hanya mencakup `src/` dan
  * `database/migrations/`). Verifikasi ulang Batch 5 menemukan setting itu
@@ -1322,7 +1331,11 @@ export async function recordAIUsageLog(params: {
  * sesi baru tidak mereset kuota) dan per `session_id` numerik untuk guest.
  * Penegakan dilakukan route chat SEBELUM memanggil engine.
  */
-export const DEFAULT_DAILY_AI_QUOTA = 10;
+// 0 = TANPA BATAS (kuota harian dinonaktifkan, keputusan pemilik
+// 2026-11-17). Dipakai bila setting tidak ada / tidak valid / DB tidak
+// terbaca. Untuk menghidupkan kuota lagi, set
+// `system_settings.ai_daily_free_quota` ke angka positif.
+export const DEFAULT_DAILY_AI_QUOTA = 0;
 
 const DAILY_QUOTA_LIMIT_CACHE_TTL_MS = 60 * 1000;
 let cachedDailyQuotaLimit: { value: number; expiresAt: number } | null = null;
@@ -1330,8 +1343,9 @@ let cachedDailyQuotaLimit: { value: number; expiresAt: number } | null = null;
 /**
  * Membaca batas kuota harian dari `system_settings.ai_daily_free_quota`
  * (cache 60 detik — cukup segar untuk perubahan admin, cukup hemat untuk
- * tidak menambah 1 query di setiap pesan). Fallback ke
- * DEFAULT_DAILY_AI_QUOTA bila setting tidak ada/tidak valid/DB error.
+ * tidak menambah 1 query di setiap pesan). Nilai 0 berarti TANPA BATAS.
+ * Fallback ke DEFAULT_DAILY_AI_QUOTA (0 = tanpa batas) bila setting
+ * tidak ada/tidak valid/DB error.
  */
 export async function getDailyAIQuotaLimit(): Promise<number> {
   const now = Date.now();
@@ -1345,7 +1359,7 @@ export async function getDailyAIQuotaLimit(): Promise<number> {
       `SELECT setting_value FROM system_settings WHERE setting_key = 'ai_daily_free_quota' LIMIT 1`
     );
     const parsed = Number(rows?.[0]?.setting_value);
-    if (Number.isFinite(parsed) && parsed > 0) {
+    if (Number.isFinite(parsed) && parsed >= 0) {
       limit = Math.floor(parsed);
     }
   } catch {
@@ -1367,11 +1381,12 @@ export interface DailyAIQuotaCheck {
 
 /**
  * Memeriksa kuota harian AI untuk satu identitas. `userId` (login) menang
- * atas `sessionId` (guest) bila keduanya ada. Bila DB tidak dapat
- * diakses, request DIIZINKAN (fail-open) dengan peringatan — kuota tidak
- * boleh mematikan chat saat DB down (chat sendiri tetap berjalan lewat
- * fallback in-memory + provider AI), dan pemakai tidak bisa mematikan DB
- * untuk mengakali kuota.
+ * atas `sessionId` (guest) bila keduanya ada. Bila batas 0 (tanpa batas),
+ * request selalu DIIZINKAN tanpa menghitung pemakaian — tidak ada kueri
+ * hitung sama sekali. Bila DB tidak dapat diakses, request DIIZINKAN
+ * (fail-open) dengan peringatan — kuota tidak boleh mematikan chat saat
+ * DB down (chat sendiri tetap berjalan lewat fallback in-memory +
+ * provider AI), dan pemakai tidak bisa mematikan DB untuk mengakali kuota.
  */
 export async function checkDailyAIQuota(params: {
   userId?: number | null;
@@ -1379,6 +1394,16 @@ export async function checkDailyAIQuota(params: {
 }): Promise<DailyAIQuotaCheck> {
   const limit = await getDailyAIQuotaLimit();
   const scope: 'user' | 'session' = params.userId ? 'user' : 'session';
+
+  if (limit <= 0) {
+    // Kuota dinonaktifkan (0 = tanpa batas, keputusan pemilik 2026-11-17):
+    // izinkan tanpa menghitung pemakaian — tidak ada kueri hitung, tidak
+    // ada pemblokiran, tidak ada pesan kuota habis. `used`/`remaining`
+    // adalah placeholder (tidak dihitung) dan hanya dipakai pesan
+    // penolakan di route chat, yang tidak akan pernah muncul selama
+    // batas 0.
+    return { allowed: true, used: 0, limit: 0, remaining: 0, scope };
+  }
 
   if (!params.userId && !params.sessionId) {
     // Tanpa identitas apa pun tidak ada yang bisa dihitung — izinkan
