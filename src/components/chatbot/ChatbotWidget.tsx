@@ -18,6 +18,12 @@ import {
 } from 'lucide-react';
 import { DiagnosisCardView } from './DiagnosisCardView';
 import { DiagnosisCard, QuickSuggestion } from '@/lib/chatbot/types';
+import {
+  initWidgetSession,
+  type InitWidgetSessionResult,
+  type WidgetFetchFn,
+  type WidgetSessionStorage,
+} from '@/lib/chatbot/widget-session';
 
 interface UIMessage {
   id?: number | string;
@@ -287,6 +293,28 @@ function extractCurrentInterfaceSummary(): {
   };
 }
 
+/**
+ * Storage sesi widget — localStorage bila tersedia, fallback in-memory
+ * yang tidak menyimpan apa-apa (SSR/private mode): init tetap jalan,
+ * hanya tanpa pemakaian ulang antar muat halaman.
+ */
+function getWidgetSessionStorage(): WidgetSessionStorage {
+  if (typeof window !== 'undefined') {
+    try {
+      return window.localStorage;
+    } catch {
+      // localStorage bisa gagal (private mode) — pakai fallback di bawah.
+    }
+  }
+  return {
+    getItem: () => null,
+    setItem: () => {},
+    removeItem: () => {},
+  };
+}
+
+const widgetFetch: WidgetFetchFn = (url, init) => fetch(url, init);
+
 export function ChatbotWidget() {
   const pathname = usePathname();
   const [isOpen, setIsOpen] = useState(false);
@@ -302,6 +330,16 @@ export function ChatbotWidget() {
   const [errorNotice, setErrorNotice] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Dedup StrictMode (dev): pemanggilan efek kedua menempel pada promise
+  // in-flight yang sama, bukan POST kedua.
+  const sessionInitRef = useRef<{
+    pathname: string;
+    promise: Promise<InitWidgetSessionResult>;
+  } | null>(null);
+  // Halaman yang sesinya sudah siap — buka-tutup widget di halaman yang
+  // sama tidak mengulang init (percakapan dipertahankan).
+  const sessionReadyRef = useRef<string | null>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -323,74 +361,106 @@ export function ChatbotWidget() {
     }
   }, []);
 
-  // Inisialisasi Sesi Chatbot & Reset Otomatis Saat Berpindah Halaman
+  // Inisialisasi Sesi Chatbot — MALAS (lazy) + pakai ulang sesi tersimpan.
+  //
+  // PERBAIKAN (loop sesi): efek ini dulu berjalan pada SETIAP mount dan
+  // SETIAP perpindahan halaman — bahkan saat widget TERTUTUP — dan selalu
+  // membuat sesi BARU (UUID lama dihapus dari storage, tidak pernah
+  // dipakai ulang). Widget terpasang global di root layout, jadi setiap
+  // navigasi/refresh = POST /api/chat/session baru (2x di dev karena
+  // React StrictMode), sampai kena 429 (batas 10/menit/IP) dan mengisi
+  // tabel ai_consultation_sessions dengan sesi yatim.
+  //
+  // Aturan baru:
+  // - Selama widget TERTUTUP, efek tidak melakukan apa-apa (nol request).
+  // - Saat widget DIBUKA, sesi diinisialisasi lewat initWidgetSession:
+  //   UUID tersimpan untuk halaman yang sama DIPAKAI ULANG (1 SELECT,
+  //   tanpa INSERT); pindah halaman saat widget terbuka tetap mendapat
+  //   sesi baru (reset per halaman dipertahankan).
+  // - Buka-tutup widget di halaman yang sama tidak mengulang init —
+  //   percakapan dipertahankan.
   useEffect(() => {
+    if (!isOpen) return;
+    if (sessionReadyRef.current === pathname) return;
+
     let isCancelled = false;
 
-    async function initSessionForPage() {
-      // 1. Reset state percakapan seketika saat rute/halaman berubah
-      setMessages([]);
-      setInputMessage('');
-      setErrorNotice(null);
-      setSessionUuid(null);
-      setSessionId(undefined);
+    // Reset state percakapan seketika saat rute/halaman berubah
+    setMessages([]);
+    setInputMessage('');
+    setErrorNotice(null);
+    setSessionUuid(null);
+    setSessionId(undefined);
 
-      // Bersihkan sesi lama dari storage agar percakapan halaman sebelumnya tidak terbawa
-      if (typeof window !== 'undefined') {
-        localStorage.removeItem('bantuin_chat_uuid');
-      }
+    const pageInfo = extractCurrentInterfaceSummary();
 
-      try {
-        // 2. Buat sesi baru yang murni untuk halaman/rute ini dengan ringkasan antarmuka
-        const pageInfo = extractCurrentInterfaceSummary();
-        const res = await fetch('/api/chat/session', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            pageContext: pageInfo,
-          }),
-        });
-
-        const data = await res.json();
-        if (isCancelled) return;
-
-        if (data.success && data.session) {
-          setSessionUuid(data.session.sessionUuid);
-          setSessionId(data.session.id);
-          if (data.user) {
-            setUserRole(data.user.role || 'guest');
-            setUserName(data.user.name || null);
+    // Dedup StrictMode (dev): pemanggilan efek kedua menempel pada
+    // promise in-flight yang sama, bukan POST kedua.
+    let initPromise: Promise<InitWidgetSessionResult>;
+    if (
+      sessionInitRef.current &&
+      sessionInitRef.current.pathname === pathname
+    ) {
+      initPromise = sessionInitRef.current.promise;
+    } else {
+      initPromise = initWidgetSession({
+        fetchFn: widgetFetch,
+        storage: getWidgetSessionStorage(),
+        pathname,
+        pageContext: pageInfo,
+      });
+      sessionInitRef.current = { pathname, promise: initPromise };
+      // Bersihkan ref begitu selesai agar init berikutnya (mis. sesudah
+      // reset manual) tidak menempel pada promise lama.
+      void initPromise.then(
+        () => {
+          if (sessionInitRef.current?.promise === initPromise) {
+            sessionInitRef.current = null;
           }
-          if (data.suggestions) {
-            setPageSuggestions(data.suggestions);
+        },
+        () => {
+          if (sessionInitRef.current?.promise === initPromise) {
+            sessionInitRef.current = null;
           }
-
-          // 3. Setel pesan sambutan baru yang khusus sesuai konteks halaman baru
-          const greeting = generateWelcomeGreeting(data.user?.role || 'guest', data.user?.name, pathname);
-          setMessages([
-            {
-              id: `welcome-${pathname}-${Date.now()}`,
-              role: 'assistant',
-              message: greeting,
-              metadata: {
-                quickSuggestions: data.suggestions || [],
-              },
-            },
-          ]);
         }
-      } catch (err) {
-        if (!isCancelled) {
-          console.error('Gagal menginisialisasi sesi chat widget untuk halaman ini:', err);
-        }
-      }
+      );
     }
 
-    initSessionForPage();
+    void initPromise.then((result) => {
+      if (isCancelled) return;
+      if (!result.ok) {
+        setErrorNotice(result.message);
+        return;
+      }
+      sessionReadyRef.current = pathname;
+      setSessionUuid(result.data.sessionUuid);
+      setSessionId(result.data.sessionId);
+      setUserRole(result.data.userRole);
+      setUserName(result.data.userName);
+      setPageSuggestions(result.data.suggestions as QuickSuggestion[]);
+
+      // Setel pesan sambutan baru yang khusus sesuai konteks halaman baru
+      const greeting = generateWelcomeGreeting(
+        result.data.userRole,
+        result.data.userName,
+        pathname
+      );
+      setMessages([
+        {
+          id: `welcome-${pathname}-${Date.now()}`,
+          role: 'assistant',
+          message: greeting,
+          metadata: {
+            quickSuggestions: result.data.suggestions as QuickSuggestion[],
+          },
+        },
+      ]);
+    });
 
     return () => {
       isCancelled = true;
     };
-  }, [pathname]);
+  }, [pathname, isOpen]);
 
   function generateWelcomeGreeting(role: string, name?: string | null, path?: string): string {
     const p = (path || '/').toLowerCase();
@@ -557,41 +627,47 @@ export function ChatbotWidget() {
     }
   };
 
-  // Reset Percakapan
+  // Reset Percakapan (tombol eksplisit) — paksa sesi baru.
   const handleNewSession = async () => {
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem('bantuin_chat_uuid');
-    }
+    sessionInitRef.current = null;
+    sessionReadyRef.current = null;
     setSessionUuid(null);
+    setSessionId(undefined);
     setMessages([]);
     setIsLoading(true);
+    setErrorNotice(null);
     try {
       const pageInfo = extractCurrentInterfaceSummary();
-      const res = await fetch('/api/chat/session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          pageContext: pageInfo,
-        }),
+      const result = await initWidgetSession({
+        fetchFn: widgetFetch,
+        storage: getWidgetSessionStorage(),
+        pathname,
+        pageContext: pageInfo,
+        forceNew: true,
       });
-      const data = await res.json();
-      if (data.success && data.session) {
-        setSessionUuid(data.session.sessionUuid);
-        setSessionId(data.session.id);
-        const greeting = generateWelcomeGreeting(userRole, userName, pathname);
-        setMessages([
-          {
-            id: 'welcome-reset',
-            role: 'assistant',
-            message: `Percakapan baru telah dimulai.\n\n${greeting}`,
-            metadata: {
-              quickSuggestions: data.suggestions || pageSuggestions,
-            },
-          },
-        ]);
+      if (!result.ok) {
+        setErrorNotice(result.message);
+        return;
       }
+      sessionReadyRef.current = pathname;
+      setSessionUuid(result.data.sessionUuid);
+      setSessionId(result.data.sessionId);
+      const greeting = generateWelcomeGreeting(userRole, userName, pathname);
+      const newSuggestions = result.data.suggestions as QuickSuggestion[];
+      setMessages([
+        {
+          id: 'welcome-reset',
+          role: 'assistant',
+          message: `Percakapan baru telah dimulai.\n\n${greeting}`,
+          metadata: {
+            quickSuggestions:
+              newSuggestions.length > 0 ? newSuggestions : pageSuggestions,
+          },
+        },
+      ]);
     } catch (err) {
       console.error(err);
+      setErrorNotice('Terjadi kendala jaringan saat menghubungi asisten AI.');
     } finally {
       setIsLoading(false);
     }
