@@ -23,11 +23,11 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // 2. Jalur Autentikasi Publik Admin (Login Page & Endpoint Login/Logout)
+  // 2. Jalur autentikasi admin yang tidak butuh sesi (endpoint logout).
+  // Endpoint login admin terpisah (/api/admin/auth/login) DIHAPUS —
+  // login semua peran memakai POST /api/auth/login (panel terpadu).
   const isAdminLoginPage = pathname === '/admin/login';
-  const isAdminAuthApi =
-    pathname === '/api/admin/auth/login' ||
-    pathname === '/api/admin/auth/logout';
+  const isAdminAuthApi = pathname === '/api/admin/auth/logout';
 
   if (isAdminAuthApi) {
     return NextResponse.next();
@@ -38,18 +38,23 @@ export async function middleware(request: NextRequest) {
   const adminSession = adminToken ? await verifyAdminToken(adminToken) : null;
   const isAdminAuthenticated = adminSession !== null && adminSession.role === 'admin';
 
-  // 4. Kasus Khusus: Halaman Login Admin (/admin/login)
+  // 4. Rute lama /admin/login: panel login admin terpisah DIHAPUS — satu
+  // panel login untuk semua peran ada di /login. Alihkan ke sana agar
+  // bookmark/tautan lama tetap berfungsi. callbackUrl diteruskan hanya
+  // bila berupa path relatif internal (mencegah open redirect).
   if (isAdminLoginPage) {
-    if (isAdminAuthenticated) {
-      return NextResponse.redirect(new URL('/admin', request.url));
+    const loginUrl = new URL('/login', request.url);
+    const callbackUrl = request.nextUrl.searchParams.get('callbackUrl');
+    if (callbackUrl && callbackUrl.startsWith('/') && !callbackUrl.startsWith('//')) {
+      loginUrl.searchParams.set('callbackUrl', callbackUrl);
     }
-    return NextResponse.next();
+    return NextResponse.redirect(loginUrl);
   }
 
   // 5. Proteksi Seluruh Halaman Dashboard Admin (/admin/...)
   if (pathname.startsWith('/admin')) {
     if (!isAdminAuthenticated) {
-      const loginUrl = new URL('/admin/login', request.url);
+      const loginUrl = new URL('/login', request.url);
       if (pathname !== '/admin') {
         loginUrl.searchParams.set('callbackUrl', pathname);
       }
@@ -95,13 +100,18 @@ export async function middleware(request: NextRequest) {
     if (isAdminAuthenticated) {
       return NextResponse.redirect(new URL('/admin', request.url));
     }
-    if (isUserAuthenticated && userSession.isVerified) {
+    if (isUserAuthenticated && userSession.isVerified && userSession.role !== 'admin') {
       const targetUrl =
         userSession.role === 'technician'
           ? '/technician/dashboard'
           : '/customer/dashboard';
       return NextResponse.redirect(new URL(targetUrl, request.url));
     }
+    // Token pengguna ber-role 'admin' (terbitan lama / tidak konsisten)
+    // TIDAK diarahkan ke dasbor — pemiliknya harus login ulang dengan
+    // kata sandi di panel ini agar memperoleh cookie admin yang sah.
+    // Mengarahkannya ke /customer/dashboard akan menjebak admin dalam
+    // loop redirect /login <-> /customer/dashboard <-> /admin.
     return NextResponse.next();
   }
 
