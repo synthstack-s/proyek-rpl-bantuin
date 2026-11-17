@@ -48,6 +48,23 @@
  * dijalankan), pemeriksaan blocklist dilewati dengan warning — revalidasi
  * role/status + token_version tetap berjalan. Kegagalan dicatat ke log.
  *
+ * SATU KUERI PER PEMERIKSAAN: fungsi ini dipanggil di SETIAP pemanggilan
+ * API yang memakai getUserSession/getAdminSession, sehingga satu muat
+ * halaman admin (4–5 API bersamaan) berarti 4–5 pemeriksaan. Versi lama
+ * memakai 2 kueri berurutan per pemeriksaan (baris pengguna, lalu
+ * blocklist) — di bawah beban burst, 8–10 kueri sesi bersaing untuk 10
+ * koneksi pool dan kueri lain (mis. health check) harus antre (teramati:
+ * GET /api/health 1846ms, application-code 1795ms — sebagian besar waktu
+ * menunggu koneksi pool). Karena itu pemeriksaan blocklist digabung ke
+ * kueri pengguna lewat subkueri EXISTS: 1 kueri per pemeriksaan, tanpa
+ * mengubah semantik apa pun (urutan penolakan, alasan, dan perilaku
+ * fail-open persis sama; bila tabel `revoked_tokens` belum ada, kueri
+ * gabungan gagal dengan ER_NO_SUCH_TABLE dan pemeriksaan jatuh kembali
+ * ke kueri pengguna saja + warning — sama seperti isTokenRevoked yang
+ * fail-open sebelumnya). Cache sesi sengaja TIDAK dipakai: mencache
+ * hasil pemeriksaan akan menunda pencabutan (T5/T6) sampai cache
+ * kedaluwarsa.
+ *
  * Modul ini Node-only (mengimpor @/lib/db → mysql2) dan TIDAK BOLEH
  * diimpor — langsung maupun transitif — oleh kode Edge runtime
  * (middleware). Karena itu auth.ts dipisah: fungsi token yang dipakai
@@ -202,9 +219,16 @@ export async function pruneRevokedTokens(): Promise<number> {
  * Fail-open bila DB tidak dapat diakses: versi/role/logout tidak mungkin
  * berubah saat DB tidak terjangkau (semuanya butuh tulis DB), dan
  * memblokir semua sesi saat outage akan melumpuhkan aplikasi. Kegagalan
- * dicatat ke log. Pemeriksaan blocklist sendiri juga fail-open (lihat
- * `isTokenRevoked`) sehingga tabel `revoked_tokens` yang belum ada
- * tidak mematahkan revalidasi role/status + token_version.
+ * dicatat ke log. Pemeriksaan blocklist sendiri juga fail-open: bila
+ * tabel `revoked_tokens` belum ada (migrasi 005 belum dijalankan), kueri
+ * gabungan gagal dengan ER_NO_SUCH_TABLE dan pemeriksaan jatuh kembali
+ * ke kueri pengguna saja + warning, sehingga revalidasi role/status +
+ * token_version tetap berjalan.
+ *
+ * SATU kueri per pemeriksaan (bukan dua): pemeriksaan blocklist digabung
+ * ke kueri pengguna lewat subkueri EXISTS bila token membawa `jti`
+ * (lihat header modul). Urutan penolakan dan teks alasan persis sama
+ * seperti versi dua-kueri sebelumnya.
  */
 export async function checkSessionRevocation(payload: {
   userId: number;
@@ -212,10 +236,39 @@ export async function checkSessionRevocation(payload: {
   jti?: string;
 }): Promise<SessionRevocationCheck> {
   try {
-    const rows = await query<any[]>(
-      `SELECT token_version, role, status, is_verified, deleted_at FROM users WHERE id = ? LIMIT 1`,
-      [payload.userId]
-    );
+    // Satu kueri: baris pengguna + status blocklist (EXISTS) sekaligus.
+    // Tanpa jti (token pra-T6), subkueri blocklist tidak ada gunanya —
+    // pakai kueri pengguna saja, persis seperti sebelumnya.
+    let rows: any[] | undefined;
+    if (payload.jti) {
+      try {
+        rows = await query<any[]>(
+          `SELECT token_version, role, status, is_verified, deleted_at,
+                  EXISTS(SELECT 1 FROM revoked_tokens WHERE jti = ? AND expires_at > NOW()) AS revoked
+           FROM users WHERE id = ? LIMIT 1`,
+          [payload.jti, payload.userId]
+        );
+      } catch (err: any) {
+        // Tabel revoked_tokens belum ada (migrasi 005 belum dijalankan):
+        // jatuh kembali ke kueri pengguna saja — blocklist dilewati dengan
+        // warning, revalidasi role/status + token_version tetap berjalan.
+        // Error lain (mis. DB down) dilempar ke fail-open di bawah.
+        if (err?.code === 'ER_NO_SUCH_TABLE') {
+          console.warn('[Token Revocation] Tabel revoked_tokens belum ada (fail-open, blocklist dilewati — jalankan migrasi 005):', err?.message || err);
+          rows = await query<any[]>(
+            `SELECT token_version, role, status, is_verified, deleted_at FROM users WHERE id = ? LIMIT 1`,
+            [payload.userId]
+          );
+        } else {
+          throw err;
+        }
+      }
+    } else {
+      rows = await query<any[]>(
+        `SELECT token_version, role, status, is_verified, deleted_at FROM users WHERE id = ? LIMIT 1`,
+        [payload.userId]
+      );
+    }
     if (!rows || rows.length === 0) {
       return { valid: false, reason: 'pengguna tidak ditemukan' };
     }
@@ -233,10 +286,11 @@ export async function checkSessionRevocation(payload: {
     if (currentVersion !== effectiveTokenVersion) {
       return { valid: false, reason: 'sesi dicabut (kata sandi diubah setelah token diterbitkan)' };
     }
-    // T6: blocklist logout — pemeriksaannya sendiri fail-open, jadi tabel
-    // yang belum ada (migrasi 005 belum dijalankan) tidak mematahkan
-    // pemeriksaan di atas.
-    if (payload.jti && (await isTokenRevoked(payload.jti))) {
+    // T6: blocklist logout — flag `revoked` berasal dari subkueri EXISTS
+    // di kueri yang sama (bukan kueri kedua). Urutan penolakan tidak
+    // berubah: blocklist tetap dicek terakhir, setelah keberadaan akun,
+    // status, dan token_version.
+    if (user.revoked) {
       return { valid: false, reason: 'sesi telah dicabut (pengguna sudah logout)' };
     }
     return {
