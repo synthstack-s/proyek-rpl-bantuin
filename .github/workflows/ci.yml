@@ -83,6 +83,7 @@ jobs:
           mysql -h 127.0.0.1 -uroot -proot bantuin_db < database/migrations/004_add_token_version_to_users.sql
           mysql -h 127.0.0.1 -uroot -proot bantuin_db < database/migrations/005_add_revoked_tokens.sql
           mysql -h 127.0.0.1 -uroot -proot bantuin_db < database/migrations/006_whatsapp_notifications.sql
+          mysql -h 127.0.0.1 -uroot -proot bantuin_db < database/migrations/007_disable_daily_ai_quota.sql
           mysql -h 127.0.0.1 -uroot -proot bantuin_db < database/seed.sql
 
       - name: Verifikasi database
