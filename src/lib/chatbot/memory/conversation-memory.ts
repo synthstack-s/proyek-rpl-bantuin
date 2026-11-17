@@ -30,6 +30,13 @@ export interface ActiveConversationState {
 }
 
 // In-memory Session State Cache (Terisolasi per sessionId)
+// F15: batas atas jumlah sesi yang disimpan — registry ini sebelumnya
+// tumbuh tanpa batas (tanpa TTL/pembersihan), sehingga setiap sesi chat
+// baru menambah entri selamanya di memori proses Next.js. Saat batas
+// tercapai, sesi yang paling lama tidak diperbarui dihapus lebih dulu
+// (memori percakapan adalah cache: sesi yang terhapus dibangun ulang
+// dari entitas pesan berikutnya).
+const MAX_SESSION_STATES = 1000;
 const sessionStateRegistry = new Map<number, ActiveConversationState>();
 
 /**
@@ -39,6 +46,17 @@ export function getOrCreateConversationMemory(sessionId: number, userId?: number
   let state = sessionStateRegistry.get(sessionId);
 
   if (!state) {
+    if (sessionStateRegistry.size >= MAX_SESSION_STATES) {
+      let oldestId: number | undefined;
+      let oldestUpdatedAt = Infinity;
+      for (const [id, entry] of sessionStateRegistry) {
+        if (entry.updatedAt < oldestUpdatedAt) {
+          oldestUpdatedAt = entry.updatedAt;
+          oldestId = id;
+        }
+      }
+      if (oldestId !== undefined) sessionStateRegistry.delete(oldestId);
+    }
     state = {
       sessionId,
       userId: userId || null,
