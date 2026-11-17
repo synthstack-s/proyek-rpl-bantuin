@@ -463,7 +463,7 @@ export default async function HomePage() {
             <Link href="/register/technician" className="hover:text-[#FFFBF4] transition-colors">
               Pendaftaran Mitra
             </Link>
-            <Link href="/admin/login" className="hover:text-[#FFFBF4] transition-colors">
+            <Link href="/login" className="hover:text-[#FFFBF4] transition-colors">
               Staf Administrasi
             </Link>
           </div>
