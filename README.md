@@ -10,8 +10,8 @@
 | Nama | Soleh |
 | NIM | 41257171 |
 | Kelas | TI-1C |
-| Kelompok | *(menyusul)* |
-| Tema Topik Kelompok | *(menyusul)* |
+| Kelompok | Hambalang |
+| Tema Topik Kelompok | Jasa Perbaikan Peralatan Rumah |
 | Dosen Pengampu | Yudhistira Arie Wijaya, M.Kom., CDS. |
 
 ## Tentang BANTUIN
