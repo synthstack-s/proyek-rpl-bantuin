@@ -1593,6 +1593,37 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
     } else if (/^(berapa\s+)?(total\s+|jumlah\s+)?teknisi\s+aktif$/.test(singleMetric)) {
       const stats = await DataService.getAdminUserStats();
       directReply = stats === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : `Total Teknisi Aktif: ${stats.technicians.active}`;
+    } else if (/^(berapa\s+)?(total\s+|jumlah\s+)?teknisi\s+terverifikasi$/.test(singleMetric)) {
+      // DASH-2 — hitungan yang SAMA dengan kartu "Teknisi Terverifikasi"
+      // di dasbor admin (technician_profiles.verified_status).
+      const verif = await DataService.getAdminTechnicianVerificationStats();
+      directReply = verif === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : `Total Teknisi Terverifikasi: ${verif.verified} teknisi`;
+    } else if (/^(berapa\s+)?(total\s+|jumlah\s+)?teknisi\s+(pending|menunggu\s+verifikasi|belum\s+terverifikasi)$/.test(singleMetric)) {
+      const verif = await DataService.getAdminTechnicianVerificationStats();
+      directReply = verif === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : `Teknisi Menunggu Verifikasi Dokumen: ${verif.pending} teknisi`;
+    } else if (/^(status\s+)?verifikasi\s+teknisi$/.test(singleMetric)) {
+      const verif = await DataService.getAdminTechnicianVerificationStats();
+      directReply = verif === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : `📋 **Status Verifikasi Dokumen Teknisi:**\n- Terverifikasi: **${verif.verified} teknisi**\n- Menunggu Verifikasi: **${verif.pending} teknisi**\n- Ditolak: **${verif.rejected} teknisi**\n- Ditangguhkan: **${verif.suspended} teknisi**`;
+    } else if (/^(tingkat\s+)?kepuasan(\s+pelanggan)?$/.test(singleMetric)) {
+      // DASH-2 — angka yang SAMA dengan kartu kepuasan di dasbor admin
+      // (rata-rata rating ulasan terbit / 5).
+      const sat = await DataService.getAdminSatisfactionStats();
+      directReply = sat === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : sat.reviewCount === 0 ? 'Belum ada ulasan pelanggan, sehingga tingkat kepuasan belum dapat dihitung.' : `Tingkat Kepuasan Pelanggan: ${sat.satisfactionRate}% (rata-rata rating ${sat.avgRating.toFixed(1)} dari ${sat.reviewCount} ulasan)`;
+    } else if (/^rata-rata\s+nilai\s+(pesanan|order|tiket)$/.test(singleMetric)) {
+      // DASH-2 — definisi yang SAMA dengan "Rerata Tiket" di dasbor
+      // admin: pendapatan N31 dibagi jumlah invoice yang terbayar.
+      const finance = await DataService.getAdminFinancialAnalytics();
+      directReply = finance === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : finance.settledInvoiceCount === 0 ? 'Belum ada invoice yang terbayar, sehingga rata-rata nilai pesanan belum dapat dihitung.' : `Rata-rata Nilai Pesanan Terbayar: Rp ${Math.round(finance.totalRevenuePaid / finance.settledInvoiceCount).toLocaleString('id-ID')} (dari ${finance.settledInvoiceCount} invoice terbayar)`;
+    } else if (/^pendapatan\s+per\s+kategori$|^kategori\s+terlaris$/.test(singleMetric)) {
+      // DASH-2 — angka yang SAMA dengan tab "Kategori Peralatan" di
+      // dasbor admin (pesanan + pendapatan N31 per kategori).
+      const cats = await DataService.getAdminCategoryRevenue();
+      directReply = cats === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : cats.length === 0 ? 'Belum ada kategori aktif yang tercatat.' : `💰 **Pendapatan per Kategori:**\n` + cats.map((c, i) => `${i + 1}. **${c.name}**: ${c.orderCount} pesanan — Rp ${c.totalRevenue.toLocaleString('id-ID')}`).join('\n');
+    } else if (/^teknisi\s+terbaik$/.test(singleMetric)) {
+      // DASH-2 — daftar yang SAMA dengan panel "Teknisi Terbaik
+      // BANTUIN" di dasbor admin (4 teratas berdasarkan rating).
+      const top = await DataService.getAdminTopTechnicians();
+      directReply = top === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : top.length === 0 ? 'Belum ada teknisi terverifikasi yang tercatat.' : `🏆 **Teknisi Terbaik BANTUIN:**\n` + top.map((t, i) => `${i + 1}. **${t.name}** — ${t.ratingCount > 0 ? `⭐ ${t.ratingAvg.toFixed(1)} (${t.ratingCount} ulasan)` : 'belum ada ulasan'} — ${t.completedJobs} servis selesai`).join('\n');
     }
 
     // 0a. Daftar nama pengguna (mode list lugas: "siapa saja nama customer" -> list nama saja)
@@ -1641,16 +1672,28 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
         // N6: jawab dengan hitungan bulan kalender berjalan.
         directReply = `Pesanan Bulan Ini: ${overview.orders.thisMonth} pesanan`;
       } else {
-        // Tampilan dashboard lengkap: keuangan + beban kerja teknisi.
-        // Masing-masing bisa null (DB error) — tampilkan per-bagian dengan
-        // aman alih-alih crash (N1: null = database tidak dapat diakses).
-        const [finance, workload] = await Promise.all([
+        // Tampilan dashboard lengkap: keuangan + statistik pengguna +
+        // kepuasan pelanggan. Masing-masing bisa null (DB error) —
+        // tampilkan per-bagian dengan aman alih-alih crash (N1: null =
+        // database tidak dapat diakses).
+        // DASH-2 — "Mitra Teknisi Terdaftar" memakai total SEMUA teknisi
+        // (getAdminUserStats), BUKAN workload.length: daftar beban kerja
+        // dibatasi 10 teratas sehingga jumlahnya salah bila teknisi
+        // lebih dari 10. "Rata-rata Rating" memakai rata-rata ulasan
+        // terbit (getAdminSatisfactionStats) — definisi yang SAMA dengan
+        // kartu kepuasan di dasbor admin; rata-rata lama (atas 10 teknisi
+        // terbebani, termasuk yang belum punya ulasan dengan rating 0.0)
+        // merendahkan angka secara tidak jujur.
+        const [finance, userStats, satisfaction] = await Promise.all([
           DataService.getAdminFinancialAnalytics(),
-          DataService.getAdminTechnicianWorkload(),
+          DataService.getAdminUserStats(),
+          DataService.getAdminSatisfactionStats(),
         ]);
-        const avgRating = workload && workload.length > 0
-          ? (workload.reduce((sum, w) => sum + w.ratingAvg, 0) / workload.length).toFixed(1)
-          : '0.0';
+        const ratingLine = satisfaction === null
+          ? 'tidak dapat dibaca saat ini'
+          : satisfaction.reviewCount === 0
+            ? 'belum ada ulasan'
+            : `⭐ ${satisfaction.avgRating.toFixed(1)} dari ${satisfaction.reviewCount} ulasan (kepuasan ${satisfaction.satisfactionRate}%)`;
         directReply = `📊 **Data Tampilan Dashboard Admin (Live Basis Data MySQL):**
 
 - **Ringkasan Kartu Metrik Utama:**
@@ -1670,12 +1713,12 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
   * **Pesanan Bulan Ini:** **${overview.orders.thisMonth} pesanan**
   * **Total Pendapatan Terkonfirmasi (Lunas):** **${finance ? `Rp ${finance.totalRevenuePaid.toLocaleString('id-ID')}` : 'tidak dapat dibaca saat ini'}**
   * **Piutang Invoice Belum Bayar:** **${finance ? `Rp ${finance.totalUnpaidAmount.toLocaleString('id-ID')}` : 'tidak dapat dibaca saat ini'}**
-  * **Mitra Teknisi Terdaftar:** **${workload ? `${workload.length} orang` : 'tidak dapat dibaca saat ini'}** (Rata-rata Rating: ⭐ ${avgRating})
+  * **Mitra Teknisi Terdaftar:** **${userStats ? `${userStats.technicians.total} orang` : 'tidak dapat dibaca saat ini'}** (Rata-rata Rating: ${ratingLine})
   * **Pelanggan Aktif:** **${overview.customers.active} akun**
   * **Pengaduan Terbuka (Complaints):** **${overview.complaints.active} kasus**
 
 - **Pertanggungjawaban Data:**
-  * Angka pesanan bersumber langsung dari kueri tabel \`repair_orders\` sesuai status terkini.
+  * Angka pesanan bersumber langsung dari kueri tabel \`repair_requests\` sesuai status terkini.
   * Angka keuangan dihitung dari pembayaran berstatus settlement dikurangi refund.
   * Seluruh data tersinkronisasi langsung dengan kartu statistik di layar dashboard.`;
       }
