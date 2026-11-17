@@ -50,11 +50,11 @@ async function runCategoryTestSuite() {
   // UJI 2: Autentikasi Admin untuk Memperoleh Sesi
   // -----------------------------------------------------------------
   {
-    const res = await fetch(`${BASE_URL}/api/admin/auth/login`, {
+    const res = await fetch(`${BASE_URL}/api/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        email: ADMIN_EMAIL,
+        identifier: ADMIN_EMAIL,
         password: ADMIN_PASSWORD,
       }),
     });

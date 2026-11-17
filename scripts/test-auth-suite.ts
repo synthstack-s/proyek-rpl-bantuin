@@ -396,15 +396,15 @@ async function runFullAuthTestSuite() {
     );
 
     // -------------------------------------------------------------------------
-    // 5. REGRESI LOGIN ADMINISTRATOR (PASTIKAN TIDAK RUSAK!)
+    // 5. REGRESI LOGIN ADMINISTRATOR VIA PANEL TERPADU (PASTIKAN TIDAK RUSAK!)
     // -------------------------------------------------------------------------
-    console.log('\n--- 5. PENGUJIAN REGRESI LOGIN ADMINISTRATOR ---');
+    console.log('\n--- 5. PENGUJIAN REGRESI LOGIN ADMINISTRATOR (PANEL TERPADU) ---');
 
-    const adminLoginRes = await fetch(`${BASE_URL}/api/admin/auth/login`, {
+    const adminLoginRes = await fetch(`${BASE_URL}/api/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        email: ADMIN_EMAIL,
+        identifier: ADMIN_EMAIL,
         password: ADMIN_PASSWORD,
       }),
     });
@@ -438,7 +438,7 @@ async function runFullAuthTestSuite() {
       'Proteksi Role Lintas Akun',
       'Customer Ditolak Mengakses Halaman Administrator (/admin)',
       unauthorizedAdminRes.status === 307,
-      `Status HTTP: ${unauthorizedAdminRes.status} (Redirect ke /admin/login)`
+      `Status HTTP: ${unauthorizedAdminRes.status} (Redirect ke /login)`
     );
 
     // -------------------------------------------------------------------------

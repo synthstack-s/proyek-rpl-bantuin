@@ -1,20 +1,10 @@
 import { z } from 'zod';
 import { isValidIndonesianPhone, normalizePhoneNumber } from '@/lib/fonnte';
 
-export const adminLoginSchema = z.object({
-  email: z
-    .string()
-    .trim()
-    .min(1, 'Email wajib diisi')
-    .email('Format alamat email tidak valid'),
-  password: z
-    .string()
-    .min(1, 'Kata sandi wajib diisi')
-    .min(8, 'Kata sandi minimal 8 karakter'),
-  rememberMe: z.boolean().optional().default(false),
-});
-
-export type AdminLoginInput = z.infer<typeof adminLoginSchema>;
+// Skema login admin terpisah (adminLoginSchema) DIHAPUS bersama panel
+// login admin terpisah — semua peran login lewat userLoginSchema di
+// bawah (identifier = email atau nomor WhatsApp) dan satu endpoint
+// POST /api/auth/login.
 
 // Password regex: minimal 8 karakter, ada huruf besar, huruf kecil, dan angka
 export const passwordPolicy = z

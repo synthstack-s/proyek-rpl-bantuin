@@ -131,7 +131,9 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
     } catch (err) {
       console.error('Logout error:', err);
     } finally {
-      router.push('/admin/login');
+      // Satu panel login untuk semua peran — admin yang logout kembali
+      // ke /login (bukan lagi ke panel login admin terpisah).
+      router.push('/login');
       router.refresh();
       setIsLoggingOut(false);
     }

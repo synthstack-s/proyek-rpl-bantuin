@@ -1,7 +1,6 @@
 'use client';
 
 import { useState } from 'react';
-import { usePathname } from 'next/navigation';
 import { Sidebar } from '@/components/admin/Sidebar';
 import { Header } from '@/components/admin/Header';
 
@@ -10,13 +9,7 @@ export default function AdminLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const pathname = usePathname();
   const [sidebarOpen, setSidebarOpen] = useState(false);
-
-  // Jika halaman login, tampilkan layar penuh tanpa sidebar dan header
-  if (pathname === '/admin/login') {
-    return <>{children}</>;
-  }
 
   return (
     <div className="min-h-screen bg-[#FAFAFA] dark:bg-[#11120D] text-[#09090B] dark:text-[#FFFBF4] flex selection:bg-[#D8CFBC]/25 selection:text-[#FFFBF4] admin-theme-scope">

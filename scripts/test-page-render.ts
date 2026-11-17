@@ -18,13 +18,13 @@ async function verifyPageRendering() {
   console.log('1. Proteksi Halaman Unauthenticated:');
   console.log(`   Status: ${unauthRes.status} (Harus 307 Redirect)`);
   const location = unauthRes.headers.get('location');
-  console.log(`   Location: ${location} (Harus ke /admin/login?callbackUrl=%2Fadmin%2Fservices)\n`);
+  console.log(`   Location: ${location} (Harus ke /login?callbackUrl=%2Fadmin%2Fservices)\n`);
 
   // 2. Login untuk memperoleh cookie sesi HttpOnly
-  const loginRes = await fetch(`${BASE_URL}/api/admin/auth/login`, {
+  const loginRes = await fetch(`${BASE_URL}/api/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: ADMIN_EMAIL, password: ADMIN_PASSWORD }),
+    body: JSON.stringify({ identifier: ADMIN_EMAIL, password: ADMIN_PASSWORD }),
   });
   const setCookie = loginRes.headers.get('set-cookie');
   const sessionCookie = setCookie?.split(';')[0] || '';
