@@ -375,7 +375,14 @@ export class AIProviderManager {
       // hitungan threshold — kegagalan tetap dicatat di log/metrik di bawah.
       this.recordCircuitFailure(primaryProvider, globalSettings, normalizedErr);
 
-      console.warn(`[AI Provider Manager] Gagal pada provider utama (${primaryProvider}): ${normalizedErr.sanitizedMessage}`);
+      // P7: sertakan status HTTP bila diketahui — tanpanya, log server
+      // hanya menulis pesan ("Saldo Habis" vs 401 vs 429 tidak bisa
+      // dibedakan) dan admin tidak bisa mendiagnosis kunci/kuota dari log
+      // saja. normalizedErr.httpStatusCode berasal dari normalizeError
+      // adapter (null bila bukan error HTTP).
+      const primaryHttpTag = normalizedErr.httpStatusCode ? ` (HTTP ${normalizedErr.httpStatusCode})` : '';
+
+      console.warn(`[AI Provider Manager] Gagal pada provider utama (${primaryProvider}${primaryHttpTag}): ${normalizedErr.sanitizedMessage}`);
 
       // 4. Evaluasi apakah memenuhi syarat Automatic Fallback
       const canFallback =
@@ -389,7 +396,7 @@ export class AIProviderManager {
           request,
           fallbackConfig,
           primaryProvider,
-          normalizedErr.sanitizedMessage,
+          `${normalizedErr.sanitizedMessage}${primaryHttpTag}`,
           globalSettings
         );
       }
@@ -406,7 +413,7 @@ export class AIProviderManager {
         userRole: request.userRole,
       });
 
-      throw new Error(`[${activeConfig.name} Error] ${normalizedErr.sanitizedMessage}`);
+      throw new Error(`[${activeConfig.name} Error]${primaryHttpTag} ${normalizedErr.sanitizedMessage}`);
     }
   }
 
@@ -489,8 +496,9 @@ export class AIProviderManager {
         userRole: request.userRole,
       });
 
+      const fallbackHttpTag = normFallbackErr.httpStatusCode ? ` (HTTP ${normFallbackErr.httpStatusCode})` : '';
       throw new Error(
-        `Provider utama (${fallbackFrom}) gagal, dan provider cadangan (${fallbackProvider}) juga gagal: ${normFallbackErr.sanitizedMessage}`
+        `Provider utama (${fallbackFrom}) gagal, dan provider cadangan (${fallbackProvider}${fallbackHttpTag}) juga gagal: ${normFallbackErr.sanitizedMessage}`
       );
     }
   }
