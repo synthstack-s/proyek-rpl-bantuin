@@ -1,3 +1,22 @@
+/**
+ * POST /api/auth/login — SATU-SATUNYA endpoint login BANTUIN.
+ *
+ * Satu panel login (/login) dan satu endpoint login untuk SEMUA peran
+ * (admin, pelanggan, teknisi). Endpoint login admin terpisah
+ * (POST /api/admin/auth/login) dihapus — perilakunya yang benar
+ * dilestarikan di sini:
+ * - Admin login hanya dengan kata sandi (TANPA gerbang verifikasi OTP);
+ *   gerbang OTP (F-05) hanya berlaku untuk pelanggan/teknisi.
+ * - Login admin yang berhasil dicatat ke audit log (aksi ADMIN_LOGIN).
+ * - Admin mendapat token + cookie admin (bukan token pengguna) dan
+ *   redirectUrl '/admin'.
+ *
+ * Peran SELALU dibaca dari database (users.role) — tidak pernah dari
+ * field yang dikirim klien. Urutan pemeriksaan: rate limit -> cari akun
+ * -> kata sandi -> status akun -> (non-admin) verifikasi OTP. Status akun
+ * baru diungkap sesudah kata sandi benar, agar keberadaan/status akun
+ * tidak bocor ke penelepon yang tidak terautentikasi.
+ */
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import {
@@ -6,12 +25,17 @@ import {
   getUserCookieOptions,
   createAdminToken,
   getAdminCookieOptions,
+  DEFAULT_TOKEN_EXPIRY,
+  REMEMBER_ME_TOKEN_EXPIRY,
+  DEFAULT_COOKIE_MAX_AGE,
+  REMEMBER_ME_COOKIE_MAX_AGE,
 } from '@/lib/auth';
 import { userLoginSchema } from '@/lib/validations/auth';
 import { getUserTokenVersion } from '@/lib/token-revocation';
 import { checkLoginRateLimit, recordFailedLoginAttempt, clearLoginRateLimit } from '@/lib/rate-limiter';
 import { normalizePhoneNumber, maskPhoneNumber } from '@/lib/fonnte';
 import { createAndSendOtp } from '@/lib/otp';
+import { recordAdminAudit } from '@/lib/audit';
 
 export async function POST(request: NextRequest) {
   try {
@@ -38,6 +62,12 @@ export async function POST(request: NextRequest) {
     const { identifier, password, rememberMe } = validation.data;
     const trimmedId = identifier.trim().toLowerCase();
 
+    // IP klien untuk audit log login admin (informasional).
+    const clientIp =
+      request.headers.get('x-forwarded-for')?.split(',')[0].trim() ||
+      request.headers.get('x-real-ip') ||
+      '127.0.0.1';
+
     // 2. Cek perlindungan brute-force via sliding-window rate limiter
     const rateCheck = checkLoginRateLimit(trimmedId);
     if (!rateCheck.allowed) {
@@ -46,14 +76,20 @@ export async function POST(request: NextRequest) {
           success: false,
           message: `Terlalu banyak percobaan gagal. Akun diblokir sementara. Silakan coba lagi dalam ${rateCheck.retryAfterSeconds} detik.`,
         },
-        { status: 429 }
+        {
+          status: 429,
+          headers: {
+            'Retry-After': String(rateCheck.retryAfterSeconds || 60),
+          },
+        }
       );
     }
 
     // 3. Normalisasi jika identifier adalah nomor telepon
     const normalizedPhone = normalizePhoneNumber(trimmedId);
 
-    // 4. Cari pengguna berdasarkan email atau nomor telepon
+    // 4. Cari pengguna berdasarkan email atau nomor telepon.
+    // Akun yang dihapus (soft-delete) tidak dapat login.
     const users = await query<any[]>(
       `SELECT u.id, u.uuid, u.email, u.phone_number, u.password_hash, u.role, u.status, u.is_verified,
               cp.full_name AS customer_name,
@@ -62,7 +98,7 @@ export async function POST(request: NextRequest) {
        FROM users u
        LEFT JOIN customer_profiles cp ON u.id = cp.user_id
        LEFT JOIN technician_profiles tp ON u.id = tp.user_id
-       WHERE u.email = ? OR u.phone_number = ?
+       WHERE (u.email = ? OR u.phone_number = ?) AND u.deleted_at IS NULL
        LIMIT 1`,
       [trimmedId, normalizedPhone]
     );
@@ -107,8 +143,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 7. Cek verifikasi kontak WhatsApp
-    if (!user.is_verified) {
+    // 7. Cek verifikasi kontak WhatsApp — HANYA untuk pelanggan/teknisi.
+    // Admin login hanya dengan kata sandi (perilaku endpoint admin lama);
+    // akun admin dibuat lewat seed/CLI dan tidak melewati alur OTP.
+    if (user.role !== 'admin' && !user.is_verified) {
       // Kirim ulang kode OTP untuk verifikasi sebelum mengizinkan login
       const otpRes = await createAndSendOtp({
         userId: user.id,
@@ -146,6 +184,20 @@ export async function POST(request: NextRequest) {
 
     if (user.role === 'admin') {
       redirectUrl = '/admin';
+
+      // Catat login admin ke audit log (aksi ADMIN_LOGIN), seperti yang
+      // dilakukan endpoint login admin lama. recordAdminAudit tidak
+      // pernah melempar — kegagalan audit tidak membatalkan login.
+      await recordAdminAudit({
+        adminUserId: user.id,
+        action: 'ADMIN_LOGIN',
+        entityName: 'users',
+        entityId: user.id,
+        ipAddress: clientIp,
+        userAgent: request.headers.get('user-agent'),
+        newValues: { login_time: new Date().toISOString(), status: 'success' },
+      });
+
       const adminToken = await createAdminToken(
         {
           userId: user.id,
@@ -155,7 +207,7 @@ export async function POST(request: NextRequest) {
           name: fullName,
           tokenVersion,
         },
-        rememberMe ? '7d' : '8h'
+        rememberMe ? REMEMBER_ME_TOKEN_EXPIRY : DEFAULT_TOKEN_EXPIRY
       );
 
       response = NextResponse.json({
@@ -174,7 +226,7 @@ export async function POST(request: NextRequest) {
         },
       });
 
-      const adminCookieOpts = getAdminCookieOptions(rememberMe ? 7 * 24 * 3600 : 8 * 3600);
+      const adminCookieOpts = getAdminCookieOptions(rememberMe ? REMEMBER_ME_COOKIE_MAX_AGE : DEFAULT_COOKIE_MAX_AGE);
       response.cookies.set(adminCookieOpts.name, adminToken, adminCookieOpts);
     } else {
       if (user.role === 'technician') {
@@ -227,4 +279,3 @@ export async function POST(request: NextRequest) {
     );
   }
 }
-
