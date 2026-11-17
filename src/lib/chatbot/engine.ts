@@ -116,6 +116,36 @@ function combineStoredIn(...locations: MessageStoreLocation[]): MessageStoreLoca
   return locations.includes('memory') ? 'memory' : 'db';
 }
 
+// BUG IDENTITAS (2026-11-17) — label peran untuk jawaban "siapa saya".
+function getIdentityRoleLabel(role: string): string {
+  if (role === 'admin') return 'Administrator';
+  if (role === 'technician') return 'Mitra Teknisi';
+  return 'Pelanggan';
+}
+
+/**
+ * Jawaban lugas "siapa saya" / "siapa nama saya" dari identitas DB.
+ * Nama dibaca dari tabel profil berdasarkan userId sesi (lihat
+ * DataService.getCurrentUserIdentity) — BUKAN dari JWT (token admin
+ * hanya membawa fallback 'Administrator') dan BUKAN dari prompt LLM.
+ * Tiga kasus gagal dibedakan secara jujur: DB error, user tidak ada,
+ * dan user ada tetapi belum punya baris profil.
+ */
+async function buildSelfIdentityReply(userId: number): Promise<string> {
+  const identity = await DataService.getCurrentUserIdentity(userId);
+  if (identity === null) {
+    return 'Data pengguna Anda tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+  }
+  if (identity === 'NOT_FOUND') {
+    return 'Tidak dapat menemukan data pengguna Anda.';
+  }
+  const roleLabel = getIdentityRoleLabel(identity.role);
+  if (!identity.fullName) {
+    return `Anda login sebagai ${roleLabel} BANTUIN. Nama lengkap Anda belum tercatat di profil.`;
+  }
+  return `Anda adalah ${identity.fullName}, ${roleLabel} BANTUIN.`;
+}
+
 // F23 — Pesan generik untuk klien saat AI tidak tersedia. Detail error mentah
 // provider (nama model/endpoint, kuota, potongan respons API) HANYA dicatat
 // di log server dan TIDAK PERNAH dikembalikan ke klien — baik di teks
@@ -1526,6 +1556,17 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
   // D. KATEGORI KHUSUS ADMINISTRATOR (ADMIN)
   // ==========================================================================
   else if (userContext.role === 'admin') {
+    // 0-ID. Identitas diri admin ("siapa nama saya" / "profil saya" /
+    // "data diri"). BUG IDENTITAS (2026-11-17): sebelumnya admin TIDAK
+    // PUNYA cabang identitas — pertanyaan ini jatuh ke LLM yang prompt-nya
+    // tidak memuat nama admin, sehingga "siapa nama saya" dijawab "tidak
+    // dapat menemukan data pengguna Anda" padahal datanya ada. Nama dibaca
+    // dari DB berdasarkan userId sesi (admin_profiles).
+    if (/siapa\s+nama\s+saya|profil\s+saya|data\s+diri/i.test(norm)) {
+      directReply = userContext.userId
+        ? await buildSelfIdentityReply(userContext.userId)
+        : 'Tidak dapat menemukan data pengguna Anda.';
+    }
     // 0. Metrik tunggal yang lugas (jawab hanya angka yang ditanya)
     const singleMetric = norm.replace(/[?!.]+$/g, '').trim();
     if (/^(berapa\s+)?total\s+pendapatan$/.test(singleMetric) || singleMetric === 'pendapatan') {
@@ -2032,6 +2073,24 @@ ${inv.discountAmount > 0 ? `- **Diskon:** −Rp ${inv.discountAmount.toLocaleStr
       const schemaSummary = getRoleFilteredSchemaSummary('admin');
       directReply = `🗄️ **Arsitektur & Skema Basis Data BANTUIN (MySQL 8.0):**\n\n${schemaSummary}\n\n💡 Seluruh akses query pada BANTUIN diproteksi oleh Row-Level Security, parameterized queries, dan whitelist column projection untuk menjamin integritas data dan kepatuhan UU PDP.`;
     }
+  }
+
+  // BUG IDENTITAS (2026-11-17) — "siapa saya" (tanpa "nama"/"profil")
+  // untuk SEMUA peran login. Sebelumnya pertanyaan ini tidak ditangkap
+  // cabang deterministik mana pun dan jatuh ke LLM; prompt admin tidak
+  // memuat nama sehingga jawabannya hanya peran ("Anda adalah
+  // Administrator BANTUIN dengan hak akses operasional penuh."). Pola
+  // dijangkar ketat (^...$) agar tidak menelan pertanyaan daftar ("siapa
+  // saja nama customer") atau pencarian ("siapa nama pengguna ...").
+  // Ditempatkan SETELAH rantai cabang peran dan SEBELUM klarifikasi
+  // memori: jawaban identitas tidak boleh tertukar klarifikasi follow-up.
+  if (
+    !directReply &&
+    userContext.userId &&
+    userContext.role !== 'guest' &&
+    /^(siapa(kah)?\s+saya|nama\s+saya\s+siapa)\s*[?.!]*$/i.test(norm)
+  ) {
+    directReply = await buildSelfIdentityReply(userContext.userId);
   }
 
   // S29/F20 — pertanyaan lanjutan admin yang targetnya HANYA ada di memori

@@ -366,6 +366,63 @@ export async function getCustomerProfile(userId: number) {
   }
 }
 
+export interface CurrentUserIdentity {
+  userId: number;
+  /**
+   * Nama lengkap dari tabel profil sesuai peran (admin_profiles /
+   * customer_profiles / technician_profiles). null bila baris user ada
+   * tetapi belum ada baris profil — pemanggil membedakan ini dari
+   * 'NOT_FOUND' (tidak ada baris user sama sekali).
+   */
+  fullName: string | null;
+  role: 'admin' | 'customer' | 'technician';
+  email: string;
+}
+
+/**
+ * Identitas akun yang sedang login, untuk jawaban "siapa saya" /
+ * "siapa nama saya".
+ *
+ * BUG IDENTITAS (2026-11-17): tabel users TIDAK PUNYA kolom nama — nama
+ * hanya ada di tabel profil per peran. Semua lookup nama lama hanya
+ * men-JOIN customer_profiles + technician_profiles, sehingga admin
+ * tidak pernah mendapat nama (JWT admin bahkan tidak membawa nama:
+ * login admin tidak membaca admin_profiles dan createAdminToken memakai
+ * fallback 'Administrator'). Kueri ini men-JOIN ketiga tabel profil.
+ *
+ * Kontrak: null = DB error (mengikuti konvensi getAdminUserStats dkk);
+ * 'NOT_FOUND' = tidak ada baris user (akun dihapus / userId tidak valid);
+ * objek = baris user ditemukan (fullName null bila belum ada profil).
+ */
+export async function getCurrentUserIdentity(
+  userId: number
+): Promise<CurrentUserIdentity | 'NOT_FOUND' | null> {
+  try {
+    const rows = await query<any[]>(
+      `SELECT u.id, u.role, u.email,
+              COALESCE(ap.full_name, cp.full_name, tp.full_name) AS full_name
+       FROM users u
+       LEFT JOIN admin_profiles ap ON u.id = ap.user_id
+       LEFT JOIN customer_profiles cp ON u.id = cp.user_id
+       LEFT JOIN technician_profiles tp ON u.id = tp.user_id
+       WHERE u.id = ? AND u.deleted_at IS NULL
+       LIMIT 1`,
+      [userId]
+    );
+    if (!rows || rows.length === 0) return 'NOT_FOUND';
+    const r = rows[0];
+    return {
+      userId: Number(r.id),
+      fullName: r.full_name ? String(r.full_name) : null,
+      role: r.role,
+      email: r.email,
+    };
+  } catch (err) {
+    console.error('[data-service] getCurrentUserIdentity gagal:', err);
+    return null;
+  }
+}
+
 export async function getCustomerRepairs(
   userId: number,
   options: { status?: string; limit?: number; offset?: number } = {}
@@ -2138,7 +2195,11 @@ export async function searchDatabaseUsers(
         u.status,
         u.is_verified,
         u.created_at,
-        COALESCE(cp.full_name, tp.full_name, 'Pengguna BANTUIN') AS full_name,
+        -- BUG IDENTITAS (2026-11-17): admin_profiles ikut di-JOIN — tanpa
+        -- ini admin selalu tampil sebagai 'Pengguna BANTUIN' dan pencarian
+        -- berdasarkan nama admin tidak pernah cocok (WHERE hanya memeriksa
+        -- cp/tp.full_name).
+        COALESCE(ap.full_name, cp.full_name, tp.full_name, 'Pengguna BANTUIN') AS full_name,
         cp.city,
         cp.default_address,
         tp.rating_avg,
@@ -2146,6 +2207,7 @@ export async function searchDatabaseUsers(
         tp.is_available,
         tp.years_of_experience
        FROM users u
+       LEFT JOIN admin_profiles ap ON u.id = ap.user_id
        LEFT JOIN customer_profiles cp ON u.id = cp.user_id
        LEFT JOIN technician_profiles tp ON u.id = tp.user_id
        WHERE u.deleted_at IS NULL
@@ -2159,10 +2221,11 @@ export async function searchDatabaseUsers(
            OR u.uuid = ?
            OR cp.full_name LIKE ? ESCAPE '!'
            OR tp.full_name LIKE ? ESCAPE '!'
+           OR ap.full_name LIKE ? ESCAPE '!'
          )
        ORDER BY u.created_at DESC
        LIMIT ?`,
-      [...roleParams, cleanTerm, phoneLike1, phoneSuffixPattern, cleanTerm, termPattern, cleanTerm, termPattern, termPattern, limit]
+      [...roleParams, cleanTerm, phoneLike1, phoneSuffixPattern, cleanTerm, termPattern, cleanTerm, termPattern, termPattern, termPattern, limit]
     );
 
     if (rows && rows.length > 0) {
@@ -3198,9 +3261,14 @@ export async function executeGovernedDatabaseQuery(
 // 1. Pengguna tanpa profil (tanpa full_name) tidak lagi ditampilkan sebagai
 //    alamat email — melainkan "Tanpa nama (#id)" (id pengguna dicantumkan
 //    agar admin tetap bisa membedakan dan mencari akunnya).
-//    A23 — pengecualian: admin TIDAK PUNYA baris profil (bukan "tanpa
-//    nama"), jadi untuk admin tampilkan email sebagai pengganti nama —
-//    "Tanpa nama (#3)" padahal emailnya diketahui menyesatkan.
+//    A23 — pengecualian: admin yang BELUM PUNYA baris profil (bukan "tanpa
+//    nama"), tampilkan email sebagai pengganti nama — "Tanpa nama (#3)"
+//    padahal emailnya diketahui menyesatkan.
+//    BUG IDENTITAS (2026-11-17): asumsi A23 yang lama ("admin TIDAK PUNYA
+//    baris profil") sudah kedaluwarsa — tabel admin_profiles ADA di skema
+//    (dari penggabungan fitur profil admin). Nama admin kini dibaca dari
+//    admin_profiles; fallback email hanya dipakai bila baris profilnya
+//    memang belum ada.
 // 2. getUserNameListWithTotal mengembalikan total baris yang cocok agar
 //    pemanggil bisa memberi tahu bahwa daftar dipotong di LIMIT
 //    ("menampilkan 50 terbaru dari N total") — jangan biarkan admin
@@ -3233,8 +3301,9 @@ async function queryUserNameList(
     );
     const total = Number(countRow?.total || 0);
     const rows = await query<any[]>(
-      `SELECT u.id, u.role, u.email, cp.full_name AS customer_name, tp.full_name AS technician_name
+      `SELECT u.id, u.role, u.email, ap.full_name AS admin_name, cp.full_name AS customer_name, tp.full_name AS technician_name
        FROM users u
+       LEFT JOIN admin_profiles ap ON u.id = ap.user_id
        LEFT JOIN customer_profiles cp ON u.id = cp.user_id
        LEFT JOIN technician_profiles tp ON u.id = tp.user_id
        WHERE ${whereSql}
@@ -3243,8 +3312,8 @@ async function queryUserNameList(
       [...params, cleanLimit]
     );
     const names = (rows || []).map((r) => {
-      const name = String(r.customer_name || r.technician_name || '').trim();
-      // A23 — admin tanpa profil: tampilkan email (bukan "Tanpa nama").
+      const name = String(r.admin_name || r.customer_name || r.technician_name || '').trim();
+      // A23 — admin tanpa baris profil: tampilkan email (bukan "Tanpa nama").
       if (name) return name;
       if (r.role === 'admin' && r.email) return String(r.email);
       return `Tanpa nama (#${r.id})`;
