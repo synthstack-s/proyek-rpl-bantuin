@@ -66,7 +66,7 @@ VALUES
   ('max_search_radius_km', '25', 'number', 'dispatch', 'Radius maksimal pencocokan penugasan teknisi terdekat dari lokasi pelanggan (Km).'),
   ('technician_assignment_timeout_min', '15', 'number', 'dispatch', 'Batas waktu bagi teknisi untuk menerima atau menolak tawaran order otomatis sebelum dialihkan (Menit).'),
   ('warranty_period_days', '30', 'number', 'service', 'Masa garansi resmi standar pengerjaan servis BANTUIN setelah order selesai (Hari).'),
-  ('ai_daily_free_quota', '10', 'number', 'ai', 'Batas kuota harian percakapan diagnosis mandiri AI gratis per pengguna.'),
+  ('ai_daily_free_quota', '0', 'number', 'ai', 'Batas kuota harian percakapan AI per pengguna. 0 = tanpa batas (kuota dinonaktifkan).'),
   ('ai_model_name', 'gemini-1.5-flash', 'string', 'ai', 'Model AI LLM default yang digunakan untuk inferensi diagnosis awal.'),
   ('complaint_auto_escalate_hours', '24', 'number', 'complaint', 'Batas waktu keluhan pelanggan wajib direspons oleh administrator (Jam).')
 ON DUPLICATE KEY UPDATE
