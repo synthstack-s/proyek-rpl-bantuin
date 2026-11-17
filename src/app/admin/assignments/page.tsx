@@ -74,6 +74,14 @@ export default function AssignmentsAdminPage() {
 
   // Filters & Pagination
   const [search, setSearch] = useState('');
+  // Debounce pencarian: tanpa ini, setiap ketukan tombol mengubah `search`
+  // → fetchAssignments berubah identitas → useEffect memanggil ulang API
+  // (1 fetch per karakter yang diketik). Tunggu 400ms setelah ketukan
+  // terakhir sebelum menerapkan filter — input tetap responsif karena
+  // `search` (nilai input) berubah langsung, hanya fetch-nya yang
+  // ditunda. Reset halaman ke 1 ikut di dalam timer yang sama agar tidak
+  // ada fetch ekstra dengan filter lama.
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [page, setPage] = useState(1);
   const [limit] = useState(10);
@@ -113,6 +121,14 @@ export default function AssignmentsAdminPage() {
     setTimeout(() => setToast(null), 4000);
   };
 
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search);
+      setPage(1);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [search]);
+
   // Fetch Assignments
   const fetchAssignments = useCallback(async () => {
     setIsLoading(true);
@@ -123,7 +139,7 @@ export default function AssignmentsAdminPage() {
         limit: limit.toString(),
         status: statusFilter,
       });
-      if (search.trim()) params.set('search', search.trim());
+      if (debouncedSearch.trim()) params.set('search', debouncedSearch.trim());
 
       const res = await fetch(`/api/admin/assignments?${params.toString()}`);
       const json = await res.json();
@@ -140,7 +156,7 @@ export default function AssignmentsAdminPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [page, limit, statusFilter, search]);
+  }, [page, limit, statusFilter, debouncedSearch]);
 
   // Load Metadata
   useEffect(() => {
@@ -389,8 +405,9 @@ export default function AssignmentsAdminPage() {
             type="text"
             value={search}
             onChange={(e) => {
+              // Hanya ubah nilai input; fetch + reset halaman menunggu
+              // debounce 400ms (lihat useEffect debouncedSearch di atas).
               setSearch(e.target.value);
-              setPage(1);
             }}
             placeholder="Cari kode pesanan, nama teknisi, nomor HP, atau nama pelanggan..."
             className="w-full bg-[#11120D] border border-[#D8CFBC]/20 rounded-xl pl-10 pr-4 py-2 text-xs sm:text-sm text-[#FFFBF4] placeholder-[#8B8878] focus:outline-none focus:border-[#D8CFBC] transition"
