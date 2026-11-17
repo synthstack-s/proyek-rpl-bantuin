@@ -405,6 +405,11 @@ export class GroqProviderAdapter implements AIProviderAdapter {
         if (candidateChat) {
           modelToTest = candidateChat;
           config.selectedModel = candidateChat;
+          // L2: laporkan model yang BENAR-BENAR diuji (seperti loop heal
+          // 404 di bawah) — sebelumnya testedModel tetap model lama yang
+          // tidak ada di daftar, sehingga model salah ketik teruji "sukses".
+          testedModel = candidateChat;
+          healedModel = candidateChat;
         }
       }
 
@@ -480,20 +485,6 @@ export class GroqProviderAdapter implements AIProviderAdapter {
         };
       }
 
-      // 2. Jika GET /models sukses 200 (kredensial terotentikasi penuh)
-      if (modelsRes.ok) {
-        return {
-          provider: this.providerName,
-          endpoint: endpointToTest,
-          modelTested: modelToTest,
-          status: 'success',
-          httpStatusCode: 200,
-          responseTimeMs: latencyMs,
-          testedAt: new Date().toISOString(),
-          errorMessage: 'Koneksi terhubung & API Key valid.',
-        };
-      }
-
       let parsedErr: any = null;
       try {
         parsedErr = JSON.parse(resText);
@@ -509,6 +500,9 @@ export class GroqProviderAdapter implements AIProviderAdapter {
       // normalizeError ('provider_error' + pesan "Saldo Habis") — sebelumnya
       // jalur ini memakai 'rate_limit_exceeded' sementara normalizeError
       // memakai 'provider_error' untuk kondisi 402 yang sama.
+      // Cek ini WAJIB di atas blok modelsRes.ok di bawah: GET /models
+      // gratis dan mengembalikan 200 walau saldo 0, sehingga akun yang
+      // saldonya habis sebelumnya teruji "success" dan setiap chat gagal.
       if (
         chatRes.status === 402 ||
         errorDetail.toLowerCase().includes('insufficient balance') ||
@@ -523,6 +517,20 @@ export class GroqProviderAdapter implements AIProviderAdapter {
           responseTimeMs: latencyMs,
           testedAt: new Date().toISOString(),
           errorMessage: 'Saldo akun AI habis (402 Insufficient Balance). API key valid, tetapi provider tidak dapat melayani percakapan sampai saldo diisi ulang di console provider.',
+        };
+      }
+
+      // 2. Jika GET /models sukses 200 (kredensial terotentikasi penuh)
+      if (modelsRes.ok) {
+        return {
+          provider: this.providerName,
+          endpoint: endpointToTest,
+          modelTested: modelToTest,
+          status: 'success',
+          httpStatusCode: 200,
+          responseTimeMs: latencyMs,
+          testedAt: new Date().toISOString(),
+          errorMessage: 'Koneksi terhubung & API Key valid.',
         };
       }
 
@@ -726,14 +734,23 @@ export class GroqProviderAdapter implements AIProviderAdapter {
           errJson = { error: { message: resText } };
         }
 
-        // Auto-heal untuk model Groq yang tidak tersedia pada akun (404)
+        // Auto-heal untuk model yang tidak tersedia pada akun (404).
+        // Sebelumnya hanya Groq yang di-heal (ke openai/gpt-oss-120b),
+        // sehingga model OpenRouter yang salah ketik / berganti nama /
+        // dihapus menggagalkan SEMUA pesan tanpa fallback. Sekarang semua
+        // provider memakai daftar cadangannya sendiri
+        // (KNOWN_PROVIDER_FALLBACK_MODELS); Groq mempertahankan target
+        // lamanya agar perilakunya tidak berubah.
+        const healModel =
+          this.providerName === 'groq'
+            ? (payload.model !== 'openai/gpt-oss-120b' ? 'openai/gpt-oss-120b' : undefined)
+            : (KNOWN_PROVIDER_FALLBACK_MODELS[this.providerName] || []).find((m) => m !== payload.model);
         if (
           res.status === 404 &&
-          this.providerName === 'groq' &&
-          payload.model !== 'openai/gpt-oss-120b'
+          healModel
         ) {
-          console.info(`[Groq Auto-Heal] Model ${payload.model} tidak ditemukan, beralih ke openai/gpt-oss-120b`);
-          payload.model = 'openai/gpt-oss-120b';
+          console.info(`[${this.providerName} Auto-Heal] Model ${payload.model} tidak ditemukan, beralih ke ${healModel}`);
+          payload.model = healModel;
           const healRes = await makeHttpsRequest(url, {
             method: 'POST',
             headers: {
@@ -772,7 +789,7 @@ export class GroqProviderAdapter implements AIProviderAdapter {
                 totalTokens: Number(healData.usage?.total_tokens || 0),
               },
               provider: this.providerName,
-              model: 'openai/gpt-oss-120b',
+              model: healModel,
               latencyMs: Date.now() - startTime,
               httpStatusCode: 200,
               isFallback: false,
@@ -978,6 +995,19 @@ export class GroqProviderAdapter implements AIProviderAdapter {
       sanitizedMsg = `Koneksi jaringan ke penyedia ${this.providerName.toUpperCase()} gagal atau terputus (Periksa sambungan internet Anda).`;
       isRetryable = true;
       isFallbackEligible = true;
+    } else if (httpStatusCode === 400) {
+      // 400: argumen tidak valid / konteks melebihi batas model / model
+      // tidak mendukung tools — sebelumnya jatuh ke unknown_error (tanpa
+      // retry, tanpa fallback, DAN ikut menghitung circuit breaker).
+      // Disamakan dengan adapter Gemini: provider_error yang layak
+      // fallback (provider lain memakai model dan batas berbeda). Pesan
+      // provider dipertahankan karena biasanya menyebut penyebabnya
+      // (mis. "maximum context length"). Cabang ini sengaja di atas
+      // cabang substring (401/404): status numerik lebih dapat dipercaya
+      // daripada kata-kata di pesan error.
+      status = 'provider_error';
+      isRetryable = false;
+      isFallbackEligible = true;
     } else if (lower.includes('invalid api key') || lower.includes('unauthorized') || lower.includes('authentication') || httpStatusCode === 401) {
       status = 'invalid_api_key';
       httpStatusCode = 401;
@@ -987,7 +1017,11 @@ export class GroqProviderAdapter implements AIProviderAdapter {
       status = 'provider_error';
       httpStatusCode = 402;
       isRetryable = false;
-      isFallbackEligible = false;
+      // Saldo habis LAYAK fallback: provider cadangan yang masih punya
+      // kredit bisa menjawab, tidak seperti kunci salah (401) yang harus
+      // tampil apa adanya. Bila tidak ada fallback yang sehat, pesan
+      // "Saldo Habis" tetap yang sampai ke log (dan mode offline ke user).
+      isFallbackEligible = true;
       sanitizedMsg = 'Saldo API Habis (Insufficient Balance). Silakan isi ulang kuota/kredit akun penyedia AI Anda.';
     } else if (lower.includes('permission denied') || httpStatusCode === 403) {
       status = 'provider_error';
