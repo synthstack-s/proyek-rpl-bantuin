@@ -923,6 +923,22 @@ export async function deleteProviderConfig(
     throw new Error(`Gagal menghapus provider '${provider}' dari database: ${err.message}. Provider tidak dihapus.`);
   }
 
+  // Naikkan versi konfigurasi global (pola yang sama dengan
+  // saveProviderConfig) agar AIProviderManager mendeteksi penghapusan dan
+  // me-refresh cachedConfigs. invalidateCache() di bawah hanya memaksa
+  // pengecekan version — tanpa bump ini, syncWithDatabase melihat version
+  // yang sama dan provider yang sudah dihapus TETAP dipakai sampai server
+  // restart, termasuk kunci yang sengaja dihapus karena bocor. Kegagalan
+  // bump hanya warning: penghapusan di DB sudah terjadi dan tetap sah.
+  try {
+    await query(
+      `INSERT INTO ai_global_settings (id, version) VALUES (1, 1)
+       ON DUPLICATE KEY UPDATE version = version + 1, updated_at = CURRENT_TIMESTAMP`
+    );
+  } catch (versionErr: any) {
+    console.warn(`[AI Repository] Gagal menaikkan versi konfigurasi setelah menghapus provider '${provider}':`, versionErr.message);
+  }
+
   await recordAIAuditLog({
     adminUserId: adminId,
     provider,
@@ -1190,11 +1206,17 @@ export async function recordConnectionTestLog(
     success: 'connected',
     invalid_api_key: 'connection_error',
     invalid_endpoint: 'connection_error',
-    model_not_available: 'connected',
+    // model_not_available / provider_error / unknown_error BUKAN
+    // 'connected': tes yang GAGAL karena model tidak ditemukan, provider
+    // menolak request, atau error tak dikenal tidak boleh menandai provider
+    // sehat — admin akan mengira semuanya baik padahal setiap chat gagal.
+    // rate_limit/timeout tetap 'connected' karena sifatnya sementara dan
+    // kunci terbukti valid.
+    model_not_available: 'connection_error',
     rate_limit_exceeded: 'connected',
     timeout: 'connected',
-    provider_error: 'connected',
-    unknown_error: 'connected',
+    provider_error: 'connection_error',
+    unknown_error: 'connection_error',
   };
 
   const newStatus = statusToConfigStatus[testResult.status] || 'disconnected';

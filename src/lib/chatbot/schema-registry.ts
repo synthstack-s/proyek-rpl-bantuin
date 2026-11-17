@@ -1,7 +1,7 @@
 /**
  * SCHEMA REGISTRY - BANTUIN DATABASE INTELLIGENCE
  * 
- * Menyediakan metadata mesin untuk seluruh 31 tabel basis data MySQL 8.0 BANTUIN.
+ * Menyediakan metadata mesin untuk seluruh 32 tabel basis data MySQL 8.0 BANTUIN.
  * Menjamin model AI memahami struktur, relasi, primary/foreign key, dan batasan sensitivitas data
  * tanpa memberikan kredensial atau akses SQL langsung.
  *
@@ -33,7 +33,7 @@ export interface TableMetadata {
   // milik technician_profiles selalu menunjuk akun TEKNISI, sehingga
   // scoping ke id pelanggan akan SELALU kosong dan menyesatkan ("0 teknisi").
   // Tanpa field ini, owner 'user_id' berlaku untuk semua peran terautentikasi.
-  ownerRole?: 'customer' | 'technician';
+  ownerRole?: 'customer' | 'technician' | 'admin';
   // B14 — Scope relasional untuk tabel TANPA ownerForeignKey: baris boleh
   // dibaca bila terhubung (lewat viaForeignKey) ke baris viaTable yang
   // ownerColumn-nya sama dengan userId pemanggil. Contoh: payments boleh
@@ -83,6 +83,7 @@ export const BANTUIN_SCHEMA_REGISTRY: Record<string, TableMetadata> = {
     relations: [
       { targetTable: 'customer_profiles', relationshipType: 'one-to-one', foreignKey: 'customer_profiles.user_id', description: 'Profil data diri pelanggan' },
       { targetTable: 'technician_profiles', relationshipType: 'one-to-one', foreignKey: 'technician_profiles.user_id', description: 'Profil data teknisi mitra' },
+      { targetTable: 'admin_profiles', relationshipType: 'one-to-one', foreignKey: 'admin_profiles.user_id', description: 'Profil data diri admin' },
       { targetTable: 'repair_requests', relationshipType: 'one-to-many', foreignKey: 'repair_requests.customer_id', description: 'Daftar pesanan perbaikan pelanggan' },
       // B5 — relasi balik lengkap: setiap FK ke users dideklarasikan di sini
       // agar JOIN tidak bergantung pada satu sisi deklarasi saja. Bila dua
@@ -231,6 +232,28 @@ export const BANTUIN_SCHEMA_REGISTRY: Record<string, TableMetadata> = {
       // B4 (balik): penugasan yang diterima teknisi ini. targetColumn karena
       // technician_assignments.technician_id merujuk user_id (bukan id).
       { targetTable: 'technician_assignments', relationshipType: 'one-to-many', foreignKey: 'technician_assignments.technician_id', targetColumn: 'user_id', description: 'Penugasan yang diterima teknisi ini' },
+    ],
+  },
+
+  admin_profiles: {
+    tableName: 'admin_profiles',
+    domainGroup: 'profile_catalog',
+    description: 'Data profil khusus admin BANTUIN, mencakup nama lengkap admin (sumber jawaban "siapa saya" untuk admin).',
+    primaryKey: 'id',
+    ownerForeignKey: 'user_id',
+    // B9: user_id di sini selalu akun admin — scoping ke id customer/teknisi
+    // akan selalu kosong, jadi peran lain ditolak dengan error akses.
+    ownerRole: 'admin',
+    columns: [
+      { name: 'id', type: 'BIGINT UNSIGNED', isNullable: false, isPrimaryKey: true, description: 'Primary key profil admin' },
+      { name: 'user_id', type: 'BIGINT UNSIGNED', isNullable: false, isForeignKey: true, references: 'users.id', description: 'ID akun admin (unik)' },
+      { name: 'full_name', type: 'VARCHAR(150)', isNullable: false, description: 'Nama lengkap admin' },
+      { name: 'avatar_url', type: 'VARCHAR(255)', isNullable: true, description: 'URL foto profil' },
+      { name: 'created_at', type: 'DATETIME', isNullable: false, description: 'Waktu pembuatan' },
+      { name: 'updated_at', type: 'DATETIME', isNullable: false, description: 'Waktu pembaruan' },
+    ],
+    relations: [
+      { targetTable: 'users', relationshipType: 'one-to-one', foreignKey: 'user_id', description: 'Akun login admin' },
     ],
   },
 
@@ -969,7 +992,7 @@ export const BANTUIN_SCHEMA_REGISTRY: Record<string, TableMetadata> = {
  * B9 — Ringkasan ini HANYA mengiklankan tabel yang benar-benar bisa dikueri
  * peran tersebut lewat queryDatabase (sesuai isTableAllowedForRole). Mengiklankan
  * tabel yang ditolak membuat AI mencoba, gagal, dan menjawab tanpa data.
- * Matriks akses nyata: admin = semua 31 tabel; guest = tabel publik saja;
+ * Matriks akses nyata: admin = semua 32 tabel; guest = tabel publik saja;
  * customer = tabel milik sendiri (owner user_id/customer_id/
  * complainant_user_id) + payments lewat scope relasional (B14); technician =
  * tabel tugas sendiri (owner technician_id/user_id milik teknisi).
@@ -1004,13 +1027,13 @@ Nama teknisi yang menangani pesanan Anda tersedia lewat detail pesanan, bukan le
 - whatsapp_notifications: Log pengiriman WhatsApp (Fonnte) kepada Anda.
 - ai_consultation_sessions: Sesi konsultasi AI Anda.
 - appliance_categories & services: Katalog alat dan tarif resmi.
-Detail pesanan tiap tugas (alamat pelanggan, merk alat, keluhan) tersedia lewat alat daftar tugas; nomor telepon pelanggan tersimpan di users (diperoleh lewat JOIN ke users), BUKAN di repair_requests — jangan mencari kolom telepon di tabel pesanan.`;
+Detail pesanan tiap tugas (alamat pelanggan, merk alat, keluhan, NOMOR TELEPON pelanggan) tersedia lewat alat daftar tugas — pakai alat itu untuk nomor telepon. JANGAN mencoba JOIN ke users untuk nomor telepon: tabel users tidak dapat dikueri oleh teknisi, dan repair_requests tidak punya kolom telepon.`;
   }
 
-  // Admin — seluruh 31 tabel (B5: daftar lengkap, selaras dengan matriks akses).
-  return `Tabel Database Lengkap BANTUIN (Administrator View — seluruh 31 tabel bisa dikueri):
+  // Admin — seluruh 32 tabel (B5: daftar lengkap, selaras dengan matriks akses).
+  return `Tabel Database Lengkap BANTUIN (Administrator View — seluruh 32 tabel bisa dikueri):
 - users, user_otps, user_refresh_tokens: Manajemen akun, OTP, dan sesi seluruh pengguna.
-- customer_profiles, technician_profiles, technician_documents, technician_specializations: Profil, dokumen verifikasi, dan keahlian pengguna.
+- customer_profiles, technician_profiles, admin_profiles, technician_documents, technician_specializations: Profil, dokumen verifikasi, dan keahlian pengguna.
 - appliance_categories, services: Katalog kategori alat dan paket layanan resmi.
 - ai_consultation_sessions, ai_chat_messages: Sesi dan riwayat pesan konsultasi AI.
 - repair_requests, repair_status_history, technician_assignments, technician_schedules, repair_diagnoses: Pengawasan seluruh pesanan perbaikan, linimasa status, penugasan, jadwal, dan estimasi biaya.

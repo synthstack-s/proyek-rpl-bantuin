@@ -481,13 +481,22 @@ export async function getOrCreateSession(
         // yang login. Sesi guest tetap guest — `user_id` tidak pernah diisi
         // berdasarkan UUID saja.
 
-        // Jika ada kategori baru yang terdeteksi dan belum diset
+        // Jika ada kategori baru yang terdeteksi dan belum diset.
+        // F12: UPDATE kategori berjalan di try/catch SENDIRI — kegagalannya
+        // (mis. DB sesaat tidak merespons) tidak boleh menggagalkan sesi
+        // yang SUDAH ditemukan: sebelumnya lemparan di sini jatuh ke catch
+        // di bawah, yang memperlakukannya sebagai kegagalan lookup dan
+        // membuat sesi BARU — riwayat percakapan hilang.
         if (categoryId && !row.category_id) {
-          await query(
-            `UPDATE ai_consultation_sessions SET category_id = ?, updated_at = NOW() WHERE id = ?`,
-            [categoryId, row.id]
-          );
-          row.category_id = categoryId;
+          try {
+            await query(
+              `UPDATE ai_consultation_sessions SET category_id = ?, updated_at = NOW() WHERE id = ?`,
+              [categoryId, row.id]
+            );
+            row.category_id = categoryId;
+          } catch (updateErr) {
+            logDbFailure('getOrCreateSession:categoryUpdate', { sessionUuid }, updateErr);
+          }
         }
 
         return mapSessionRow(row);
@@ -596,7 +605,16 @@ export async function saveChatMessageDetailed(
   tokensUsed?: number,
   responseTimeMs?: number
 ): Promise<ChatMessageSaveResult> {
-  const metaJson = metadata ? JSON.stringify(metadata) : null;
+  // F13: JSON.stringify(metadata) WAJIB di dalam try — metadata sirkular
+  // (atau yang melempar di toJSON) sebelumnya melempar SEBELUM try, lolos
+  // ke saveChatMessageTracked lalu ke F18, dan membuang jawaban AI yang
+  // sudah selesai dibuat. Bila serialisasi gagal, simpan penanda aman.
+  let metaJson: string | null = null;
+  try {
+    metaJson = metadata ? JSON.stringify(metadata) : null;
+  } catch {
+    metaJson = JSON.stringify({ metadataSerializationFailed: true });
+  }
 
   // F15 — Sesi fallback (ID negatif) tidak punya baris di DB (session_id
   // adalah BIGINT UNSIGNED + FK): langsung simpan di memori tanpa mencoba

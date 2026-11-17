@@ -4,7 +4,6 @@ import { checkChatRateLimit, getClientIpFromRequest } from '@/lib/rate-limiter';
 import { getOrCreateSession, isSessionForbiddenError } from '@/lib/chatbot/repository';
 import { getCurrentUserIdentity } from '@/lib/chatbot/data-service';
 import { processChatMessage } from '@/lib/chatbot/engine';
-import { checkDailyAIQuota } from '@/lib/ai/repository';
 import { ChatUserContext } from '@/lib/chatbot/types';
 
 /**
@@ -150,26 +149,17 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 3c. Kuota harian AI (S5/F8) — choke point SEBELUM provider dipanggil.
-    // Dihitung dari ai_usage_logs hari ini (per userId login / per sesi
-    // guest); batas dibaca dari system_settings.ai_daily_free_quota
-    // (default 0 = TANPA BATAS — kuota dinonaktifkan atas keputusan
-    // pemilik 2026-11-17; menghidupkan lagi cukup set setting ke angka
-    // positif). Bila DB tidak terbaca, checkDailyAIQuota fail-open
-    // dengan peringatan (lihat repository.ts). Berlaku juga untuk streaming.
-    const quota = await checkDailyAIQuota({
-      userId: userContext.userId || null,
-      sessionId: session.id,
-    });
-    if (!quota.allowed) {
-      return NextResponse.json(
-        {
-          success: false,
-          message: `Kuota harian percakapan AI Anda sudah habis (${quota.used}/${quota.limit} permintaan hari ini). Silakan coba lagi besok.`,
-        },
-        { status: 429 }
-      );
-    }
+    // 3c. Kuota harian AI (S5/F8) TIDAK lagi dicek di sini — penegakannya
+    // pindah ke engine (processChatMessage, bagian E, tepat sebelum
+    // pemanggilan LLM pertama). Alasannya: gate di route ini memblokir
+    // SEMUA pesan dengan 429 saat kuota habis, termasuk pertanyaan yang
+    // bisa dijawab deterministik dari database tanpa AI sama sekali.
+    // Mekanisme kuota tidak berubah (batas dari
+    // system_settings.ai_daily_free_quota, default 0 = tanpa batas;
+    // fail-open bila DB tidak terbaca) — hanya titik penegakannya yang
+    // pindah, sehingga jawaban deterministik tidak pernah terblokir kuota
+    // AI dan pesan kuota habis sampai sebagai balasan chat biasa.
+    // Rate limit per menit (lapisan 1 & 2 di atas) tetap di sini.
 
     const wantsStream = body.stream === true || req.headers.get('accept')?.includes('text/event-stream');
 

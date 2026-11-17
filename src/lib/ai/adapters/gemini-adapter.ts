@@ -561,9 +561,11 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
           // (testConnection Gemini hanya memakai normalizeError, jadi tidak
           // ada split seperti di Groq — cabang ini memastikan pesan dan
           // statusnya konsisten dengan Groq.)
+          // Saldo habis LAYAK fallback (disamakan dengan adapter Groq):
+          // provider cadangan yang masih punya kredit bisa menjawab.
           status = 'provider_error';
           isRetryable = false;
-          isFallbackEligible = false;
+          isFallbackEligible = true;
           sanitizedMsg = 'Saldo API Habis (Insufficient Balance). Silakan isi ulang kuota/kredit akun penyedia AI Anda.';
           break;
         case 404:
@@ -634,7 +636,8 @@ export class GeminiProviderAdapter implements AIProviderAdapter {
         status = 'provider_error';
         httpStatusCode = 402;
         isRetryable = false;
-        isFallbackEligible = false;
+        // Saldo habis LAYAK fallback (disamakan dengan adapter Groq).
+        isFallbackEligible = true;
         sanitizedMsg = 'Saldo API Habis (Insufficient Balance). Silakan isi ulang kuota/kredit akun penyedia AI Anda.';
       } else if (lower.includes('resource_exhausted') || lower.includes('quota') || lower.includes('rate limit') || lower.includes('too many requests') || lower.includes('429')) {
         status = 'rate_limit_exceeded';

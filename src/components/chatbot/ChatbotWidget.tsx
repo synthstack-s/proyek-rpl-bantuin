@@ -527,7 +527,12 @@ export function ChatbotWidget() {
       // JIKA SERVER MENDUKUNG REAL-TIME STREAMING RESPONSES (SSE)
       if (contentType.includes('text/event-stream') && res.body) {
         setMessages((prev) => [...prev, streamingAssistantMsg]);
-        setIsLoading(false);
+        // W2: spinner TETAP menyala sampai token pertama tiba — sebelumnya
+        // setIsLoading(false) dipanggil di sini (begitu header SSE tiba),
+        // sehingga selama LLM berpikir lama pengguna hanya melihat gelembung
+        // kosong tanpa indikator apa pun. finally di bawah tetap menutup
+        // loading saat stream berakhir.
+        let streamError: string | null = null;
 
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
@@ -555,6 +560,8 @@ export function ChatbotWidget() {
               const parsed = JSON.parse(rawData);
 
               if (eventType === 'token' && parsed.text) {
+                // W2: token pertama tiba — matikan spinner sekarang.
+                setIsLoading(false);
                 accumulatedText += parsed.text;
                 setMessages((prev) =>
                   prev.map((msg) =>
@@ -563,6 +570,11 @@ export function ChatbotWidget() {
                       : msg
                   )
                 );
+              } else if (eventType === 'error') {
+                // W1: server mengabarkan kegagalan streaming (route
+                // mengirim `event: error` + { message }). Sebelumnya event
+                // ini DIABAIKAN — pengguna hanya melihat gelembung kosong.
+                streamError = parsed.message || 'Terjadi kesalahan sistem saat memproses streaming AI.';
               } else if (eventType === 'metadata') {
                 if (parsed.session?.sessionUuid && parsed.session.sessionUuid !== sessionUuid) {
                   setSessionUuid(parsed.session.sessionUuid);
@@ -588,6 +600,14 @@ export function ChatbotWidget() {
               // Abaikan kegagalan parse JSON parsial
             }
           }
+        }
+
+        // W1: stream berakhir tanpa satu pun token — jangan tinggalkan
+        // gelembung kosong. Hapus gelembung streaming dan tampilkan
+        // pemberitahuan error (pesan server bila ada).
+        if (!accumulatedText) {
+          setMessages((prev) => prev.filter((msg) => msg.id !== assistantMsgId));
+          setErrorNotice(streamError || 'Layanan AI tidak mengembalikan jawaban. Silakan coba lagi.');
         }
       } else {
         // FALLBACK STANDAR NON-STREAMING (JSON)

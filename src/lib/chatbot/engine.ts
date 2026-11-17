@@ -34,6 +34,7 @@ import { getRoleBasedSuggestedPrompts } from './suggested-prompts';
 import { executeRoleBasedTool } from './tools';
 import { getRoleFilteredSchemaSummary, getTableSchemaMetadata } from './schema-registry';
 import { AIProviderManager } from '@/lib/ai/provider-manager';
+import { checkDailyAIQuota } from '@/lib/ai/repository';
 import { UniversalToolDeclaration, UniversalChatMessage } from '@/lib/ai/types';
 import {
   saveChatMessageDetailed,
@@ -158,6 +159,231 @@ const AI_UNAVAILABLE_MESSAGE = 'Layanan AI sedang tidak tersedia, coba lagi nant
  * di setiap pesan baru; context-manager hanya memakai 4 pesan terakhir.
  */
 export const LLM_HISTORY_LIMIT = 20;
+
+/**
+ * E3 — Merender hasil tool yang sudah diproyeksikan menjadi jawaban yang
+ * bisa dibaca pengguna, dipakai saat follow-up completion LLM gagal
+ * setelah tool berhasil dijalankan. Data yang dirender SUDAH diproyeksikan
+ * (projectToolResultForPrompt: hanya kolom yang dibutuhkan jawaban, PII
+ * dibuang kecuali diminta eksplisit) sehingga aman ditampilkan apa adanya.
+ * Dibatasi 6 field per baris dan 10 baris per tool agar balasan tetap ringkas.
+ */
+function formatToolResultsForUser(
+  toolSummaries: { name: string; content: string }[]
+): string {
+  const lines: string[] = ['📊 **Data dari database BANTUIN:**'];
+  for (const { name, content } of toolSummaries) {
+    let parsed: any = null;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      // Bukan JSON — tampilkan mentah (dipotong).
+    }
+    // Hasil tool dibungkus { success, data: {...} } — datanya ada di dalam
+    // .data (mis. queryDatabase: data.rows). Buka bungkusnya dulu agar
+    // baris hasil kueri ikut tampil, bukan hanya "success: true".
+    const payload =
+      parsed && typeof parsed === 'object' && parsed.data && typeof parsed.data === 'object'
+        ? parsed.data
+        : parsed;
+    const rows = Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload?.rows)
+        ? payload.rows
+        : null;
+    if (rows && rows.length > 0) {
+      lines.push(`\n**${name}** (${rows.length} baris):`);
+      for (const row of rows.slice(0, 10)) {
+        const fields = Object.entries(row)
+          .filter(([, v]) => v !== null && v !== undefined && typeof v !== 'object')
+          .slice(0, 6)
+          .map(([k, v]) => `${k}: ${v}`);
+        lines.push(`- ${fields.join(' | ')}`);
+      }
+      if (rows.length > 10) lines.push(`_(+${rows.length - 10} baris lainnya)_`);
+    } else if (payload && typeof payload === 'object') {
+      const fields = Object.entries(payload)
+        .filter(([, v]) => v !== null && v !== undefined && typeof v !== 'object')
+        .slice(0, 8)
+        .map(([k, v]) => `${k}: ${v}`);
+      lines.push(`\n**${name}:** ${fields.join(' | ') || '(tidak ada data)'}`);
+    } else {
+      lines.push(`\n**${name}:** ${String(content).slice(0, 500)}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+/**
+ * E2 — Jaring pengaman offline: saat AI gagal total (bagian F), coba jawab
+ * pertanyaan hitung/statistik dari database secara deterministik SEBELUM
+ * menyerah ke sapaan generik expert system. Pola di sini sengaja longgar
+ * (substring, bukan ^...$ seperti cabang singleMetric) karena fungsinya
+ * adalah penyelamatan terakhir — pertanyaan yang lolos semua handler
+ * deterministik (mis. "berapa pengguna bantuin") tetap berpeluang terjawab
+ * dari DB. Cabang-cabang spesifik (teknisi terbaik, kepuasan, ...) tidak
+ * butuh kata penanda jumlah; kata benda umum (pengguna, pesanan, teknisi,
+ * pendapatan, transaksi) WAJIB didampingi kata penanda jumlah (berapa /
+ * jumlah / total / daftar / status / ...) atau berdiri sendiri sebagai
+ * satu-satunya kata — agar "cara membatalkan pesanan" tidak dijawab angka.
+ * Mengembalikan null bila pertanyaan tidak dikenali (lanjut ke expert
+ * system). Bila DB tidak dapat dibaca, mengembalikan pesan DB-down yang
+ * jujur (lebih baik daripada sapaan generik yang pura-pura normal).
+ */
+async function getOfflineDatabaseAnswer(
+  userMessage: string,
+  userContext: ChatUserContext
+): Promise<string | null> {
+  const norm = userMessage.toLowerCase().trim();
+  const role = userContext.role;
+  const DB_DOWN = 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.';
+  // Pertanyaan prosedural ("bagaimana cara membatalkan pesanan") BUKAN
+  // pertanyaan hitung — jangan jawab dengan angka/daftar; biarkan expert
+  // system (yang punya panduan batal/daftar/login/dll.) yang menjawab.
+  // Pola ini sengaja sempit: "bagaimana status verifikasi teknisi" tidak
+  // mengandung kata kerja prosedural sehingga tetap dijawab dari DB.
+  const isProcedural =
+    /\b(cara|bagaimana|tutorial|panduan)\b/.test(norm) &&
+    /\b(batal|batalkan|cancel|daftar|mendaftar|login|masuk|pesan|bayar|klaim|ubah|ganti|reset|buat|dapat|hubungi|menjadi|jadi)\b/.test(norm);
+  if (isProcedural) return null;
+  const stripped = norm
+    .replace(/[?!.]+$/g, '')
+    .replace(/\s+(saat\s+ini|sekarang)$/i, '')
+    .replace(/\s+yang\s+terdaftar$/i, '')
+    .replace(/\s+(di\s+)?bantuin$/i, '')
+    .trim();
+  const hasCountIntent = /\b(berapa|jumlah|total|hitung|daftar|list|semua|status|ada)\b/.test(norm);
+  // Kata benda umum hanya dijawab bila ada penanda jumlah ATAU pesannya
+  // memang hanya kata benda itu (mis. "pendapatan").
+  const countLike = (noun: string) => hasCountIntent || stripped === noun;
+
+  if (role === 'admin') {
+    // --- Cabang spesifik (tanpa penanda jumlah) ---
+    if (/teknisi\s+terbaik/.test(norm)) {
+      const top = await DataService.getAdminTopTechnicians();
+      if (top === null) return DB_DOWN;
+      if (top.length === 0) return 'Belum ada teknisi terverifikasi yang tercatat.';
+      return `🏆 **Teknisi Terbaik BANTUIN:**\n` + top.map((t, i) => `${i + 1}. **${t.name}** — ${t.ratingCount > 0 ? `⭐ ${t.ratingAvg.toFixed(1)} (${t.ratingCount} ulasan)` : 'belum ada ulasan'} — ${t.completedJobs} servis selesai`).join('\n');
+    }
+    if (/tingkat\s+kepuasan|kepuasan(\s+pelanggan)?/.test(norm)) {
+      const sat = await DataService.getAdminSatisfactionStats();
+      if (sat === null) return DB_DOWN;
+      if (sat.reviewCount === 0) return 'Belum ada ulasan pelanggan, sehingga tingkat kepuasan belum dapat dihitung.';
+      return `Tingkat Kepuasan Pelanggan: ${sat.satisfactionRate}% (rata-rata rating ${sat.avgRating.toFixed(1)} dari ${sat.reviewCount} ulasan)`;
+    }
+    if (/rata-rata\s+nilai\s+(pesanan|order|tiket)/.test(norm)) {
+      const finance = await DataService.getAdminFinancialAnalytics();
+      if (finance === null) return DB_DOWN;
+      if (finance.settledInvoiceCount === 0) return 'Belum ada invoice yang terbayar, sehingga rata-rata nilai pesanan belum dapat dihitung.';
+      return `Rata-rata Nilai Pesanan Terbayar: Rp ${Math.round(finance.totalRevenuePaid / finance.settledInvoiceCount).toLocaleString('id-ID')} (dari ${finance.settledInvoiceCount} invoice terbayar)`;
+    }
+    if (/pendapatan\s+per\s+kategori|kategori\s+terlaris/.test(norm)) {
+      const cats = await DataService.getAdminCategoryRevenue();
+      if (cats === null) return DB_DOWN;
+      if (cats.length === 0) return 'Belum ada kategori aktif yang tercatat.';
+      return `💰 **Pendapatan per Kategori:**\n` + cats.map((c, i) => `${i + 1}. **${c.name}**: ${c.orderCount} pesanan — Rp ${c.totalRevenue.toLocaleString('id-ID')}`).join('\n');
+    }
+    if (/status\s+verifikasi\s+teknisi|verifikasi\s+teknisi/.test(norm)) {
+      const verif = await DataService.getAdminTechnicianVerificationStats();
+      if (verif === null) return DB_DOWN;
+      return `📋 **Status Verifikasi Dokumen Teknisi:**\n- Terverifikasi: **${verif.verified} teknisi**\n- Menunggu Verifikasi: **${verif.pending} teknisi**\n- Ditolak: **${verif.rejected} teknisi**\n- Ditangguhkan: **${verif.suspended} teknisi**`;
+    }
+    if (/teknisi/.test(norm) && /terverifikasi/.test(norm) && !/belum|pending|menunggu/.test(norm)) {
+      const verif = await DataService.getAdminTechnicianVerificationStats();
+      if (verif === null) return DB_DOWN;
+      return `Total Teknisi Terverifikasi: ${verif.verified} teknisi`;
+    }
+    if (/teknisi/.test(norm) && /(pending|menunggu|belum\s+terverifikasi)/.test(norm)) {
+      const verif = await DataService.getAdminTechnicianVerificationStats();
+      if (verif === null) return DB_DOWN;
+      return `Teknisi Menunggu Verifikasi Dokumen: ${verif.pending} teknisi`;
+    }
+    // --- Perbaikan tertunda / pesanan hari ini / bulan ini ---
+    if (/(perbaikan|pesanan)\s+tertunda|tertunda/.test(norm) && /(pesanan|perbaikan|tugas)/.test(norm)) {
+      const overview = await DataService.getAdminOperationalOverview();
+      if (overview === null) return DB_DOWN;
+      const pending = overview.orders.submitted + overview.orders.assigned + overview.orders.scheduled +
+        overview.orders.inDiagnosis + overview.orders.estimated + overview.orders.customerApproved + overview.orders.inRepair;
+      return `Perbaikan Tertunda (belum selesai): **${pending} pesanan** — menunggu penugasan: ${overview.orders.submitted}, dalam pengerjaan: ${overview.orders.inRepair}`;
+    }
+    if (/pesanan/.test(norm) && /hari\s+ini/.test(norm)) {
+      const overview = await DataService.getAdminOperationalOverview();
+      if (overview === null) return DB_DOWN;
+      return `Pesanan Hari Ini: ${overview.orders.today} pesanan`;
+    }
+    if (/pesanan/.test(norm) && /bulan\s+ini/.test(norm)) {
+      const overview = await DataService.getAdminOperationalOverview();
+      if (overview === null) return DB_DOWN;
+      return `Pesanan Bulan Ini: ${overview.orders.thisMonth} pesanan`;
+    }
+    // --- Kata benda umum (butuh penanda jumlah) — peran spesifik dulu ---
+    if (/pelanggan|customer/.test(norm) && countLike('pelanggan')) {
+      const custData = await DataService.getAdminCustomerAnalytics();
+      if (custData === null) return DB_DOWN;
+      return `Total Pelanggan Terdaftar: ${custData.totalCustomers} akun`;
+    }
+    if (/teknisi/.test(norm) && countLike('teknisi')) {
+      const stats = await DataService.getAdminUserStats();
+      if (stats === null) return DB_DOWN;
+      return `Total Mitra Teknisi: ${stats.technicians.total}`;
+    }
+    if (/\badmin\b/.test(norm) && countLike('admin')) {
+      const stats = await DataService.getAdminUserStats();
+      if (stats === null) return DB_DOWN;
+      return `Total Admin: ${stats.admins.total}`;
+    }
+    if (/pengguna|\buser\b/.test(norm) && (countLike('pengguna') || countLike('user'))) {
+      const stats = await DataService.getAdminUserStats();
+      if (stats === null) return DB_DOWN;
+      return `Total Pengguna Terdaftar: ${stats.totalUsers}`;
+    }
+    if (/pendapatan/.test(norm) && countLike('pendapatan')) {
+      const finance = await DataService.getAdminFinancialAnalytics();
+      if (finance === null) return DB_DOWN;
+      return `Total Pendapatan Terkonfirmasi: Rp ${finance.totalRevenuePaid.toLocaleString('id-ID')}`;
+    }
+    if (/transaksi/.test(norm) && countLike('transaksi')) {
+      const finance = await DataService.getAdminFinancialAnalytics();
+      if (finance === null) return DB_DOWN;
+      return `Total Transaksi (invoice terbayar): ${finance.settledInvoiceCount} transaksi — Rp ${finance.totalRevenuePaid.toLocaleString('id-ID')}`;
+    }
+    if (/(pesanan|order)/.test(norm) && (countLike('pesanan') || countLike('order'))) {
+      const overview = await DataService.getAdminOperationalOverview();
+      if (overview === null) return DB_DOWN;
+      return `Total Seluruh Pesanan: ${overview.orders.total} pesanan`;
+    }
+    return null;
+  }
+
+  if (role === 'customer' && userContext.userId) {
+    if (/invoice|tagihan/.test(norm)) {
+      const invoices = await DataService.getCustomerInvoices(userContext.userId);
+      if (invoices === null) return DB_DOWN;
+      const unpaid = invoices.filter((i) => i.status === 'unpaid').length;
+      return `Anda memiliki ${invoices.length} invoice (${unpaid} belum lunas).` +
+        (invoices.length > 0 ? `\n` + invoices.slice(0, 5).map((i) => `- ${i.invoiceNumber} (${i.orderCode}): ${i.status}`).join('\n') : '');
+    }
+    if (/pesanan|order/.test(norm)) {
+      const repairs = await DataService.getCustomerRepairs(userContext.userId, { limit: 5 });
+      if (repairs === null) return DB_DOWN;
+      if (repairs.length === 0) return 'Anda belum memiliki pesanan perbaikan.';
+      return `Pesanan Anda (${repairs.length} terbaru):\n` + repairs.map((r) => `- #${r.orderCode}: ${r.device} — ${r.status}`).join('\n');
+    }
+    return null;
+  }
+
+  if (role === 'technician' && userContext.userId) {
+    if (/tugas|pesanan|order/.test(norm)) {
+      const tasks = await DataService.getTechnicianAssignedTasks(userContext.userId, { limit: 5 });
+      if (tasks === null) return DB_DOWN;
+      if (tasks.length === 0) return 'Anda belum memiliki tugas perbaikan.';
+      return `Tugas Anda (${tasks.length} terbaru):\n` + tasks.map((t) => `- #${t.orderCode}: ${t.device} (${t.customerName}) — ${t.assignmentStatus}`).join('\n');
+    }
+    return null;
+  }
+
+  return null;
+}
 
 // ============================================================================
 // S9e/F16 — Serialisasi pemrosesan per sesi (in-process).
@@ -865,7 +1091,16 @@ async function processChatMessageInternal(params: {
   }
 
   // 2. PEMAHAMAN MAKSUD (NLU) & EKSTRAKSI ENTITAS
-  const understanding = classifyUserIntent(userMessage);
+  // E4: kegagalan di sini tidak boleh membunuh jawaban deterministik —
+  // classifyUserIntent adalah regex sinkron (risiko lempar minimal), tapi
+  // bungkus ini murah. Default aman: intent netral tanpa entitas.
+  let understanding: ReturnType<typeof classifyUserIntent>;
+  try {
+    understanding = classifyUserIntent(userMessage);
+  } catch (nluErr) {
+    console.warn('[Chatbot Engine] classifyUserIntent gagal (pakai default netral):', nluErr);
+    understanding = { intent: 'AMBIGUOUS_QUERY', confidence: 0, normalizedMessage: userMessage, entities: { symptoms: [], isAmbiguous: true }, requiresDatabase: false, targetDomain: 'general' } as ReturnType<typeof classifyUserIntent>;
+  }
 
   // 3. KELOLA MEMORI SESI & RESOLUSI ENTITAS PERCAKAPAN
   // S9a/F13 — riwayat dibatasi 20 pesan terakhir (jendela LLM); riwayat
@@ -920,7 +1155,16 @@ async function processChatMessageInternal(params: {
   }
 
   // 4. TEMU BALIK PENGETAHUAN RESMI (RAG CONTEXT RETRIEVAL)
-  const ragContext = await getRAGContextForQuery(userMessage, userContext.role);
+  // E4: getRAGContextForQuery sudah punya try/catch internal + fallback
+  // statis, tapi bungkus luar ini menjamin lemparan apa pun tidak pernah
+  // membunuh jawaban deterministik di bawah. Default aman: konteks kosong.
+  let ragContext: Awaited<ReturnType<typeof getRAGContextForQuery>>;
+  try {
+    ragContext = await getRAGContextForQuery(userMessage, userContext.role);
+  } catch (ragErr) {
+    console.warn('[Chatbot Engine] getRAGContextForQuery gagal (lanjut tanpa konteks RAG):', ragErr);
+    ragContext = { formattedContext: '' } as Awaited<ReturnType<typeof getRAGContextForQuery>>;
+  }
 
   // 5. PENGAMBILAN DATA DATABASE AKTUAL SESUAI PERAN & INTENT PENGGUNA
   let dbContextSummary = '';
@@ -1378,6 +1622,9 @@ ${orderDetail.invoice ? `- **Status Tagihan:** Rp ${orderDetail.invoice.totalAmo
 
     // Profil & Riwayat Kinerja Teknisi
     else if (/siapa\s+nama\s+saya|profil\s+saya/i.test(norm)) {
+      // E6: hanya `metrics` yang dicek null di bawah — `profile` null
+      // (teknisi tanpa baris profil) sebelumnya melempar TypeError di
+      // `.toFixed(2)` / `.join(...)` dan membuang jawaban ke F18.
       const [profile, metrics] = await Promise.all([
         DataService.getTechnicianProfile(techId),
         DataService.getTechnicianPerformanceMetrics(techId),
@@ -1388,11 +1635,11 @@ ${orderDetail.invoice ? `- **Status Tagihan:** Rp ${orderDetail.invoice.totalAmo
       } else {
         directReply = `👨‍🔧 **Ringkasan Profil & Aktivitas Kinerja Rekan Teknisi:**
 - **Nama Lengkap:** ${profile?.fullName || userContext.name}
-- **Email:** ${profile?.email}
-- **Nomor WhatsApp:** ${profile?.phoneNumber}
-- **Rating Rata-Rata:** ⭐ ${profile?.ratingAvg.toFixed(2)} (${profile?.ratingCount} ulasan)
-- **Pengalaman:** ${profile?.experienceYears} Tahun
-- **Keahlian:** ${profile?.specializations.join(', ') || 'Elektronik Rumah Tangga'}
+- **Email:** ${profile?.email || '-'}
+- **Nomor WhatsApp:** ${profile?.phoneNumber || '-'}
+- **Rating Rata-Rata:** ⭐ ${profile?.ratingAvg?.toFixed(2) ?? '-'} (${profile?.ratingCount ?? 0} ulasan)
+- **Pengalaman:** ${profile?.experienceYears ?? '-'} Tahun
+- **Keahlian:** ${profile?.specializations?.join(', ') || 'Elektronik Rumah Tangga'}
 - **Total Pekerjaan Selesai:** **${metrics.stats.completed} pesanan**
 - **Tugas Aktif Saat Ini:** **${metrics.pendingTasksCount} tugas**
 - **Rata-rata Waktu Penyelesaian:** ${metrics.averageCompletionHours}`;
@@ -1568,22 +1815,38 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
         : 'Tidak dapat menemukan data pengguna Anda.';
     }
     // 0. Metrik tunggal yang lugas (jawab hanya angka yang ditanya)
-    const singleMetric = norm.replace(/[?!.]+$/g, '').trim();
-    if (/^(berapa\s+)?total\s+pendapatan$/.test(singleMetric) || singleMetric === 'pendapatan') {
+    // E1: normalisasi akhiran bahasa alami — "berapa pengguna bantuin",
+    // "total pesanan di bantuin", "jumlah pengguna yang terdaftar",
+    // "berapa pengguna saat ini" kini dipangkas ke bentuk kanonis sebelum
+    // dicocokkan, dan pola di bawah menerima "berapa <kata benda>" tanpa
+    // wajib "total/jumlah" (sebelumnya pertanyaan-pertanyaan itu lolos
+    // dari semua handler dan jatuh ke LLM).
+    const singleMetric = norm
+      .replace(/[?!.]+$/g, '')
+      .replace(/\s+(saat\s+ini|sekarang)$/i, '')
+      .replace(/\s+yang\s+terdaftar$/i, '')
+      .replace(/\s+(di\s+)?bantuin$/i, '')
+      .trim();
+    if (/^(berapa\s+)?(total\s+|jumlah\s+)?pendapatan$/.test(singleMetric) || singleMetric === 'pendapatan') {
       const finance = await DataService.getAdminFinancialAnalytics();
       directReply = finance === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : `Total Pendapatan Terkonfirmasi: Rp ${finance.totalRevenuePaid.toLocaleString('id-ID')}`;
-    } else if (/^(berapa\s+)?total\s+pengguna$/.test(singleMetric) || /^(berapa\s+)?jumlah\s+pengguna$/.test(singleMetric)) {
+    } else if (/^(berapa\s+)?(total\s+|jumlah\s+)?pengguna$/.test(singleMetric)) {
       const stats = await DataService.getAdminUserStats();
       directReply = stats === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : `Total Pengguna Terdaftar: ${stats.totalUsers}`;
-    } else if (/^(berapa\s+)?total\s+pesanan$/.test(singleMetric) || /^(berapa\s+)?jumlah\s+pesanan$/.test(singleMetric)) {
+    } else if (/^(berapa\s+)?(total\s+|jumlah\s+)?(pesanan|order)$/.test(singleMetric)) {
       const overview = await DataService.getAdminOperationalOverview();
       directReply = overview === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : `Total Seluruh Pesanan: ${overview.orders.total} pesanan`;
-    } else if (/^(berapa\s+)?total\s+(customer|pelanggan)$/.test(singleMetric) || /^(berapa\s+)?jumlah\s+(customer|pelanggan)$/.test(singleMetric)) {
+    } else if (/^(berapa\s+)?(total\s+|jumlah\s+)?(customer|pelanggan)$/.test(singleMetric)) {
       const custData = await DataService.getAdminCustomerAnalytics();
       directReply = custData === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : `Total Pelanggan Terdaftar: ${custData.totalCustomers} akun`;
-    } else if (/^(berapa\s+)?total\s+teknisi$/.test(singleMetric) || /^(berapa\s+)?jumlah\s+teknisi$/.test(singleMetric)) {
+    } else if (/^(berapa\s+)?(total\s+|jumlah\s+)?teknisi$/.test(singleMetric)) {
       const stats = await DataService.getAdminUserStats();
       directReply = stats === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : `Total Mitra Teknisi: ${stats.technicians.total}`;
+    } else if (/^(berapa\s+)?(total\s+|jumlah\s+)?admin$/.test(singleMetric)) {
+      // E1: cabang admin — sebelumnya "berapa admin" tidak punya handler
+      // sama sekali (jatuh ke LLM / sapaan generik saat offline).
+      const stats = await DataService.getAdminUserStats();
+      directReply = stats === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : `Total Admin: ${stats.admins.total}`;
     } else if (/^(berapa\s+)?(total\s+|jumlah\s+)?pengguna\s+aktif$/.test(singleMetric)) {
       const stats = await DataService.getAdminUserStats();
       directReply = stats === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : `Total Pengguna Aktif: ${stats.customers.active + stats.technicians.active + stats.admins.active}`;
@@ -1601,25 +1864,25 @@ ${t.diagnosis ? `- **Catatan Diagnosis:** ${t.diagnosis.damageDetails}\n- **Esti
     } else if (/^(berapa\s+)?(total\s+|jumlah\s+)?teknisi\s+(pending|menunggu\s+verifikasi|belum\s+terverifikasi)$/.test(singleMetric)) {
       const verif = await DataService.getAdminTechnicianVerificationStats();
       directReply = verif === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : `Teknisi Menunggu Verifikasi Dokumen: ${verif.pending} teknisi`;
-    } else if (/^(status\s+)?verifikasi\s+teknisi$/.test(singleMetric)) {
+    } else if (/^(berapa\s+)?(status\s+)?verifikasi\s+teknisi$/.test(singleMetric)) {
       const verif = await DataService.getAdminTechnicianVerificationStats();
       directReply = verif === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : `📋 **Status Verifikasi Dokumen Teknisi:**\n- Terverifikasi: **${verif.verified} teknisi**\n- Menunggu Verifikasi: **${verif.pending} teknisi**\n- Ditolak: **${verif.rejected} teknisi**\n- Ditangguhkan: **${verif.suspended} teknisi**`;
-    } else if (/^(tingkat\s+)?kepuasan(\s+pelanggan)?$/.test(singleMetric)) {
+    } else if (/^(berapa\s+)?(tingkat\s+)?kepuasan(\s+pelanggan)?$/.test(singleMetric)) {
       // DASH-2 — angka yang SAMA dengan kartu kepuasan di dasbor admin
       // (rata-rata rating ulasan terbit / 5).
       const sat = await DataService.getAdminSatisfactionStats();
       directReply = sat === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : sat.reviewCount === 0 ? 'Belum ada ulasan pelanggan, sehingga tingkat kepuasan belum dapat dihitung.' : `Tingkat Kepuasan Pelanggan: ${sat.satisfactionRate}% (rata-rata rating ${sat.avgRating.toFixed(1)} dari ${sat.reviewCount} ulasan)`;
-    } else if (/^rata-rata\s+nilai\s+(pesanan|order|tiket)$/.test(singleMetric)) {
+    } else if (/^(berapa\s+)?rata-rata\s+nilai\s+(pesanan|order|tiket)$/.test(singleMetric)) {
       // DASH-2 — definisi yang SAMA dengan "Rerata Tiket" di dasbor
       // admin: pendapatan N31 dibagi jumlah invoice yang terbayar.
       const finance = await DataService.getAdminFinancialAnalytics();
       directReply = finance === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : finance.settledInvoiceCount === 0 ? 'Belum ada invoice yang terbayar, sehingga rata-rata nilai pesanan belum dapat dihitung.' : `Rata-rata Nilai Pesanan Terbayar: Rp ${Math.round(finance.totalRevenuePaid / finance.settledInvoiceCount).toLocaleString('id-ID')} (dari ${finance.settledInvoiceCount} invoice terbayar)`;
-    } else if (/^pendapatan\s+per\s+kategori$|^kategori\s+terlaris$/.test(singleMetric)) {
+    } else if (/^(berapa\s+)?pendapatan\s+per\s+kategori$|^(berapa\s+)?kategori\s+terlaris$/.test(singleMetric)) {
       // DASH-2 — angka yang SAMA dengan tab "Kategori Peralatan" di
       // dasbor admin (pesanan + pendapatan N31 per kategori).
       const cats = await DataService.getAdminCategoryRevenue();
       directReply = cats === null ? 'Data tidak dapat dibaca saat ini (database tidak dapat diakses). Coba lagi nanti.' : cats.length === 0 ? 'Belum ada kategori aktif yang tercatat.' : `💰 **Pendapatan per Kategori:**\n` + cats.map((c, i) => `${i + 1}. **${c.name}**: ${c.orderCount} pesanan — Rp ${c.totalRevenue.toLocaleString('id-ID')}`).join('\n');
-    } else if (/^teknisi\s+terbaik$/.test(singleMetric)) {
+    } else if (/^(berapa\s+)?teknisi\s+terbaik$/.test(singleMetric)) {
       // DASH-2 — daftar yang SAMA dengan panel "Teknisi Terbaik
       // BANTUIN" di dasbor admin (4 teratas berdasarkan rating).
       const top = await DataService.getAdminTopTechnicians();
@@ -2190,6 +2453,9 @@ ${inv.discountAmount > 0 ? `- **Diskon:** −Rp ${inv.discountAmount.toLocaleStr
   // Jika pemanggilan AI gagal, simpan alasannya agar fallback expert system
   // di bawah TIDAK menyamar sebagai jawaban AI (lihat bagian F).
   let aiGatewayError: string | null = null;
+  // E3: ringkasan hasil tool yang sudah diambil bila follow-up completion
+  // gagal — dirender di bagian F SEBELUM jaring pengaman offline (E2).
+  let fallbackToolSummary: string | null = null;
 
   if (process.env.FORCE_OFFLINE_AI !== 'true') {
     try {
@@ -2199,6 +2465,45 @@ ${inv.discountAmount > 0 ? `- **Diskon:** −Rp ${inv.discountAmount.toLocaleStr
       const hasFallbackKey = Boolean(snapshot.fallbackConfig && snapshot.fallbackConfig.apiKey && snapshot.fallbackConfig.apiKey.trim());
 
       if (hasActiveKey || hasFallbackKey) {
+        // E5 — Kuota harian AI dicek DI SINI (dipindah dari route
+        // message): jawaban deterministik di atas sudah kembali sebelum
+        // titik ini, sehingga kuota hanya membatasi pemanggilan AI —
+        // pertanyaan DB yang bisa dijawab dari database tidak pernah
+        // terblokir kuota. Mekanisme tidak berubah: batas dari
+        // system_settings (default 0 = tanpa batas), fail-open bila DB
+        // tidak terbaca. Pesan kuota habis dikembalikan sebagai balasan
+        // chat biasa (teks sama seperti pesan 429 route sebelumnya).
+        let quotaAllowed = true;
+        let quotaUsed = 0;
+        let quotaLimit = 0;
+        try {
+          const quota = await checkDailyAIQuota({
+            userId: userContext.userId || null,
+            sessionId: session.id,
+          });
+          quotaAllowed = quota.allowed;
+          quotaUsed = quota.used;
+          quotaLimit = quota.limit;
+        } catch (quotaErr) {
+          console.warn('[Chatbot Engine] Gagal memeriksa kuota harian AI (fail-open):', quotaErr);
+        }
+        if (!quotaAllowed) {
+          const quotaReply = `Kuota harian percakapan AI Anda sudah habis (${quotaUsed}/${quotaLimit} permintaan hari ini). Silakan coba lagi besok.`;
+          const finalReply = `${safetyAlertPrefix}${quotaReply}`;
+          const quotaMetadata: ChatMessageMetadata = {
+            model: 'bantuin-quota-limit',
+            responseTimeMs: Date.now() - startTime,
+            quickSuggestions: dynamicSuggestions,
+          };
+          const replyStored = await saveChatMessageTracked(session.id, 'assistant', finalReply, quotaMetadata, 0, quotaMetadata.responseTimeMs);
+          streamReplyTokens(finalReply, onToken);
+          return {
+            reply: finalReply,
+            metadata: quotaMetadata,
+            storedIn: combineStoredIn(userStored, replyStored),
+          };
+        }
+
         // Siapkan ringkasan konteks database aktual untuk pengguna ini
         if (userContext.role === 'customer' && userContext.userId) {
           const [profile, repairs, invoices] = await Promise.all([
@@ -2467,6 +2772,9 @@ ${inv.discountAmount > 0 ? `- **Diskon:** −Rp ${inv.discountAmount.toLocaleStr
         });
 
         let latestEvidence: any = null;
+        // E3: salinan hasil tool yang diproyeksikan — dipakai sebagai
+        // jawaban darurat bila follow-up completion di bawah gagal.
+        const toolSummaries: { name: string; content: string }[] = [];
 
         // Tangani pemanggilan function calling (Tool Execution) secara multi-turn
         if (aiResponse.toolCalls && aiResponse.toolCalls.length > 0) {
@@ -2490,22 +2798,37 @@ ${inv.discountAmount > 0 ? `- **Diskon:** −Rp ${inv.discountAmount.toLocaleStr
             // jawaban; PII dibuang kecuali diminta eksplisit) — jangan
             // pernah JSON-stringify utuh ke prompt.
             const projectedResult = projectToolResultForPrompt(tc.name, toolResult, norm);
+            const toolContent = evidence.isValid
+              ? (typeof projectedResult === 'string' ? projectedResult : JSON.stringify(projectedResult))
+              : JSON.stringify({ success: false, error: evidence.explanation, status: evidence.status });
+            // E3: simpan salinan untuk jawaban darurat (lihat di bawah).
+            toolSummaries.push({ name: tc.name, content: toolContent });
             universalMessages.push({
               role: 'tool',
               toolCallId: tc.id,
               name: tc.name,
-              content: evidence.isValid
-                ? (typeof projectedResult === 'string' ? projectedResult : JSON.stringify(projectedResult))
-                : JSON.stringify({ success: false, error: evidence.explanation, status: evidence.status }),
+              content: toolContent,
             });
           }
 
           // Request follow-up completion setelah tool dijalankan
-          aiResponse = await providerManager.generateChatCompletion({
-            messages: universalMessages,
-            sessionId: session.id,
-            userRole: userContext.role,
-          });
+          // E3: kegagalan di sini TIDAK BOLEH membuang data tool yang sudah
+          // diambil — sebelumnya lemparan ini jatuh ke catch bagian E dan
+          // seluruh hasil tool hilang (jawaban jadi sapaan generik offline
+          // padahal datanya sudah ada di tangan). Simpan ringkasannya untuk
+          // bagian F; aiResponse pertama dipertahankan sehingga alur di
+          // bawah jatuh ke fallback dengan tertib (N29).
+          try {
+            aiResponse = await providerManager.generateChatCompletion({
+              messages: universalMessages,
+              sessionId: session.id,
+              userRole: userContext.role,
+            });
+          } catch (followUpErr: any) {
+            aiGatewayError = followUpErr?.message || String(followUpErr);
+            console.warn('[Chatbot Engine] Follow-up completion gagal setelah tool berhasil — memakai ringkasan hasil tool:', aiGatewayError);
+            fallbackToolSummary = formatToolResultsForUser(toolSummaries);
+          }
         }
 
         let fullText = aiResponse.content || '';
@@ -2545,7 +2868,9 @@ ${inv.discountAmount > 0 ? `- **Diskon:** −Rp ${inv.discountAmount.toLocaleStr
         // di bawah (aiGatewayError terisi -> offlineNotice muncul); jangan
         // pernah mengembalikan balasan kosong ke pengguna.
         if (!cleanedText.trim()) {
-          aiGatewayError = 'Respons AI kosong';
+          // E3: pertahankan error follow-up bila sudah terisi (lebih
+          // informatif daripada 'Respons AI kosong').
+          if (!aiGatewayError) aiGatewayError = 'Respons AI kosong';
           console.warn('[Chatbot Engine] Respons AI kosong — memakai fallback expert system.');
         } else {
           const finalReply = `${safetyAlertPrefix}${cleanedText}`;
@@ -2617,6 +2942,26 @@ ${inv.discountAmount > 0 ? `- **Diskon:** −Rp ${inv.discountAmount.toLocaleStr
   // ==========================================================================
   // F. FALLBACK INTELLIGENT EXPERT SYSTEM (DIAGNOSIS & APP GUIDANCE)
   // ==========================================================================
+  // E2/E3 — Sebelum menyerah ke sapaan generik expert system, coba jawab
+  // dari database: (1) hasil tool yang sudah diambil sebelum LLM gagal
+  // (E3 — diprioritaskan karena paling spesifik), (2) jaring pengaman
+  // offline untuk pertanyaan hitung/statistik (E2). Keduanya hanya berjalan
+  // saat AI gagal (aiGatewayError terisi). Bila keduanya tidak menghasilkan
+  // apa-apa, perilaku lama berlaku (expert system).
+  let offlineDbReply: string | null = null;
+  if (aiGatewayError) {
+    if (fallbackToolSummary) {
+      offlineDbReply = fallbackToolSummary;
+    } else {
+      try {
+        offlineDbReply = await getOfflineDatabaseAnswer(userMessage, userContext);
+      } catch (offlineErr) {
+        console.warn('[Chatbot Engine] Jaring pengaman offline gagal (lanjut ke expert system):', offlineErr);
+        offlineDbReply = null;
+      }
+    }
+  }
+
   const fallback = getExpertSystemDiagnosis(
     userMessage,
     session.categorySlug || validation.detectedCategory,
@@ -2629,13 +2974,21 @@ ${inv.discountAmount > 0 ? `- **Diskon:** −Rp ${inv.discountAmount.toLocaleStr
   // F23: teks yang ditampilkan ke klien adalah pesan GENERIK — alasan mentah
   // (aiGatewayError) hanya dipakai sebagai penanda bahwa AI gagal dan hanya
   // tercatat di log server (lihat catch di atas); tidak pernah disisipkan
-  // ke balasan maupun metadata.
+  // ke balasan maupun metadata — KECUALI diagnosis admin (E7) di bawah.
   const offlineNotice = aiGatewayError
     ? `⚠️ *Mode offline:* ${AI_UNAVAILABLE_MESSAGE}. Jawaban berikut berasal dari sistem pakar BANTUIN, bukan dari AI.\n\n`
     : '';
-  const finalReply = `${safetyAlertPrefix}${offlineNotice}${fallback.reply}`;
+  // E7: diagnosis singkat HANYA untuk admin — aiGatewayError berasal dari
+  // pesan tersanitasi manager (nama provider + status HTTP + pesan generik
+  // seperti "Saldo Habis"; kunci/endpoint tidak pernah ada di dalamnya —
+  // lihat normalizeError di adapter), dibatasi 300 karakter. Peran lain
+  // tetap hanya melihat pesan generik.
+  const adminDiagnosis = aiGatewayError && userContext.role === 'admin'
+    ? `🔧 _Diagnosis admin: ${String(aiGatewayError).slice(0, 300)}_\n\n`
+    : '';
+  const finalReply = `${safetyAlertPrefix}${offlineNotice}${adminDiagnosis}${offlineDbReply || fallback.reply}`;
   const metadata: ChatMessageMetadata = {
-    model: 'bantuin-expert-system-v1',
+    model: offlineDbReply ? 'bantuin-offline-db-v1' : 'bantuin-expert-system-v1',
     responseTimeMs: Date.now() - startTime,
     diagnosisCard: fallback.card || null,
     quickSuggestions: fallback.quickSuggestions,
