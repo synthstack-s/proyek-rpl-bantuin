@@ -49,10 +49,17 @@ export function validateDatabaseEvidence(
   const rawData = toolOutput.data;
 
   // 2. Jika data kosong (null, undefined, array kosong)
+  // F14: hasil kueri governed yang kosong berbentuk OBJEK
+  // ({ rows: [], isEmpty: true, ... }) — bukan array dan bukan null —
+  // sehingga sebelumnya lolos ke bawah dan dilabeli SUFFICIENT_EVIDENCE
+  // (1 "rekaman"). isEmpty adalah penanda resmi himpunan kosong (B12 di
+  // data-service: 0 baris, atau agregat bernilai null). COUNT = 0 bukan
+  // isEmpty (nilainya 0, bukan null) sehingga tetap SUFFICIENT.
   if (
     rawData === null ||
     rawData === undefined ||
-    (Array.isArray(rawData) && rawData.length === 0)
+    (Array.isArray(rawData) && rawData.length === 0) ||
+    (typeof rawData === 'object' && rawData.isEmpty === true)
   ) {
     return {
       status: 'DATA_UNAVAILABLE',
