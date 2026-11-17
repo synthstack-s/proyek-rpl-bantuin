@@ -21,8 +21,9 @@ import { ChatUserContext } from '@/lib/chatbot/types';
  *   Batas 30/menit — sama seperti perilaku sebelumnya untuk klien
  *   legitimate. Identitas tidak bisa dipalsukan semudah header (userId
  *   dari sesi login, sessionUuid dari sesi server), dan guest yang
- *   membuat sesi baru terus-menerus tetap tertahan lapisan 1 + kuota
- *   harian (S5/F8).
+ *   membuat sesi baru terus-menerus tetap tertahan lapisan 1
+ *   (kuota harian S5/F8 saat ini dinonaktifkan — batas 0 = tanpa batas,
+ *   keputusan pemilik 2026-11-17; lihat repository.ts).
  */
 const CHAT_IP_BACKSTOP_PER_MINUTE = 120;
 const CHAT_IDENTITY_PER_MINUTE = 30;
@@ -152,7 +153,9 @@ export async function POST(req: NextRequest) {
     // 3c. Kuota harian AI (S5/F8) — choke point SEBELUM provider dipanggil.
     // Dihitung dari ai_usage_logs hari ini (per userId login / per sesi
     // guest); batas dibaca dari system_settings.ai_daily_free_quota
-    // (default 10). Bila DB tidak terbaca, checkDailyAIQuota fail-open
+    // (default 0 = TANPA BATAS — kuota dinonaktifkan atas keputusan
+    // pemilik 2026-11-17; menghidupkan lagi cukup set setting ke angka
+    // positif). Bila DB tidak terbaca, checkDailyAIQuota fail-open
     // dengan peringatan (lihat repository.ts). Berlaku juga untuk streaming.
     const quota = await checkDailyAIQuota({
       userId: userContext.userId || null,
