@@ -27,85 +27,11 @@ import {
   Filter,
 } from 'lucide-react';
 import { StatCard } from './StatCard';
-
-interface TimeDataPoint {
-  date: string;
-  rawDate: string;
-  revenue: number;
-  orders: number;
-  completed: number;
-}
-
-interface CategoryStat {
-  id: number;
-  name: string;
-  slug: string;
-  orderCount: number;
-  percentage: number;
-  totalRevenue: number;
-}
-
-interface PaymentStat {
-  method: string;
-  label: string;
-  count: number;
-  amount: number;
-  percentage: number;
-}
-
-interface RecentOrder {
-  id: number;
-  orderCode: string;
-  customerName: string;
-  categoryName: string;
-  deviceBrand: string | null;
-  deviceModel: string | null;
-  currentStatus: string;
-  totalAmount: number;
-  createdAt: string;
-  technicianName: string | null;
-}
-
-interface TopTechnician {
-  id: number;
-  name: string;
-  ratingAvg: number;
-  ratingCount: number;
-  completedJobs: number;
-  isAvailable: boolean;
-}
-
-interface DashboardData {
-  timeRange: string;
-  overview: {
-    totalRevenue: number;
-    totalOrders: number;
-    openOrders: number;
-    inProgressOrders: number;
-    completedOrders: number;
-    cancelledOrders: number;
-    complainedOrders: number;
-    completionRate: number;
-    totalCustomers: number;
-    verifiedTechnicians: number;
-    pendingTechnicians: number;
-    avgOrderValue: number;
-    satisfactionRate: number;
-  };
-  timeline: TimeDataPoint[];
-  statusBreakdown: {
-    submitted: number;
-    inProgress: number;
-    completed: number;
-    cancelled: number;
-    complained: number;
-  };
-  categoryBreakdown: CategoryStat[];
-  paymentBreakdown: PaymentStat[];
-  recentOrders: RecentOrder[];
-  topTechnicians: TopTechnician[];
-  serverTime: string;
-}
+// Bentuk data dasbor dipakai BERSAMA dengan sumber data server
+// (src/lib/admin-dashboard.ts) — satu definisi, tidak ada salinan ketiga
+// yang bisa berbeda diam-diam. Import ini hanya tipe (dihapus saat
+// kompilasi), jadi tidak menarik dependensi server ke bundle klien.
+import type { AdminDashboardData as DashboardData } from '@/lib/admin-dashboard';
 
 interface AdminDashboardInteractiveProps {
   initialData: DashboardData;
@@ -116,6 +42,9 @@ export function AdminDashboardInteractive({ initialData }: AdminDashboardInterac
   const [timeRange, setTimeRange] = useState<'7d' | '30d' | 'month' | 'year'>('30d');
   const [chartMetric, setChartMetric] = useState<'revenue' | 'orders'>('revenue');
   const [isRefreshing, setIsRefreshing] = useState(false);
+  // Pesan error pemuatan ulang — ditampilkan sebagai spanduk, sementara
+  // data terakhir tetap tampil (diberi label jelas bahwa itu data lama).
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<string>('');
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState<'status' | 'category' | 'payment'>('status');
@@ -131,7 +60,9 @@ export function AdminDashboardInteractive({ initialData }: AdminDashboardInterac
     );
   }, []);
 
-  // Fetch real data when timeRange changes
+  // Fetch real data when timeRange changes. Bila gagal (API 500 atau
+  // jaringan), data terakhir tetap tampil DENGAN spanduk error — jangan
+  // pernah diam-diam menampilkan data basi seolah-olah baru.
   const fetchDashboardData = async (selectedRange: string) => {
     setIsRefreshing(true);
     try {
@@ -139,12 +70,18 @@ export function AdminDashboardInteractive({ initialData }: AdminDashboardInterac
       const json = await res.json();
       if (json.success && json.data) {
         setData(json.data);
+        setRefreshError(null);
         setLastRefreshedAt(
           new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        );
+      } else {
+        setRefreshError(
+          json.message || 'Gagal memuat ulang data dashboard — menampilkan data terakhir.'
         );
       }
     } catch (err) {
       console.error('Failed to fetch dashboard data:', err);
+      setRefreshError('Gagal memuat ulang data dashboard — menampilkan data terakhir.');
     } finally {
       setIsRefreshing(false);
     }
@@ -278,18 +215,25 @@ export function AdminDashboardInteractive({ initialData }: AdminDashboardInterac
     }
   };
 
-  const totalLeads =
-    data.overview.openOrders +
-    data.overview.inProgressOrders +
-    data.overview.completedOrders +
-    data.overview.cancelledOrders;
+  // Penyebut = SELURUH tiket (termasuk draf & komplain) agar label
+  // "Total Tiket" benar-benar total. Bila belum ada tiket, semua
+  // persentase 0 — bukan 25/35/40 seperti sebelumnya.
+  const totalTickets = data.overview.totalOrders;
 
-  const openPercent = totalLeads > 0 ? Math.round((data.overview.openOrders / totalLeads) * 100) : 25;
-  const inProgPercent = totalLeads > 0 ? Math.round((data.overview.inProgressOrders / totalLeads) * 100) : 35;
-  const compPercent = totalLeads > 0 ? Math.round((data.overview.completedOrders / totalLeads) * 100) : 40;
+  const openPercent = totalTickets > 0 ? Math.round((data.overview.openOrders / totalTickets) * 100) : 0;
+  const inProgPercent = totalTickets > 0 ? Math.round((data.overview.inProgressOrders / totalTickets) * 100) : 0;
+  const compPercent = totalTickets > 0 ? Math.round((data.overview.completedOrders / totalTickets) * 100) : 0;
+
+  const loadError = data.error || refreshError;
 
   return (
     <div className="space-y-6 text-[#FFFBF4] transition-all duration-300">
+      {loadError && (
+        <div className="flex items-start gap-2.5 p-4 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-200">
+          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>{loadError}</span>
+        </div>
+      )}
       {/* 1. Header Toolbar with Live Status & Time-Range Selector */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 p-5 rounded-3xl bg-[#181913]/80 backdrop-blur-xl border border-[#D8CFBC]/15 shadow-sm">
         <div>
@@ -358,9 +302,9 @@ export function AdminDashboardInteractive({ initialData }: AdminDashboardInterac
           title="Total Pendapatan Terbayar"
           value={formatShortRupiah(data.overview.totalRevenue)}
           subtitle={`${data.overview.completedOrders} order selesai`}
-          trendValue="+14.2%"
-          trendLabel="Akumulasi tagihan lunas di BANTUIN"
-          isPositive={true}
+          trendValue={data.overview.revenueGrowthPercent}
+          trendLabel="Pembayaran settlement dikurangi refund, vs bulan lalu"
+          isPositive={!data.overview.revenueGrowthPercent.startsWith('-')}
         />
 
         {/* Card 2: Total Active & Open Repairs */}
@@ -378,7 +322,7 @@ export function AdminDashboardInteractive({ initialData }: AdminDashboardInterac
           title="Pelanggan Terdaftar"
           value={data.overview.totalCustomers}
           subtitle={`Rerata Tiket: ${formatShortRupiah(data.overview.avgOrderValue)}`}
-          trendValue="+8.5%"
+          trendValue={`${data.overview.newCustomersThisMonth} baru bulan ini`}
           trendLabel="Pertumbuhan pengguna customer"
           isPositive={true}
         />
@@ -388,7 +332,11 @@ export function AdminDashboardInteractive({ initialData }: AdminDashboardInterac
           title="Teknisi Terverifikasi"
           value={data.overview.verifiedTechnicians}
           subtitle={`${data.overview.pendingTechnicians} antrean verifikasi`}
-          trendValue={`${data.overview.satisfactionRate}% puas`}
+          trendValue={
+            data.overview.reviewCount > 0
+              ? `${data.overview.satisfactionRate}% puas`
+              : 'Belum ada ulasan'
+          }
           trendLabel="Berdasarkan rating pelanggan"
           isPositive={true}
         />
@@ -676,7 +624,7 @@ export function AdminDashboardInteractive({ initialData }: AdminDashboardInterac
               <div className="space-y-2">
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-[#ABA291]">Kapasitas Pemenuhan Tiket</span>
-                  <span className="font-bold text-[#FFFBF4]">{totalLeads} Total Tiket</span>
+                  <span className="font-bold text-[#FFFBF4]">{totalTickets} Total Tiket</span>
                 </div>
 
                 <div className="h-3 w-full rounded-full bg-[#11120D] border border-[#565449]/30 overflow-hidden flex">
@@ -747,6 +695,11 @@ export function AdminDashboardInteractive({ initialData }: AdminDashboardInterac
           {/* TAB 2: KATEGORI PERALATAN */}
           {activeTab === 'category' && (
             <div className="space-y-4 animate-in fade-in duration-200">
+              {data.categoryBreakdown.length === 0 ? (
+                <div className="text-center py-8 text-xs text-[#ABA291]">
+                  Belum ada kategori aktif dengan pesanan.
+                </div>
+              ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {data.categoryBreakdown.map((cat) => (
                   <div
@@ -775,12 +728,18 @@ export function AdminDashboardInteractive({ initialData }: AdminDashboardInterac
                   </div>
                 ))}
               </div>
+              )}
             </div>
           )}
 
           {/* TAB 3: METODE PEMBAYARAN */}
           {activeTab === 'payment' && (
             <div className="space-y-4 animate-in fade-in duration-200">
+              {data.paymentBreakdown.length === 0 ? (
+                <div className="text-center py-8 text-xs text-[#ABA291]">
+                  Belum ada pembayaran settlement.
+                </div>
+              ) : (
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 {data.paymentBreakdown.map((p, idx) => (
                   <div
@@ -803,6 +762,7 @@ export function AdminDashboardInteractive({ initialData }: AdminDashboardInterac
                   </div>
                 ))}
               </div>
+              )}
             </div>
           )}
         </div>
@@ -839,10 +799,14 @@ export function AdminDashboardInteractive({ initialData }: AdminDashboardInterac
                       <div>
                         <span className="text-xs font-bold text-[#FFFBF4] block">{t.name}</span>
                         <div className="flex items-center gap-1.5 text-[11px] text-[#ABA291]">
-                          <span className="flex items-center gap-0.5 text-amber-400">
-                            <Star className="w-3 h-3 fill-amber-400" />
-                            <strong>{t.ratingAvg.toFixed(1)}</strong>
-                          </span>
+                          {t.ratingCount > 0 ? (
+                            <span className="flex items-center gap-0.5 text-amber-400">
+                              <Star className="w-3 h-3 fill-amber-400" />
+                              <strong>{t.ratingAvg.toFixed(1)}</strong>
+                            </span>
+                          ) : (
+                            <span className="text-[#706E61]">Belum ada ulasan</span>
+                          )}
                           <span>• {t.completedJobs} servis selesai</span>
                         </div>
                       </div>
