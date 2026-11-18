@@ -181,9 +181,10 @@ Tes chatbot/AI sengaja tidak dijalankan di CI karena membutuhkan API key provide
 
 ## Video Presentasi
 
-- Video Progres 1 — PRD & Konsep Aplikasi (3–5 menit): *(tautan menyusul)*
-- Video Progres 2 — Pemodelan UML & UI/UX (5–7 menit): *(tautan menyusul)*
-- Video Final — Live Demo Aplikasi Web & Sistem Utuh (8–12 menit): *(tautan menyusul)*
+- Video Progres 1 — PRD & Konsep Aplikasi (3–5 menit)
+- Video Progres 2 — Pemodelan UML & UI/UX (5–7 menit)
+- Video Final — Live Demo Aplikasi Web & Sistem Utuh (8–12 menit)
+Tautan Video Pressentaasi dan Demonstrasi : https://youtu.be/wmnN5APbazY?si=ZMz2zHKjqHfhU3Sb
 
 ## Dokumentasi Tambahan
 
